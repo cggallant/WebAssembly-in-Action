@@ -1,0 +1,4 @@
+// Pass 0 for a result of 5
+// Pass a non-zero number for a result of 10
+const wasmInstance = new WebAssembly.Instance(wasmModule, {});
+console.log(wasmInstance.exports.Test(4));
