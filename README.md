@@ -25,7 +25,9 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
 - "[WebAssembly threads in Firefox](https://cggallant.blogspot.com/2020/07/webassembly-threads-in-firefox.html)" 
   
-  <img src="https://1.bp.blogspot.com/-20aC9uX8oPc/XyAh6PICkBI/AAAAAAAALOI/C4SMdZl69YA4pqkfTcaYRwvYfU0l_MA6ACLcBGAsYHQ/w400-h174/9%2B-%2BScreen%2Bshot%2Bof%2Bfinal%2Bproduct%2Bwith%2Bimages%2Bshown.png" width="350" align="right" /> In the book I show you how to use WebAssembly threads but, at the time of the book's writing, they were only available in Firefox behind a flag. It's no longer behind a flag but Firefox has added a requirement: To enable the SharedArrayBuffer, you need to include two response headers. At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(August 2020)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
+  <img src="https://1.bp.blogspot.com/-20aC9uX8oPc/XyAh6PICkBI/AAAAAAAALOI/C4SMdZl69YA4pqkfTcaYRwvYfU0l_MA6ACLcBGAsYHQ/w400-h174/9%2B-%2BScreen%2Bshot%2Bof%2Bfinal%2Bproduct%2Bwith%2Bimages%2Bshown.png" width="350" align="right" /> In the book I show you how to use WebAssembly threads but, at the time of the book's writing, they were only available in Firefox behind a flag. It's no longer behind a flag but Firefox has added a requirement: To enable the SharedArrayBuffer, you need to include two response headers.
+  
+  At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(August 2020)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
 
 
 # Supporting this book

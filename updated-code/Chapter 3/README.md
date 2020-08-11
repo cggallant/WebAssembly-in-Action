@@ -1,4 +1,4 @@
-The only change needed for this chapter's code was to modify the _side_module.html_ file's JavaScript to call _.Increment_ rather than _.\_Increment_.
+The only change needed for this chapter's code was to modify the _side_module.html_ (_3.6 side_module_ folder) file's JavaScript to call _.Increment_ rather than _.\_Increment_.
 
 The new code should be:
 
@@ -9,7 +9,7 @@ const value = result.instance.exports.Increment(17);
 
 ---
 
-To compile the code in the _updated-code_ folders requires _Emscripten 1.40.1_.
+To compile the code in the _updated-code_ folder requires _Emscripten 1.40.1_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 
