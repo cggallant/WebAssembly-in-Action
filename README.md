@@ -18,7 +18,7 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
 - "[Extending Python's Simple HTTP Server](https://cggallant.blogspot.com/2020/07/extending-pythons-simple-http-server.html)" 
   
-  <img src="https://upload.wikimedia.org/wikipedia/commons/c/c3/Python-logo-notext.svg" width="50" align="left" /> In the book, I used Python's Simple HTTP Server as a local web server because it was convenient due to the Emscripten toolkit including a copy of Python with its installation. At the time, I wasn't aware that you could extend Python's web server which would have made things a bit easier during your setup because you can include the WebAssembly Media Type in the file rather than having to edit one of Python's files.
+  <img src="https://upload.wikimedia.org/wikipedia/commons/c/c3/Python-logo-notext.svg" width="50" align="left" /> In the book, I used Python's Simple HTTP Server as a local web server because it was convenient due to the Emscripten toolkit's need of it for its installation. At the time, I wasn't aware that you could extend Python's web server which would have made things a bit easier during your setup because you can include the WebAssembly Media Type in the file rather than having to edit one of Python's files.
   
   This article is also a precursor to my next article "WebAssembly threads in Firefox" because that article will need two response headers returned which isn't possible by using Python’s web server.
 
