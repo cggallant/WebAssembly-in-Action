@@ -14,7 +14,7 @@
       };
 
       WebAssembly.instantiateStreaming(fetch("side_module.wasm"), importObject).then(result => {
-        const value = result.instance.exports._Increment(17);
+        const value = result.instance.exports.Increment(17);
         console.log(value.toString());
       });
     </script>
