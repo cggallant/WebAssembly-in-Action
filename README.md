@@ -4,9 +4,8 @@
 
 One of the tools used in the book is version _1.38.45_ of the _Emscripten toolkit_. Because the toolkit is constantly being improved, some of the items shown in the book need to be adjusted if you wish to use some of the more recent versions of the toolkit. In the coming days, I'll push up a new folder containing those modifications.
 
-<p></p>
-<p></p>
-<p></p>
+<p>&nbsp;</p>
+<p>&nbsp;</p>
   
 # Bonus content
 
@@ -50,7 +49,3 @@ Don't yet have your own copy of the book? You can buy it from many book sellers 
 If you'd like to discuss the book's text, you can submit issues via the liveBook: [https://livebook.manning.com/book/webassembly-in-action/about-this-book/](https://livebook.manning.com/book/webassembly-in-action/about-this-book)
 
 I'm also on twitter: [@Gerard_Gallant](https://twitter.com/Gerard_Gallant)
-
-
-
-
