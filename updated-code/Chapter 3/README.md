@@ -1,4 +1,4 @@
-The only change needed for this chapter's code was to modify the side_module.html file's JavaScript to call _.Increment_ rather than _.Increment_.
+The only change needed for this chapter's code was to modify the _side_module.html_ file's JavaScript to call _.Increment_ rather than _.\_Increment_.
 
 The new code should be:
 
