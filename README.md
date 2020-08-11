@@ -12,21 +12,22 @@ One of the tools used in the book is version _1.38.45_ of the _Emscripten toolki
 If you're interested, I’ve written several articles exploring WebAssembly use beyond what was taught in the book:
 
 - "[The import statement with an Emscripten-generated WebAssembly module in Vue.js](https://cggallant.blogspot.com/2020/01/the-import-statement-with-emscripten.html)"
-
-
-This article shows you how you can build your Emscripten-generated WebAssembly module for use with Vue.js. It then shows you two approaches that you can use to load the module into your application.
+  
+  <a href="https://commons.wikimedia.org/wiki/File:Vue.js_Logo_2.svg" target="_blank"><img src="https://upload.wikimedia.org/wikipedia/commons/thumb/9/95/Vue.js_Logo_2.svg/200px-Vue.js_Logo_2.svg.png" width="50" align="left" /></a> This article shows you how you can build your Emscripten-generated WebAssembly module for use with Vue.js. It then shows you two approaches that you can use to load the module into your application.
 
 
 - "[Extending Python's Simple HTTP Server](https://cggallant.blogspot.com/2020/07/extending-pythons-simple-http-server.html)" 
-
-In the book, I used Python's Simple HTTP Server as a local web server because it was convenient due to the Emscripten toolkit including a copy of Python with its installation. At the time, I wasn't aware that you could extend Python's web server which would have made things a bit easier during your setup because you can include the WebAssembly Media Type in the file rather than having to edit one of Python's files.
-
-This article is also a precursor to my next article "WebAssembly threads in Firefox" because that article will need two response headers returned which isn't possible by using Python’s web server.
+  
+  <img src="https://upload.wikimedia.org/wikipedia/commons/c/c3/Python-logo-notext.svg" width="50" align="left" /> In the book, I used Python's Simple HTTP Server as a local web server because it was convenient due to the Emscripten toolkit including a copy of Python with its installation. At the time, I wasn't aware that you could extend Python's web server which would have made things a bit easier during your setup because you can include the WebAssembly Media Type in the file rather than having to edit one of Python's files.
+  
+  This article is also a precursor to my next article "WebAssembly threads in Firefox" because that article will need two response headers returned which isn't possible by using Python’s web server.
 
 
 - "[WebAssembly threads in Firefox](https://cggallant.blogspot.com/2020/07/webassembly-threads-in-firefox.html)" 
-
-In the book I show you how to use WebAssembly threads but, at the time of the book's writing, they were only available in Firefox behind a flag. It's no longer behind a flag but Firefox has added a requirement: To enable the SharedArrayBuffer, you need to include two response headers. At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(August 2020)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
+  
+  <img src="https://1.bp.blogspot.com/-20aC9uX8oPc/XyAh6PICkBI/AAAAAAAALOI/C4SMdZl69YA4pqkfTcaYRwvYfU0l_MA6ACLcBGAsYHQ/w400-h174/9%2B-%2BScreen%2Bshot%2Bof%2Bfinal%2Bproduct%2Bwith%2Bimages%2Bshown.png" width="400" />
+  
+  In the book I show you how to use WebAssembly threads but, at the time of the book's writing, they were only available in Firefox behind a flag. It's no longer behind a flag but Firefox has added a requirement: To enable the SharedArrayBuffer, you need to include two response headers. At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(August 2020)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
 
 
 # Supporting this book

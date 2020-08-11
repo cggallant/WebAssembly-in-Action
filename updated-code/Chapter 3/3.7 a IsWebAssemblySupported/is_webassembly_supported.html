@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+  </head>
+  <body>
+    View the browser's developer console (F12) to see if WebAssembly is supported.
+
+    <script>
+      // Helper function to test if WebAssembly is supported
+      function isWebAssemblySupported() {
+        // Just in case a CompileError or LinkError is thrown
+        try {
+          // If the WebAssembly object exists then...
+          if (typeof WebAssembly === "object") {
+            // Create a minimal module with just the magic number (0x00 0x61 0x73 0x6D which is '\0asm') 
+            // and version (0x01 0x00 0x00 0x00 which is 1). If the result is a WebAssembly.Module object (the
+            // binary data compiled) then...
+            const module = new WebAssembly.Module(new Uint8Array([0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00]));
+            if (module instanceof WebAssembly.Module) {
+              // Verify that we can instantiate the module. If we have an instance then tell the caller that 
+              // WebAssembly is supported
+              const moduleInstance = new WebAssembly.Instance(module);
+              return (moduleInstance instanceof WebAssembly.Instance);
+            }
+          }
+        } catch(error) {}
+
+        // If WebAssembly was supported we would have returned true above
+        return false;
+      }
+
+      console.log((isWebAssemblySupported() ? "WebAssembly is supported": "WebAssembly is not supported"));
+    </script>
+  </body>
+</html>
