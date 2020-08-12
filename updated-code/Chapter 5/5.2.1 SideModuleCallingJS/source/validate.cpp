@@ -1,8 +1,3 @@
-#include <cstdlib>
-#include <cstdint> // for the uint8_t data type
-#include <cstring>
-
-// If this is an Emscripten (WebAssembly) build then...
 #ifdef __EMSCRIPTEN__
   #include <emscripten.h>
 #endif
@@ -11,33 +6,17 @@
 extern "C" { // So that the C++ compiler does not rename our function names
 #endif
 
-  // Allocate the space needed for the buffer. Although a char is 1 byte, the
-  // memory allocated may be used for more than just strings and using a char 
-  // data type may be confusing to some. I've switched the data type to uint8_t
-  // as a result.
-#ifdef __EMSCRIPTEN__
-  EMSCRIPTEN_KEEPALIVE
-#endif
-  uint8_t* create_buffer(int size_needed)
-  {
-    return new uint8_t[size_needed];
-  }
+#include "side_module_system_functions.h"
 
-  // Release the memory
-#ifdef __EMSCRIPTEN__
-  EMSCRIPTEN_KEEPALIVE
-#endif
-  void free_buffer(const char* pointer)
-  {
-    delete pointer;
-  }
+  // Define the function signature of the method that will be created in the JavaScript
+  extern void UpdateHostAboutError(const char* error_message);
 
-  int ValidateValueProvided(const char* value, const char* error_message, char* return_error_message)
+  int ValidateValueProvided(const char* value, const char* error_message)
   {
     // If the string is null or the first character is the null terminator then the string is empty
     if ((value == NULL) || (value[0] == '\0'))
     {
-      strcpy(return_error_message, error_message);
+      UpdateHostAboutError(error_message);
       return 0;
     }
 
@@ -48,10 +27,10 @@ extern "C" { // So that the C++ compiler does not rename our function names
 #ifdef __EMSCRIPTEN__
   EMSCRIPTEN_KEEPALIVE
 #endif
-  int ValidateName(char* name, int maximum_length, char* return_error_message)
+  int ValidateName(char* name, int maximum_length)
   {
     // Validation 1: A name must be provided
-    if (ValidateValueProvided(name, "A Product Name must be provided.", return_error_message) == 0)
+    if (ValidateValueProvided(name, "A Product Name must be provided.") == 0)
     {
       return 0;
     }
@@ -59,7 +38,7 @@ extern "C" { // So that the C++ compiler does not rename our function names
     // Validation 2: A name must not exceed the specified length
     if (strlen(name) > maximum_length)
     {
-      strcpy(return_error_message, "The Product Name is too long.");
+      UpdateHostAboutError("The Product Name is too long.");
       return 0;
     }
 
@@ -88,10 +67,10 @@ extern "C" { // So that the C++ compiler does not rename our function names
 #ifdef __EMSCRIPTEN__
   EMSCRIPTEN_KEEPALIVE
 #endif
-  int ValidateCategory(char* category_id, int* valid_category_ids, int array_length, char* return_error_message)
+  int ValidateCategory(char* category_id, int* valid_category_ids, int array_length)
   {
     // Validation 1: A Category ID must be selected
-    if (ValidateValueProvided(category_id, "A Product Category must be selected.", return_error_message) == 0)
+    if (ValidateValueProvided(category_id, "A Product Category must be selected.") == 0)
     {
       return 0;
     }
@@ -99,14 +78,14 @@ extern "C" { // So that the C++ compiler does not rename our function names
     // Validation 2: A list of valid Category IDs must be passed in
     if ((valid_category_ids == NULL) || (array_length == 0))
     {
-      strcpy(return_error_message, "There are no Product Categories available.");
+      UpdateHostAboutError("There are no Product Categories available.");
       return 0;
     }
 
     // Validation 3: The selected Category ID must match one of the IDs provided
     if (IsCategoryIdInArray(category_id, valid_category_ids, array_length) == 0)
     {
-      strcpy(return_error_message, "The selected Product Category is not valid.");
+      UpdateHostAboutError("The selected Product Category is not valid.");
       return 0;
     }
 

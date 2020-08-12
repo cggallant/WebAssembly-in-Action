@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Edit Product</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.1.0/css/bootstrap.min.css">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.0/umd/popper.min.js"></script>
+    <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.1.0/js/bootstrap.min.js"></script>
+  </head>
+  <body onload="initializePage()">
+    <div class="container">
+      <h1>Edit Product</h1>
+
+      <div id="errorMessage" class="alert alert-danger" role="alert" style="display:none;">
+      </div>
+
+      <div class="form-group">
+        <label for="name">Name:</label>
+        <input type="text" class="form-control" id="name">
+      </div>
+      <div class="form-group">
+        <label for="category">Category:</label>
+        <select class="custom-select" id="category">
+          <option value="0"></option>
+          <option value="100">Jeans</option>
+          <option value="101">Dress Pants</option>
+        </select>
+      </div>
+ 
+      <button type="button" class="btn btn-primary" onclick="onClickSave()">Save</button>
+    </div>
+
+    <script src="editproduct.js"></script>
+    <script src="validate.js"></script>
+  </body>
+</html>

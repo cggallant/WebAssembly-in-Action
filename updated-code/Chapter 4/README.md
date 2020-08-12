@@ -17,7 +17,7 @@ Because the modules are designed to work together, the functions or their signat
 At the moment, generating a stand-alone module is easier to work with than the side_module approach because you don't need to provide your own versions of the standard C library functions. Stand-alone modules aren't designed for use in a browser, but rather, for use in a WebAssembly System Interface (WASI) environment so there's still a chance that things may break with this approach over time. 
 
 The changes I've made for this section's code are:
-- Includes for the _cstdlib_ and _cstring_ libraries have been added to the _validate.cpp_ file.
+- Includes for the _cstdlib_, _cstdint_ and _cstring_ libraries have been added to the _validate.cpp_ file.
   - I reworked the _create\_buffer_ and _free\_buffer_ functions to use the _new_ and _delete_ keywords rather than the custom code it was using which improves the code considerably.
   - I then moved the functions from the _side\_module\_system\_functions.cpp_ file into the _validate.cpp_ file.
   - The include for the _side\_module\_system\_functions.h_ file has been removed from the _validate.cpp_ file.
