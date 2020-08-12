@@ -18,7 +18,7 @@ At the moment, generating a stand-alone module is easier to work with than the s
 
 The changes I've made for this section's code are:
 - Includes for the _cstdlib_, _cstdint_ and _cstring_ libraries have been added to the _validate.cpp_ file.
-  - I reworked the _create\_buffer_ and _free\_buffer_ functions to use the _new_ and _delete_ keywords rather than the custom code it was using which improves the code considerably.
+  - I reworked the _create\_buffer_ and _free\_buffer_ functions to use the _new_ and _delete_ keywords rather than the custom code it was using.
   - I then moved the functions from the _side\_module\_system\_functions.cpp_ file into the _validate.cpp_ file.
   - The include for the _side\_module\_system\_functions.h_ file has been removed from the _validate.cpp_ file.
 
