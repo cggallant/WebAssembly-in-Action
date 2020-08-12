@@ -27,7 +27,7 @@ The changes I've made for this section's code are:
 - The Emscripten command line has been simplified:
   - It no longer includes the _side\_module\_system\_functions.cpp_ file or the _-s STANDALONE\_WASM=1_ flag.
   - You could include the _-s STANDALONE\_WASM=1_ flag but it's inferred by specifying the _.wasm_ extension for the output file.
-  - The _--no-entry_ flag was included because there's no _main_ function defined. Including this flag prevents a compiler error.
+  - The _--no-entry_ flag was included because there's no _main_ function defined. Including this flag prevents a compilation error.
 
 
 - A few changes were made to the _editproduct.js_ file:

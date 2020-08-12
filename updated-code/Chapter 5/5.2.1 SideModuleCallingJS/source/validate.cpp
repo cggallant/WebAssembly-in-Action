@@ -1,3 +1,7 @@
+#include <cstdlib>
+#include <cstdint> // for the uint8_t data type
+#include <cstring>
+
 #ifdef __EMSCRIPTEN__
   #include <emscripten.h>
 #endif
@@ -6,10 +10,26 @@
 extern "C" { // So that the C++ compiler does not rename our function names
 #endif
 
-#include "side_module_system_functions.h"
-
   // Define the function signature of the method that will be created in the JavaScript
   extern void UpdateHostAboutError(const char* error_message);
+
+  // Allocate the space needed for the buffer
+#ifdef __EMSCRIPTEN__
+  EMSCRIPTEN_KEEPALIVE
+#endif
+  uint8_t* create_buffer(int size_needed)
+  {
+    return new uint8_t[size_needed];
+  }
+
+  // Release the memory
+#ifdef __EMSCRIPTEN__
+  EMSCRIPTEN_KEEPALIVE
+#endif
+  void free_buffer(const char* pointer)
+  {
+    delete pointer;
+  }
 
   int ValidateValueProvided(const char* value, const char* error_message)
   {

@@ -1,1 +1,1 @@
-emcc side_module_system_functions.cpp validate.cpp -s SIDE_MODULE=2 -O1 -o validate.wasm
+emcc validate.cpp -O1 --no-entry -s ERROR_ON_UNDEFINED_SYMBOLS=0 -o validate.wasm
