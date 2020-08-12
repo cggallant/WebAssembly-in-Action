@@ -8,30 +8,30 @@ No changes were needed for this folder.
 
 When I wrote this book, I wanted you to be able to compile the module without the Emscripten-generated JavaScript code so that you could learn about the WebAssembly JavaScript API and gain a better understanding of how WebAssembly works.
 
-I decided to use the Emscripten SIDE_MODULE flag as a way to prevent the generation of the JavaScript code. The flag is intended to create modules for use with dynamic linking:
-- A main module would be created that has JavaScript code and the standard C library functions and is linked to side modules at runtime
-- The side modules don't have the standard C library functions or JavaScript code
+I decided to use the Emscripten _SIDE_MODULE_ flag as a way to prevent the generation of the JavaScript code. The flag is intended to create modules for use with dynamic linking:
+- A main module would be created that has JavaScript code and the standard C library functions and is linked to side modules at runtime.
+- The side modules don't have the standard C library functions or JavaScript code.
 
 Because the modules are designed to work together, the functions or their signatures, can be changed at any point by Emscripten's developers. So long as the main module's code is generated with the same version of Emscripten as the side modules, everything works with the dynamic linking. This ability to change doesn't happen very often but has caused the side module code in the book to be more brittle than I'd like.
 
-At the moment, generating a stand-alone module is easier to work with than the side_module approach because you don't need to provide your own versions of the standard C library functions. Stand-alone modules aren't designed for use in a browser, but rather, for use in a WebAssembly System Interface (WASI) environment so there's still a chance that things may break with this approach over time too. 
+At the moment, generating a stand-alone module is easier to work with than the side_module approach because you don't need to provide your own versions of the standard C library functions. Stand-alone modules aren't designed for use in a browser, but rather, for use in a WebAssembly System Interface (WASI) environment so there's still a chance that things may break with this approach over time. 
 
 The changes I've made for this section's code are:
-- Includes for the _cstdlib_ and _cstring_ libraries have been added to the _validate.cpp_ file
+- Includes for the _cstdlib_ and _cstring_ libraries have been added to the _validate.cpp_ file.
   - I reworked the _create\_buffer_ and _free\_buffer_ functions to use the _new_ and _delete_ keywords rather than the custom code it was using which improves the code considerably.
-  - I then moved the functions from the _side\_module\_system\_functions.cpp_ file into the _validate.cpp_ file
-  - The include for the _side\_module\_system\_functions.h_ has been removed from the _validate.cpp_ file
+  - I then moved the functions from the _side\_module\_system\_functions.cpp_ file into the _validate.cpp_ file.
+  - The include for the _side\_module\_system\_functions.h_ file has been removed from the _validate.cpp_ file.
 
-- The _side\_module\_system\_functions.cpp_ and _side\_module\_system\_functions.h_ files have been deleted
+- The _side\_module\_system\_functions.cpp_ and _side\_module\_system\_functions.h_ files have been deleted.
 
 - The Emscripten command line has been simplified:
-  - It no longer includes the _side\_module\_system\_functions.cpp_ file or the _-s STANDALONE\_WASM=1_ flag
-  - You could include the _-s STANDALONE\_WASM=1_ flag but it's inferred by specifying the _.wasm_ extension for the output file
-  - The _--no-entry_ flag was included because there's no _main_ function defined to prevent a compiler error
+  - It no longer includes the _side\_module\_system\_functions.cpp_ file or the _-s STANDALONE\_WASM=1_ flag.
+  - You could include the _-s STANDALONE\_WASM=1_ flag but it's inferred by specifying the _.wasm_ extension for the output file.
+  - The _--no-entry_ flag was included because there's no _main_ function defined. Including this flag prevents a compiler error.
 
 
 - A few changes were made to the _editproduct.js_ file:
-  - Several changes were made in the _initializePage_ function:
+  - In the _initializePage_ function:
     - The _moduleMemory = new WebAssembly.Memory({initial: 256});_ line of code has been deleted
     - The _env_ object in the _importObject_ has been deleted
     - The _wasi\_snapshot\_preview1_ WASI object was added to the _importObject_ object with a _proc\_exit_ function
