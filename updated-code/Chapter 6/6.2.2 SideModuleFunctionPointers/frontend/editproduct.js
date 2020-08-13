@@ -29,21 +29,16 @@ function initializePage() {
     }
   }
 
-  moduleMemory = new WebAssembly.Memory({initial: 256});
-  moduleTable = new WebAssembly.Table({initial: 1, element: "anyfunc"});
-
   const importObject = {    
-    env: {
-      __memory_base: 0,
-      memory: moduleMemory,
-      __table_base: 0,
-      table: moduleTable,
-      abort: function(i) { throw new Error('abort'); },
+    wasi_snapshot_preview1 : {
+      proc_exit: (value) => {}
     }
   };
 
   WebAssembly.instantiateStreaming(fetch("validate.wasm"), importObject).then(result => {
     moduleExports = result.instance.exports;
+    moduleMemory = moduleExports.memory;
+    moduleTable = moduleExports.__indirect_function_table;
 
     // Have anonymous functions created for the success and error function pointers that
     // the module's ValdiateName and ValidateCategory functions will call.
@@ -245,12 +240,12 @@ function validateName(name) {
     const pointers = { onSuccess: null, onError: null };
     createPointers(true, resolve, reject, pointers);
 
-    const namePointer = moduleExports._create_buffer((name.length + 1));
+    const namePointer = moduleExports.create_buffer((name.length + 1));
     copyStringToMemory(name, namePointer);
 
-    moduleExports._ValidateName(namePointer, MAXIMUM_NAME_LENGTH, pointers.onSuccess, pointers.onError);
+    moduleExports.ValidateName(namePointer, MAXIMUM_NAME_LENGTH, pointers.onSuccess, pointers.onError);
 
-    moduleExports._free_buffer(namePointer);
+    moduleExports.free_buffer(namePointer);
   });
 }
 
@@ -261,19 +256,19 @@ function validateCategory(categoryId) {
     const pointers = { onSuccess: null, onError: null };
     createPointers(false, resolve, reject, pointers);
 
-    const categoryIdPointer = moduleExports._create_buffer((categoryId.length + 1));
+    const categoryIdPointer = moduleExports.create_buffer((categoryId.length + 1));
     copyStringToMemory(categoryId, categoryIdPointer);
 
     const arrayLength = VALID_CATEGORY_IDS.length;
     const bytesPerElement = Int32Array.BYTES_PER_ELEMENT;
-    const arrayPointer = moduleExports._create_buffer((arrayLength * bytesPerElement));
+    const arrayPointer = moduleExports.create_buffer((arrayLength * bytesPerElement));
 
     const bytesForArray = new Int32Array(moduleMemory.buffer);
     bytesForArray.set(VALID_CATEGORY_IDS, (arrayPointer / bytesPerElement));
 
-    moduleExports._ValidateCategory(categoryIdPointer, arrayPointer, arrayLength, pointers.onSuccess, pointers.onError);
+    moduleExports.ValidateCategory(categoryIdPointer, arrayPointer, arrayLength, pointers.onSuccess, pointers.onError);
 
-    moduleExports._free_buffer(arrayPointer);
-    moduleExports._free_buffer(categoryIdPointer);
+    moduleExports.free_buffer(arrayPointer);
+    moduleExports.free_buffer(categoryIdPointer);
   });
 }
