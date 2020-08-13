@@ -3,11 +3,7 @@ function logPrime(prime) {
   console.log(prime.toString());
 }
 
-const isPrimeImportObject = {
-  env: { 
-    __memory_base: 0,
-  }
-};
+const isPrimeImportObject = { };
 
 // First load the is_prime.wasm side module
 WebAssembly.instantiateStreaming(fetch("is_prime.wasm"), isPrimeImportObject)
@@ -16,9 +12,8 @@ WebAssembly.instantiateStreaming(fetch("is_prime.wasm"), isPrimeImportObject)
   // method from the is_prime module.
   const findPrimesImportObject = {
     env: {
-      __memory_base: 0,
-      _IsPrime: module.instance.exports._IsPrime,
-      _LogPrime: logPrime,
+      IsPrime: module.instance.exports.IsPrime,
+      LogPrime: logPrime,
     }
   };
 
@@ -26,5 +21,5 @@ WebAssembly.instantiateStreaming(fetch("is_prime.wasm"), isPrimeImportObject)
 
 })
 .then(module => {
-  module.instance.exports._FindPrimes(3, 100);
+  module.instance.exports.FindPrimes(3, 100);
 });

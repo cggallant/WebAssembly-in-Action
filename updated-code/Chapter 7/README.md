@@ -1,6 +1,21 @@
-This is the initial commit of the original code for chapter 7 so that you're able to compare the changes when I push them up. 
+### The _7.2.2 dlopen_ folder
 
-No changes have been made to this folder's code yet. Stay tuned.
+No changes were needed for this folder.
+ 
+
+### The _7.2.3 dynamicLibraries_ folder
+
+No changes were needed for this folder.
+
+
+### The _7.2.4 ManualLinking_ folder
+
+A few changes were needed in the _frontend_ folder's _main.js_ file:
+- The _env_ object, in the _isPrimeImportObject_, was deleted.
+- The _\_\_memory_base: 0,_ line of code was deleted from the _env_ object of the _findPrimesImportObject_ object.
+- The underscore character in front of both IsPrime functions has been removed in the _env_ object of the _findPrimesImportObject_ object. The new line of code is: _IsPrime: module.instance.exports.IsPrime,_
+- The underscore character in front of _LogPrime_ has been removed in the _env_ object of the _findPrimesImportObject_ object. The new line of code is: _LogPrime: logPrime,_
+- In the _then_ method, of the WebAssembly.instantiateStreaming call, the underscore has been removed from in front of the _FindPrimes_ function call.
 
 
 ---
