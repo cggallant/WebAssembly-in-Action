@@ -4,14 +4,15 @@
 
 Rather than wait until all of the code has been updated, I'll update and upload one chapter at a time. I'll also commit the original code first and then make the changes so that you can view the changes between them if you wish.
 
-<p>&nbsp;</p>
+Each chapter's _README.md_ file lists the changes made to that chapter's code.
+
 <p>&nbsp;</p>
 <p>&nbsp;</p>
 
 # Supporting this book
 
 Don't yet have your own copy of the book? You can buy it from many book sellers including:
-- Directly from Manning Publications (recommended): [https://www.manning.com/books/webassembly-in-action](https://www.manning.com/books/webassembly-in-action)
+- Directly from Manning Publications _(recommended)_: [https://www.manning.com/books/webassembly-in-action](https://www.manning.com/books/webassembly-in-action)
 - Amazon: [https://www.amazon.com/WebAssembly-Action-Gerard-Gallant/dp/1617295744/](https://www.amazon.com/WebAssembly-Action-Gerard-Gallant/dp/1617295744/)
 - Abebooks: [https://www.abebooks.com/servlet/BookDetailsPL?bi=30618231105&searchurl=kn%3Dwebassembly%2Bin%2Baction](https://www.abebooks.com/servlet/BookDetailsPL?bi=30618231105&searchurl=kn%3Dwebassembly%2Bin%2Baction)
 - Barns & Noble: [https://www.barnesandnoble.com/w/webassembly-in-action-gerard-gallant/1131337158](https://www.barnesandnoble.com/w/webassembly-in-action-gerard-gallant/1131337158)

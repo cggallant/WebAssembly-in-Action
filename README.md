@@ -2,7 +2,7 @@
 
 <img src="https://images.manning.com/180/240/resize/book/7/97eac5c-498e-4454-bdb2-677ec3406f29/Gallant-WA-HI.png" align="left" /> This repository holds the companion code for the book "[WebAssembly in Action](https://www.manning.com/books/webassembly-in-action)" in the [original-code](https://github.com/cggallant/WebAssembly-in-Action/tree/master/original-code) folder.
 
-One of the tools used in the book is version _1.38.45_ of the _Emscripten toolkit_. Because the toolkit is constantly being improved, some of the items shown in the book need to be adjusted if you wish to use some of the more recent versions of the toolkit. In the coming days, I'll push up a new folder containing those modifications.
+One of the tools used in the book is version _1.38.45_ of the _Emscripten toolkit_. Because the toolkit is constantly being improved, some of the items shown in the book need to be adjusted if you wish to use some of the more recent versions of the toolkit. Over the coming days, I'll update the code and push it to the [updated-code](https://github.com/cggallant/WebAssembly-in-Action/tree/master/updated-code) folder.
 
 <p>&nbsp;</p>
 <p>&nbsp;</p>
@@ -36,10 +36,10 @@ Many people buy books based on referrals or recommendations of those they trust.
 - Manning Plublications: [https://www.manning.com/books/webassembly-in-action](https://www.manning.com/books/webassembly-in-action)
 - Goodreads: [https://www.goodreads.com/book/show/45361484-webassembly-in-action](https://www.goodreads.com/book/show/45361484-webassembly-in-action)
 - Amazon: [https://www.amazon.com/WebAssembly-Action-Gerard-Gallant/dp/1617295744/](https://www.amazon.com/WebAssembly-Action-Gerard-Gallant/dp/1617295744/)
-- Your favorite book seller or even your blog
+- Your favorite book seller or even your own blog.
 
 Don't yet have your own copy of the book? You can buy it from many book sellers including:
-- Directly from Manning Publications (recommended): [https://www.manning.com/books/webassembly-in-action](https://www.manning.com/books/webassembly-in-action)
+- Directly from Manning Publications _(recommended)_: [https://www.manning.com/books/webassembly-in-action](https://www.manning.com/books/webassembly-in-action)
 - Amazon: [https://www.amazon.com/WebAssembly-Action-Gerard-Gallant/dp/1617295744/](https://www.amazon.com/WebAssembly-Action-Gerard-Gallant/dp/1617295744/)
 - Abebooks: [https://www.abebooks.com/servlet/BookDetailsPL?bi=30618231105&searchurl=kn%3Dwebassembly%2Bin%2Baction](https://www.abebooks.com/servlet/BookDetailsPL?bi=30618231105&searchurl=kn%3Dwebassembly%2Bin%2Baction)
 - Barns & Noble: [https://www.barnesandnoble.com/w/webassembly-in-action-gerard-gallant/1131337158](https://www.barnesandnoble.com/w/webassembly-in-action-gerard-gallant/1131337158)
