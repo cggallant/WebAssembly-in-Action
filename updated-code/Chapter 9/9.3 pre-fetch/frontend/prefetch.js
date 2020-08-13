@@ -10,7 +10,9 @@ worker.onmessage = function(e) {
   // Create a new instance of the Emscripten JavaScript Module object
   // and specify a callback function so that we can handle the WebAssembly
   // module's instantiation.
-  emscriptenModule = new Module({ instantiateWasm: onInstantiateWasm });
+  Module({ instantiateWasm: onInstantiateWasm }).then((module) => {
+    emscriptenModule = module;
+  });
 }
 
 function onInstantiateWasm(importObject, successCallback) {

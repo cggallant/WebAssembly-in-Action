@@ -1,7 +1,4 @@
-// Copyright 2010 The Emscripten Authors.  All rights reserved.
-// Emscripten is available under two separate licenses, the MIT license and the
-// University of Illinois/NCSA Open Source License.  Both these licenses can be
-// found in the LICENSE file.
+
 
 // The Module object: Our interface to the outside world. We import
 // and export values on it. There are various ways Module can be used:
@@ -17,6 +14,8 @@
 // before the code. Then that object will be used in the code, and you
 // can continue to use Module afterwards as well.
 var Module = typeof Module !== 'undefined' ? Module : {};
+
+
 
 // --pre-jses are emitted after the Module integration code, so that they can
 // refer to Module (if they choose; they can also define Module)
@@ -47,18 +46,15 @@ var quit_ = function(status, toThrow) {
 var ENVIRONMENT_IS_WEB = false;
 var ENVIRONMENT_IS_WORKER = false;
 var ENVIRONMENT_IS_NODE = false;
-var ENVIRONMENT_HAS_NODE = false;
 var ENVIRONMENT_IS_SHELL = false;
 ENVIRONMENT_IS_WEB = typeof window === 'object';
 ENVIRONMENT_IS_WORKER = typeof importScripts === 'function';
-// A web environment like Electron.js can have Node enabled, so we must
-// distinguish between Node-enabled environments and Node environments per se.
-// This will allow the former to do things like mount NODEFS.
-// Extended check using process.versions fixes issue #8816.
-// (Also makes redundant the original check that 'require' is a function.)
-ENVIRONMENT_HAS_NODE = typeof process === 'object' && typeof process.versions === 'object' && typeof process.versions.node === 'string';
-ENVIRONMENT_IS_NODE = ENVIRONMENT_HAS_NODE && !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_WORKER;
+// N.b. Electron.js environment is simultaneously a NODE-environment, but
+// also a web environment.
+ENVIRONMENT_IS_NODE = typeof process === 'object' && typeof process.versions === 'object' && typeof process.versions.node === 'string';
 ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONMENT_IS_WORKER;
+
+
 
 
 
@@ -68,9 +64,14 @@ ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONME
 // 3) We could be an application pthread running in a worker. (ENVIRONMENT_IS_WORKER == true and ENVIRONMENT_IS_PTHREAD == true)
 
 // ENVIRONMENT_IS_PTHREAD=true will have been preset in worker.js. Make it false in the main runtime thread.
-var ENVIRONMENT_IS_PTHREAD = Module.ENVIRONMENT_IS_PTHREAD || false;
-if (!ENVIRONMENT_IS_PTHREAD) {
-  var PthreadWorkerInit = {}; // Collects together variables that are needed at initialization time for the web workers that host pthreads.
+var ENVIRONMENT_IS_PTHREAD = Module['ENVIRONMENT_IS_PTHREAD'] || false;
+if (ENVIRONMENT_IS_PTHREAD) {
+  // Grab imports from the pthread to local scope.
+  buffer = Module['buffer'];
+  DYNAMIC_BASE = Module['DYNAMIC_BASE'];
+  DYNAMICTOP_PTR = Module['DYNAMICTOP_PTR'];
+  // Note that not all runtime fields are imported above. Values for STACK_BASE, STACKTOP and STACK_MAX are not yet known at worker.js load time.
+  // These will be filled in at pthread startup time (the 'run' message for a pthread - pthread start establishes the stack frame)
 }
 
 
@@ -79,6 +80,13 @@ if (!ENVIRONMENT_IS_PTHREAD) {
 // In MODULARIZE mode _scriptDir needs to be captured already at the very top of the page immediately when the page is parsed, so it is generated there
 // before the page load. In non-MODULARIZE modes generate it here.
 var _scriptDir = (typeof document !== 'undefined' && document.currentScript) ? document.currentScript.src : undefined;
+
+if (ENVIRONMENT_IS_WORKER) {
+  _scriptDir = self.location.href;
+}
+else if (ENVIRONMENT_IS_NODE) {
+  _scriptDir = __filename;
+}
 
 // `/` should be present at the end if `scriptDirectory` is not empty
 var scriptDirectory = '';
@@ -95,21 +103,24 @@ var read_,
     readBinary,
     setWindowTitle;
 
-if (ENVIRONMENT_IS_NODE) {
-  scriptDirectory = __dirname + '/';
+var nodeFS;
+var nodePath;
 
-  // Expose functionality in the same simple way that the shells work
-  // Note that we pollute the global namespace here, otherwise we break in node
-  var nodeFS;
-  var nodePath;
+if (ENVIRONMENT_IS_NODE) {
+  if (ENVIRONMENT_IS_WORKER) {
+    scriptDirectory = require('path').dirname(scriptDirectory) + '/';
+  } else {
+    scriptDirectory = __dirname + '/';
+  }
+
+
+
 
   read_ = function shell_read(filename, binary) {
-    var ret;
-      if (!nodeFS) nodeFS = require('fs');
-      if (!nodePath) nodePath = require('path');
-      filename = nodePath['normalize'](filename);
-      ret = nodeFS['readFileSync'](filename);
-    return binary ? ret : ret.toString();
+    if (!nodeFS) nodeFS = require('fs');
+    if (!nodePath) nodePath = require('path');
+    filename = nodePath['normalize'](filename);
+    return nodeFS['readFileSync'](filename, binary ? null : 'utf8');
   };
 
   readBinary = function readBinary(filename) {
@@ -120,6 +131,9 @@ if (ENVIRONMENT_IS_NODE) {
     assert(ret.buffer);
     return ret;
   };
+
+
+
 
   if (process['argv'].length > 1) {
     thisProgram = process['argv'][1].replace(/\\/g, '/');
@@ -145,6 +159,17 @@ if (ENVIRONMENT_IS_NODE) {
   };
 
   Module['inspect'] = function () { return '[Emscripten Module object]'; };
+
+  var nodeWorkerThreads;
+  try {
+    nodeWorkerThreads = require('worker_threads');
+  } catch (e) {
+    console.error('The "worker_threads" module is not supported in this node.js build - perhaps a newer version is needed?');
+    throw e;
+  }
+  global.Worker = nodeWorkerThreads.Worker;
+
+
 } else
 if (ENVIRONMENT_IS_SHELL) {
 
@@ -179,11 +204,17 @@ if (ENVIRONMENT_IS_SHELL) {
 
   if (typeof print !== 'undefined') {
     // Prefer to use print/printErr where they exist, as they usually work better.
-    if (typeof console === 'undefined') console = {};
-    console.log = print;
-    console.warn = console.error = typeof printErr !== 'undefined' ? printErr : print;
+    if (typeof console === 'undefined') console = /** @type{!Console} */({});
+    console.log = /** @type{!function(this:Console, ...*): undefined} */ (print);
+    console.warn = console.error = /** @type{!function(this:Console, ...*): undefined} */ (typeof printErr !== 'undefined' ? printErr : print);
   }
+
+
 } else
+
+// Note that this includes Node.js workers when relevant (pthreads is enabled).
+// Node.js workers are detected as a combination of ENVIRONMENT_IS_WORKER and
+// ENVIRONMENT_IS_NODE.
 if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
   if (ENVIRONMENT_IS_WORKER) { // Check worker, not web, since window could be polyfilled
     scriptDirectory = self.location.href;
@@ -201,6 +232,38 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
   }
 
 
+  // Differentiate the Web Worker from the Node Worker case, as reading must
+  // be done differently.
+  if (ENVIRONMENT_IS_NODE) {
+
+
+
+
+  read_ = function shell_read(filename, binary) {
+    if (!nodeFS) nodeFS = require('fs');
+    if (!nodePath) nodePath = require('path');
+    filename = nodePath['normalize'](filename);
+    return nodeFS['readFileSync'](filename, binary ? null : 'utf8');
+  };
+
+  readBinary = function readBinary(filename) {
+    var ret = read_(filename, true);
+    if (!ret.buffer) {
+      ret = new Uint8Array(ret);
+    }
+    assert(ret.buffer);
+    return ret;
+  };
+
+
+
+
+  } else
+  {
+
+
+
+
   read_ = function shell_read(url) {
       var xhr = new XMLHttpRequest();
       xhr.open('GET', url, false);
@@ -214,7 +277,7 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
         xhr.open('GET', url, false);
         xhr.responseType = 'arraybuffer';
         xhr.send(null);
-        return new Uint8Array(xhr.response);
+        return new Uint8Array(/** @type{!ArrayBuffer} */(xhr.response));
     };
   }
 
@@ -233,9 +296,22 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
     xhr.send(null);
   };
 
+
+
+
+  }
+
   setWindowTitle = function(title) { document.title = title };
 } else
 {
+}
+
+if (ENVIRONMENT_IS_NODE) {
+  // Polyfill the performance object, which emscripten pthreads support
+  // depends on for good timing.
+  if (typeof performance === 'undefined') {
+    global.performance = require('perf_hooks').performance;
+  }
 }
 
 // Set up the out() and err() hooks, which are how we can print to stdout or
@@ -263,26 +339,17 @@ if (Module['quit']) quit_ = Module['quit'];
 
 // perform assertions in shell.js after we set up out() and err(), as otherwise if an assertion fails it cannot print the message
 
-// TODO remove when SDL2 is fixed (also see above)
 
 
 
-// Copyright 2017 The Emscripten Authors.  All rights reserved.
-// Emscripten is available under two separate licenses, the MIT license and the
-// University of Illinois/NCSA Open Source License.  Both these licenses can be
-// found in the LICENSE file.
 
 // {{PREAMBLE_ADDITIONS}}
 
 var STACK_ALIGN = 16;
 
-
 function dynamicAlloc(size) {
   var ret = HEAP32[DYNAMICTOP_PTR>>2];
   var end = (ret + size + 15) & -16;
-  if (end > _emscripten_get_heap_size()) {
-    abort();
-  }
   HEAP32[DYNAMICTOP_PTR>>2] = end;
   return ret;
 }
@@ -304,7 +371,7 @@ function getNativeTypeSize(type) {
       if (type[type.length-1] === '*') {
         return 4; // A pointer
       } else if (type[0] === 'i') {
-        var bits = parseInt(type.substr(1));
+        var bits = Number(type.substr(1));
         assert(bits % 8 === 0, 'getNativeTypeSize invalid bits ' + bits + ', type ' + type);
         return bits / 8;
       } else {
@@ -322,24 +389,36 @@ function warnOnce(text) {
   }
 }
 
-var asm2wasmImports = { // special asm2wasm imports
-    "f64-rem": function(x, y) {
-        return x % y;
-    },
-    "debugger": function() {
-    }
-};
 
 
 
-var jsCallStartIndex = 1;
-var functionPointers = new Array(0);
+
+
+
 
 // Wraps a JS function as a wasm function with a given signature.
-// In the future, we may get a WebAssembly.Function constructor. Until then,
-// we create a wasm module that takes the JS function as an import with a given
-// signature, and re-exports that as a wasm function.
 function convertJsFunctionToWasm(func, sig) {
+
+  // If the type reflection proposal is available, use the new
+  // "WebAssembly.Function" constructor.
+  // Otherwise, construct a minimal wasm module importing the JS function and
+  // re-exporting it.
+  if (typeof WebAssembly.Function === "function") {
+    var typeNames = {
+      'i': 'i32',
+      'j': 'i64',
+      'f': 'f32',
+      'd': 'f64'
+    };
+    var type = {
+      parameters: [],
+      results: sig[0] == 'v' ? [] : [typeNames[sig[0]]]
+    };
+    for (var i = 1; i < sig.length; ++i) {
+      type.parameters.push(typeNames[sig[i]]);
+    }
+    return new WebAssembly.Function(type, func);
+  }
 
   // The module is static, with the exception of the type section, which is
   // generated based on the signature passed in.
@@ -393,69 +472,93 @@ function convertJsFunctionToWasm(func, sig) {
   // This accepts an import (at "e.f"), that it reroutes to an export (at "f")
   var module = new WebAssembly.Module(bytes);
   var instance = new WebAssembly.Instance(module, {
-    e: {
-      f: func
+    'e': {
+      'f': func
     }
   });
-  var wrappedFunc = instance.exports.f;
+  var wrappedFunc = instance.exports['f'];
   return wrappedFunc;
 }
+
+var freeTableIndexes = [];
+
+// Weak map of functions in the table to their indexes, created on first use.
+var functionsInTableMap;
 
 // Add a wasm function to the table.
 function addFunctionWasm(func, sig) {
   var table = wasmTable;
-  var ret = table.length;
 
-  // Grow the table
-  try {
-    table.grow(1);
-  } catch (err) {
-    if (!err instanceof RangeError) {
-      throw err;
+  // Check if the function is already in the table, to ensure each function
+  // gets a unique index. First, create the map if this is the first use.
+  if (!functionsInTableMap) {
+    functionsInTableMap = new WeakMap();
+    for (var i = 0; i < table.length; i++) {
+      var item = table.get(i);
+      // Ignore null values.
+      if (item) {
+        functionsInTableMap.set(item, i);
+      }
     }
-    throw 'Unable to grow wasm table. Use a higher value for RESERVED_FUNCTION_POINTERS or set ALLOW_TABLE_GROWTH.';
+  }
+  if (functionsInTableMap.has(func)) {
+    return functionsInTableMap.get(func);
   }
 
-  // Insert new element
+  // It's not in the table, add it now.
+
+
+  var ret;
+  // Reuse a free index if there is one, otherwise grow.
+  if (freeTableIndexes.length) {
+    ret = freeTableIndexes.pop();
+  } else {
+    ret = table.length;
+    // Grow the table
+    try {
+      table.grow(1);
+    } catch (err) {
+      if (!(err instanceof RangeError)) {
+        throw err;
+      }
+      throw 'Unable to grow wasm table. Set ALLOW_TABLE_GROWTH.';
+    }
+  }
+
+  // Set the new value.
   try {
     // Attempting to call this with JS function will cause of table.set() to fail
     table.set(ret, func);
   } catch (err) {
-    if (!err instanceof TypeError) {
+    if (!(err instanceof TypeError)) {
       throw err;
     }
-    assert(typeof sig !== 'undefined', 'Missing signature argument to addFunction');
     var wrapped = convertJsFunctionToWasm(func, sig);
     table.set(ret, wrapped);
   }
+
+  functionsInTableMap.set(func, ret);
 
   return ret;
 }
 
 function removeFunctionWasm(index) {
-  // TODO(sbc): Look into implementing this to allow re-using of table slots
+  functionsInTableMap.delete(wasmTable.get(index));
+  freeTableIndexes.push(index);
 }
 
 // 'sig' parameter is required for the llvm backend but only when func is not
 // already a WebAssembly function.
 function addFunction(func, sig) {
 
-
-  var base = 0;
-  for (var i = base; i < base + 0; i++) {
-    if (!functionPointers[i]) {
-      functionPointers[i] = func;
-      return jsCallStartIndex + i;
-    }
-  }
-  throw 'Finished up all reserved function pointers. Use a higher value for RESERVED_FUNCTION_POINTERS.';
-
+  return addFunctionWasm(func, sig);
 }
 
 function removeFunction(index) {
-
-  functionPointers[index-jsCallStartIndex] = null;
+  removeFunctionWasm(index);
 }
+
+
 
 var funcWrappers = {};
 
@@ -487,10 +590,16 @@ function getFuncWrapper(func, sig) {
 }
 
 
+
+
+
+
+
 function makeBigInt(low, high, unsigned) {
   return unsigned ? ((+((low>>>0)))+((+((high>>>0)))*4294967296.0)) : ((+((low>>>0)))+((+((high|0)))*4294967296.0));
 }
 
+/** @param {Array=} args */
 function dynCall(sig, ptr, args) {
   if (args && args.length) {
     return Module['dynCall_' + sig].apply(null, [ptr].concat(args));
@@ -510,15 +619,18 @@ var getTempRet0 = function() {
 };
 
 
-var Runtime = {
-};
-
 // The address globals begin at. Very low in memory, for code size and optimization opportunities.
 // Above 0 is static memory, starting with globals.
 // Then the stack.
 // Then 'dynamic' memory for sbrk.
 var GLOBAL_BASE = 1024;
 
+
+// JS library code refers to Atomics in the manner used from asm.js, provide
+// the same API here.
+var Atomics_load = Atomics.load;
+var Atomics_store = Atomics.store;
+var Atomics_compareExchange = Atomics.compareExchange;
 
 
 
@@ -538,14 +650,19 @@ var noExitRuntime;if (Module['noExitRuntime']) noExitRuntime = Module['noExitRun
 
 
 if (typeof WebAssembly !== 'object') {
-  err('no native wasm support detected');
+  abort('no native wasm support detected');
 }
+
+
 
 
 // In MINIMAL_RUNTIME, setValue() and getValue() are only available when building with safe heap enabled, for heap safety checking.
 // In traditional runtime, setValue() and getValue() are always available (although their use is highly discouraged due to perf penalties)
 
-/** @type {function(number, number, string, boolean=)} */
+/** @param {number} ptr
+    @param {number} value
+    @param {string} type
+    @param {number|boolean=} noSafe */
 function setValue(ptr, value, type, noSafe) {
   type = type || 'i8';
   if (type.charAt(type.length-1) === '*') type = 'i32'; // pointers are 32-bit
@@ -561,7 +678,9 @@ function setValue(ptr, value, type, noSafe) {
     }
 }
 
-/** @type {function(number, string, boolean=)} */
+/** @param {number} ptr
+    @param {string} type
+    @param {number|boolean=} noSafe */
 function getValue(ptr, type, noSafe) {
   type = type || 'i8';
   if (type.charAt(type.length-1) === '*') type = 'i32'; // pointers are 32-bit
@@ -582,19 +701,30 @@ function getValue(ptr, type, noSafe) {
 
 
 
+
 // Wasm globals
 
 var wasmMemory;
 
-// Potentially used for direct table calls.
+// In fastcomp asm.js, we don't need a wasm Table at all.
+// In the wasm backend, we polyfill the WebAssembly object,
+// so this creates a (non-native-wasm) table for us.
+
 var wasmTable = new WebAssembly.Table({
-  'initial': 345,
-  'maximum': 345,
+  'initial': 30,
+  'maximum': 30 + 0,
   'element': 'anyfunc'
 });
 
+
+
 // For sending to workers.
 var wasmModule;
+// Only workers actually use these field, but we refer to them from
+// library_pthread (which exists on all threads) so this definition is useful
+// to avoid accessing the global scope.
+var threadInfoStruct = 0;
+var selfThreadId = 0;
 
 //========================================
 // Runtime essentials
@@ -624,6 +754,10 @@ function getCFunc(ident) {
 }
 
 // C calling interface.
+/** @param {string|null=} returnType
+    @param {Array=} argTypes
+    @param {Arguments|Array=} args
+    @param {Object=} opts */
 function ccall(ident, returnType, argTypes, args, opts) {
   // For fast lookup of conversion functions
   var toC = {
@@ -671,6 +805,9 @@ function ccall(ident, returnType, argTypes, args, opts) {
   return ret;
 }
 
+/** @param {string=} returnType
+    @param {Array=} argTypes
+    @param {Object=} opts */
 function cwrap(ident, returnType, argTypes, opts) {
   argTypes = argTypes || [];
   // When the function takes numbers and returns a number, we can just return
@@ -783,30 +920,7 @@ function getMemory(size) {
 
 
 
-/** @type {function(number, number=)} */
-function Pointer_stringify(ptr, length) {
-  abort("this function has been removed - you should use UTF8ToString(ptr, maxBytesToRead) instead!");
-}
-
-// Given a pointer 'ptr' to a null-terminated ASCII-encoded string in the emscripten HEAP, returns
-// a copy of that string as a Javascript String object.
-
-function AsciiToString(ptr) {
-  var str = '';
-  while (1) {
-    var ch = HEAPU8[((ptr++)>>0)];
-    if (!ch) return str;
-    str += String.fromCharCode(ch);
-  }
-}
-
-// Copies the given Javascript String object 'str' to the emscripten HEAP at address 'outPtr',
-// null-terminated and encoded in ASCII form. The copy will require at most str.length+1 bytes of space in the HEAP.
-
-function stringToAscii(str, outPtr) {
-  return writeAsciiToMemory(str, outPtr, false);
-}
-
+// runtime_strings.js: Strings related runtime functions that are part of both MINIMAL_RUNTIME and regular runtime.
 
 // Given a pointer 'ptr' to a null-terminated UTF8-encoded string in the given array that contains uint8 values, returns
 // a copy of that string as a Javascript String object.
@@ -817,7 +931,7 @@ function stringToAscii(str, outPtr) {
  * @param {number=} maxBytesToRead
  * @return {string}
  */
-function UTF8ArrayToString(u8Array, idx, maxBytesToRead) {
+function UTF8ArrayToString(heap, idx, maxBytesToRead) {
   var endIdx = idx + maxBytesToRead;
 
     var str = '';
@@ -826,18 +940,18 @@ function UTF8ArrayToString(u8Array, idx, maxBytesToRead) {
       // http://en.wikipedia.org/wiki/UTF-8#Description
       // https://www.ietf.org/rfc/rfc2279.txt
       // https://tools.ietf.org/html/rfc3629
-      var u0 = u8Array[idx++];
+      var u0 = heap[idx++];
       // If not building with TextDecoder enabled, we don't know the string length, so scan for \0 byte.
       // If building with TextDecoder, we know exactly at what byte index the string ends, so checking for nulls here would be redundant.
       if (!u0) return str;
       if (!(u0 & 0x80)) { str += String.fromCharCode(u0); continue; }
-      var u1 = u8Array[idx++] & 63;
+      var u1 = heap[idx++] & 63;
       if ((u0 & 0xE0) == 0xC0) { str += String.fromCharCode(((u0 & 31) << 6) | u1); continue; }
-      var u2 = u8Array[idx++] & 63;
+      var u2 = heap[idx++] & 63;
       if ((u0 & 0xF0) == 0xE0) {
         u0 = ((u0 & 15) << 12) | (u1 << 6) | u2;
       } else {
-        u0 = ((u0 & 7) << 18) | (u1 << 12) | (u2 << 6) | (u8Array[idx++] & 63);
+        u0 = ((u0 & 7) << 18) | (u1 << 12) | (u2 << 6) | (heap[idx++] & 63);
       }
 
       if (u0 < 0x10000) {
@@ -874,7 +988,7 @@ function UTF8ToString(ptr, maxBytesToRead) {
 // Use the function lengthBytesUTF8 to compute the exact number of bytes (excluding null terminator) that this function will write.
 // Parameters:
 //   str: the Javascript string to copy.
-//   outU8Array: the array to copy to. Each index in this array is assumed to be one 8-byte element.
+//   heap: the array to copy to. Each index in this array is assumed to be one 8-byte element.
 //   outIdx: The starting offset in the array to begin the copying.
 //   maxBytesToWrite: The maximum number of bytes this function can write to the array.
 //                    This count should include the null terminator,
@@ -882,7 +996,7 @@ function UTF8ToString(ptr, maxBytesToRead) {
 //                    maxBytesToWrite=0 does not write any bytes to the output, not even the null terminator.
 // Returns the number of bytes written, EXCLUDING the null terminator.
 
-function stringToUTF8Array(str, outU8Array, outIdx, maxBytesToWrite) {
+function stringToUTF8Array(str, heap, outIdx, maxBytesToWrite) {
   if (!(maxBytesToWrite > 0)) // Parameter maxBytesToWrite is not optional. Negative values, 0, null, undefined and false each don't write out any bytes.
     return 0;
 
@@ -899,26 +1013,26 @@ function stringToUTF8Array(str, outU8Array, outIdx, maxBytesToWrite) {
     }
     if (u <= 0x7F) {
       if (outIdx >= endIdx) break;
-      outU8Array[outIdx++] = u;
+      heap[outIdx++] = u;
     } else if (u <= 0x7FF) {
       if (outIdx + 1 >= endIdx) break;
-      outU8Array[outIdx++] = 0xC0 | (u >> 6);
-      outU8Array[outIdx++] = 0x80 | (u & 63);
+      heap[outIdx++] = 0xC0 | (u >> 6);
+      heap[outIdx++] = 0x80 | (u & 63);
     } else if (u <= 0xFFFF) {
       if (outIdx + 2 >= endIdx) break;
-      outU8Array[outIdx++] = 0xE0 | (u >> 12);
-      outU8Array[outIdx++] = 0x80 | ((u >> 6) & 63);
-      outU8Array[outIdx++] = 0x80 | (u & 63);
+      heap[outIdx++] = 0xE0 | (u >> 12);
+      heap[outIdx++] = 0x80 | ((u >> 6) & 63);
+      heap[outIdx++] = 0x80 | (u & 63);
     } else {
       if (outIdx + 3 >= endIdx) break;
-      outU8Array[outIdx++] = 0xF0 | (u >> 18);
-      outU8Array[outIdx++] = 0x80 | ((u >> 12) & 63);
-      outU8Array[outIdx++] = 0x80 | ((u >> 6) & 63);
-      outU8Array[outIdx++] = 0x80 | (u & 63);
+      heap[outIdx++] = 0xF0 | (u >> 18);
+      heap[outIdx++] = 0x80 | ((u >> 12) & 63);
+      heap[outIdx++] = 0x80 | ((u >> 6) & 63);
+      heap[outIdx++] = 0x80 | (u & 63);
     }
   }
   // Null-terminate the pointer to the buffer.
-  outU8Array[outIdx] = 0;
+  heap[outIdx] = 0;
   return outIdx - startIdx;
 }
 
@@ -948,16 +1062,41 @@ function lengthBytesUTF8(str) {
 }
 
 
+
+
+
+// runtime_strings_extra.js: Strings related runtime functions that are available only in regular runtime.
+
+// Given a pointer 'ptr' to a null-terminated ASCII-encoded string in the emscripten HEAP, returns
+// a copy of that string as a Javascript String object.
+
+function AsciiToString(ptr) {
+  var str = '';
+  while (1) {
+    var ch = HEAPU8[((ptr++)>>0)];
+    if (!ch) return str;
+    str += String.fromCharCode(ch);
+  }
+}
+
+// Copies the given Javascript String object 'str' to the emscripten HEAP at address 'outPtr',
+// null-terminated and encoded in ASCII form. The copy will require at most str.length+1 bytes of space in the HEAP.
+
+function stringToAscii(str, outPtr) {
+  return writeAsciiToMemory(str, outPtr, false);
+}
+
 // Given a pointer 'ptr' to a null-terminated UTF16LE-encoded string in the emscripten HEAP, returns
 // a copy of that string as a Javascript String object.
 
-function UTF16ToString(ptr) {
+
+function UTF16ToString(ptr, maxBytesToRead) {
     var i = 0;
 
     var str = '';
     while (1) {
       var codeUnit = HEAP16[(((ptr)+(i*2))>>1)];
-      if (codeUnit == 0) return str;
+      if (codeUnit == 0 || i == maxBytesToRead / 2) return str;
       ++i;
       // fromCharCode constructs a character from a UTF-16 code unit, so we can pass the UTF16 string right through.
       str += String.fromCharCode(codeUnit);
@@ -1001,14 +1140,15 @@ function lengthBytesUTF16(str) {
   return str.length*2;
 }
 
-function UTF32ToString(ptr) {
+function UTF32ToString(ptr, maxBytesToRead) {
   var i = 0;
 
   var str = '';
-  while (1) {
+  // If maxBytesToRead is not passed explicitly, it will be undefined, and this
+  // will always evaluate to true. This saves on code size.
+  while (!(i >= maxBytesToRead / 4)) {
     var utf32 = HEAP32[(((ptr)+(i*4))>>2)];
-    if (utf32 == 0)
-      return str;
+    if (utf32 == 0) break;
     ++i;
     // Gotcha: fromCharCode constructs a character from a UTF-16 encoded code (pair), not from a Unicode code point! So encode the code point to UTF-16 for constructing.
     // See http://unicode.org/faq/utf_bom.html#utf16-3
@@ -1019,6 +1159,7 @@ function UTF32ToString(ptr) {
       str += String.fromCharCode(utf32);
     }
   }
+  return str;
 }
 
 // Copies the given Javascript String object 'str' to the emscripten HEAP at address 'outPtr',
@@ -1093,7 +1234,8 @@ function allocateUTF8OnStack(str) {
 // a maximum length limit of how many bytes it is allowed to write. Prefer calling the
 // function stringToUTF8Array() instead, which takes in a maximum length that can be used
 // to be secure from out of bounds writes.
-/** @deprecated */
+/** @deprecated
+    @param {boolean=} dontAddNull */
 function writeStringToMemory(string, buffer, dontAddNull) {
   warnOnce('writeStringToMemory is deprecated and should not be called! Use stringToUTF8() instead!');
 
@@ -1113,6 +1255,7 @@ function writeArrayToMemory(array, buffer) {
   HEAP8.set(array, buffer);
 }
 
+/** @param {boolean=} dontAddNull */
 function writeAsciiToMemory(str, buffer, dontAddNull) {
   for (var i = 0; i < str.length; ++i) {
     HEAP8[((buffer++)>>0)]=str.charCodeAt(i);
@@ -1120,7 +1263,6 @@ function writeAsciiToMemory(str, buffer, dontAddNull) {
   // Null-terminate the pointer to the HEAP.
   if (!dontAddNull) HEAP8[((buffer)>>0)]=0;
 }
-
 
 
 
@@ -1169,22 +1311,27 @@ function updateGlobalBufferAndViews(buf) {
   Module['HEAPF64'] = HEAPF64 = new Float64Array(buf);
 }
 
-if (!ENVIRONMENT_IS_PTHREAD) { // Pthreads have already initialized these variables in src/worker.js, where they were passed to the thread worker at startup time
-
 var STATIC_BASE = 1024,
-    STACK_BASE = 22064,
+    STACK_BASE = 5251120,
     STACKTOP = STACK_BASE,
-    STACK_MAX = 5264944,
-    DYNAMIC_BASE = 5264944,
-    DYNAMICTOP_PTR = 21056;
+    STACK_MAX = 8240,
+    DYNAMIC_BASE = 5251120,
+    DYNAMICTOP_PTR = 7312;
 
 
+if (ENVIRONMENT_IS_PTHREAD) {
+
+  // At the 'load' stage of Worker startup, we are just loading this script
+  // but not ready to run yet. At 'run' we receive proper values for the stack
+  // etc. and can launch a pthread. Set some fake values there meanwhile to
+  // catch bugs, then set the real values in establishStackSpace later.
+  // TODO DYNAMIC_BASE = Module['DYNAMIC_BASE'];
+  // TODO DYNAMICTOP_PTR = Module['DYNAMICTOP_PTR'];
 }
-
 
 var TOTAL_STACK = 5242880;
 
-var INITIAL_TOTAL_MEMORY = Module['TOTAL_MEMORY'] || 16777216;
+var INITIAL_INITIAL_MEMORY = Module['INITIAL_MEMORY'] || 16777216;
 
 
 
@@ -1192,12 +1339,17 @@ var INITIAL_TOTAL_MEMORY = Module['TOTAL_MEMORY'] || 16777216;
 
 
 
-// In standalone mode, the wasm creates the memory, and the user can't provide it.
+
+
 // In non-standalone/normal mode, we create the memory here.
+
+
 
 // Create the main memory. (Note: this isn't used in STANDALONE_WASM mode since the wasm
 // memory is created in the wasm, not in JS.)
 if (ENVIRONMENT_IS_PTHREAD) {
+  wasmMemory = Module['wasmMemory'];
+  buffer = Module['buffer'];
 } else {
 
   if (Module['wasmMemory']) {
@@ -1205,13 +1357,19 @@ if (ENVIRONMENT_IS_PTHREAD) {
   } else
   {
     wasmMemory = new WebAssembly.Memory({
-      'initial': INITIAL_TOTAL_MEMORY / WASM_PAGE_SIZE
+      'initial': INITIAL_INITIAL_MEMORY / WASM_PAGE_SIZE
       ,
-      'maximum': INITIAL_TOTAL_MEMORY / WASM_PAGE_SIZE
+      'maximum': INITIAL_INITIAL_MEMORY / WASM_PAGE_SIZE
       ,
       'shared': true
     });
-    assert(wasmMemory.buffer instanceof SharedArrayBuffer, 'requested a shared WebAssembly.Memory but the returned buffer is not a SharedArrayBuffer, indicating that while the browser has SharedArrayBuffer it does not have WebAssembly threads support - you may need to set a flag');
+    if (!(wasmMemory.buffer instanceof SharedArrayBuffer)) {
+      err('requested a shared WebAssembly.Memory but the returned buffer is not a SharedArrayBuffer, indicating that while the browser has SharedArrayBuffer it does not have WebAssembly threads support - you may need to set a flag');
+      if (ENVIRONMENT_IS_NODE) {
+        console.log('(on node you may need: --experimental-wasm-threads --experimental-wasm-bulk-memory and also use a recent version)');
+      }
+      throw Error('bad memory');
+    }
   }
 
 }
@@ -1221,8 +1379,8 @@ if (wasmMemory) {
 }
 
 // If the user provides an incorrect length, just use that length instead rather than providing the user to
-// specifically provide the memory length with Module['TOTAL_MEMORY'].
-INITIAL_TOTAL_MEMORY = buffer.byteLength;
+// specifically provide the memory length with Module['INITIAL_MEMORY'].
+INITIAL_INITIAL_MEMORY = buffer.byteLength;
 updateGlobalBufferAndViews(buffer);
 
 if (!ENVIRONMENT_IS_PTHREAD) { // Pthreads have already initialized these variables in src/worker.js, where they were passed to the thread worker at startup time
@@ -1238,11 +1396,15 @@ HEAP32[DYNAMICTOP_PTR>>2] = DYNAMIC_BASE;
 
 
 
+
+
+
+
 function callRuntimeCallbacks(callbacks) {
   while(callbacks.length > 0) {
     var callback = callbacks.shift();
     if (typeof callback == 'function') {
-      callback();
+      callback(Module); // Pass the module as the first argument.
       continue;
     }
     var func = callback.func;
@@ -1331,6 +1493,7 @@ function addOnPostRun(cb) {
   __ATPOSTRUN__.unshift(cb);
 }
 
+/** @param {number|boolean=} ignore */
 function unSign(value, bits, ignore) {
   if (value >= 0) {
     return value;
@@ -1338,6 +1501,7 @@ function unSign(value, bits, ignore) {
   return bits <= 32 ? 2*Math.abs(1 << (bits-1)) + value // Need some trickery, since if bits == 32, we are right at the limit of the bits JS uses in bitshifts
                     : Math.pow(2, bits)         + value;
 }
+/** @param {number|boolean=} ignore */
 function reSign(value, bits, ignore) {
   if (value <= 0) {
     return value;
@@ -1352,6 +1516,16 @@ function reSign(value, bits, ignore) {
   return value;
 }
 
+
+
+
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/imul
+
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/fround
+
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/clz32
+
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/trunc
 
 
 var Math_abs = Math.abs;
@@ -1428,7 +1602,7 @@ function removeRunDependency(id) {
 Module["preloadedImages"] = {}; // maps url to image data
 Module["preloadedAudios"] = {}; // maps url to audio data
 
-
+/** @param {string|number=} what */
 function abort(what) {
   if (Module['onAbort']) {
     Module['onAbort'](what);
@@ -1436,13 +1610,22 @@ function abort(what) {
 
   if (ENVIRONMENT_IS_PTHREAD) console.error('Pthread aborting at ' + new Error().stack);
   what += '';
-  out(what);
   err(what);
 
   ABORT = true;
   EXITSTATUS = 1;
 
-  throw 'abort(' + what + '). Build with -s ASSERTIONS=1 for more info.';
+  what = 'abort(' + what + '). Build with -s ASSERTIONS=1 for more info.';
+
+  // Use a wasm runtime error, because a JS error might be seen as a foreign
+  // exception, which means we'd run destructors on it. We need the error to
+  // simply make the program stop.
+  var e = new WebAssembly.RuntimeError(what);
+
+  // Throw the error whether or not MODULARIZE is set because abort is used
+  // in code paths apart from instantiation where an exception is expected
+  // to be thrown when abort is called.
+  throw e;
 }
 
 
@@ -1450,25 +1633,34 @@ var memoryInitializer = null;
 
 
 
-// To work around https://bugzilla.mozilla.org/show_bug.cgi?id=1049079, warm up a worker pool before starting up the application.
-if (!ENVIRONMENT_IS_PTHREAD) addOnPreRun(function() { if (typeof SharedArrayBuffer !== 'undefined') { addRunDependency('pthreads'); PThread.allocateUnusedWorkers(4, function() { removeRunDependency('pthreads'); }); }});
 
 
 
 
-// Copyright 2017 The Emscripten Authors.  All rights reserved.
-// Emscripten is available under two separate licenses, the MIT license and the
-// University of Illinois/NCSA Open Source License.  Both these licenses can be
-// found in the LICENSE file.
+
+
+
+
+
+function hasPrefix(str, prefix) {
+  return String.prototype.startsWith ?
+      str.startsWith(prefix) :
+      str.indexOf(prefix) === 0;
+}
 
 // Prefix of data URIs emitted by SINGLE_FILE and related options.
 var dataURIPrefix = 'data:application/octet-stream;base64,';
 
 // Indicates whether filename is a base64 data URI.
 function isDataURI(filename) {
-  return String.prototype.startsWith ?
-      filename.startsWith(dataURIPrefix) :
-      filename.indexOf(dataURIPrefix) === 0;
+  return hasPrefix(filename, dataURIPrefix);
+}
+
+var fileURIPrefix = "file://";
+
+// Indicates whether filename is delivered via file protocol (as opposed to http/https)
+function isFileURI(filename) {
+  return hasPrefix(filename, fileURIPrefix);
 }
 
 
@@ -1497,9 +1689,12 @@ function getBinary() {
 }
 
 function getBinaryPromise() {
-  // if we don't have the binary yet, and have the Fetch api, use that
+  // If we don't have the binary yet, and have the Fetch api, use that;
   // in some environments, like Electron's render process, Fetch api may be present, but have a different context than expected, let's only use it on the Web
-  if (!wasmBinary && (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) && typeof fetch === 'function') {
+  if (!wasmBinary && (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) && typeof fetch === 'function'
+      // Let's not use fetch to get objects over file:// as it's most likely Cordova which doesn't support fetch for file://
+      && !isFileURI(wasmBinaryFile)
+      ) {
     return fetch(wasmBinaryFile, { credentials: 'same-origin' }).then(function(response) {
       if (!response['ok']) {
         throw "failed to load wasm binary file at '" + wasmBinaryFile + "'";
@@ -1523,27 +1718,28 @@ function createWasm() {
   // prepare imports
   var info = {
     'env': asmLibraryArg,
-    'wasi_unstable': asmLibraryArg
-    ,
-    'global': {
-      'NaN': NaN,
-      'Infinity': Infinity
-    },
-    'global.Math': Math,
-    'asm2wasm': asm2wasmImports
+    'wasi_snapshot_preview1': asmLibraryArg
   };
   // Load the wasm module and create an instance of using native support in the JS engine.
   // handle a generated wasm instance, receiving its exports and
   // performing other necessary setup
+  /** @param {WebAssembly.Module=} module*/
   function receiveInstance(instance, module) {
     var exports = instance.exports;
     Module['asm'] = exports;
-    // Keep a reference to the compiled module so we can post it to the workers.
+    // We now have the Wasm module loaded up, keep a reference to the compiled module so we can post it to the workers.
     wasmModule = module;
     // Instantiation is synchronous in pthreads and we assert on run dependencies.
-    if (!ENVIRONMENT_IS_PTHREAD) removeRunDependency('wasm-instantiate');
+    if (!ENVIRONMENT_IS_PTHREAD) {
+      var numWorkersToLoad = PThread.unusedWorkers.length;
+      PThread.unusedWorkers.forEach(function(w) { PThread.loadWasmModuleToWorker(w, function() {
+        // PTHREAD_POOL_DELAY_LOAD==0: we wanted to synchronously wait until the Worker pool
+        // has loaded up. If all Workers have finished loading up the Wasm Module, proceed with main()
+        if (!--numWorkersToLoad) removeRunDependency('wasm-instantiate');
+      })});
+    }
   }
-   // we can't run yet (except in a pthread, where we have a custom sync instantiator)
+  // we can't run yet (except in a pthread, where we have a custom sync instantiator)
   if (!ENVIRONMENT_IS_PTHREAD) { addRunDependency('wasm-instantiate'); }
 
 
@@ -1559,6 +1755,8 @@ function createWasm() {
       return WebAssembly.instantiate(binary, info);
     }).then(receiver, function(reason) {
       err('failed to asynchronously prepare wasm: ' + reason);
+
+
       abort(reason);
     });
   }
@@ -1568,6 +1766,8 @@ function createWasm() {
     if (!wasmBinary &&
         typeof WebAssembly.instantiateStreaming === 'function' &&
         !isDataURI(wasmBinaryFile) &&
+        // Don't use streaming for file:// delivered objects in a webview, fetch them synchronously.
+        !isFileURI(wasmBinaryFile) &&
         typeof fetch === 'function') {
       fetch(wasmBinaryFile, { credentials: 'same-origin' }).then(function (response) {
         var result = WebAssembly.instantiateStreaming(response, info);
@@ -1576,7 +1776,7 @@ function createWasm() {
             // in which case falling back to ArrayBuffer instantiation should work.
             err('wasm streaming compile failed: ' + reason);
             err('falling back to ArrayBuffer instantiation');
-            instantiateArrayBuffer(receiveInstantiatedSource);
+            return instantiateArrayBuffer(receiveInstantiatedSource);
           });
       });
     } else {
@@ -1600,7 +1800,6 @@ function createWasm() {
   return {}; // no exports yet; we'll fill them in later
 }
 
-Module['asm'] = createWasm;
 
 // Globals used by JS i64 conversions
 var tempDouble;
@@ -1608,56 +1807,25 @@ var tempI64;
 
 // === Body ===
 
-var ASM_CONSTS = [function() { postMessage({cmd : 'processQueuedMainThreadWork'}) },
- function($0) { if (!ENVIRONMENT_IS_PTHREAD) { if (!PThread.pthreads[$0] || !PThread.pthreads[$0].worker) { return 0; } PThread.pthreads[$0].worker.postMessage({cmd : 'processThreadQueue'}); } else { postMessage({targetThread : $0, cmd : 'processThreadQueue'}); } return 1; },
- function() { return !!(Module['canvas']) },
- function() { noExitRuntime = true }];
+var ASM_CONSTS = {
+  4472: function($0, $1) {setTimeout(function() { _do_emscripten_dispatch_to_thread($0, $1); }, 0);}
+};
 
-function _emscripten_asm_const_i(code) {
-  return ASM_CONSTS[code]();
-}
+function _emscripten_asm_const_iii(code, sigPtr, argbuf) {
+  var args = readAsmConstArgs(sigPtr, argbuf);
 
-function _emscripten_asm_const_ii(code, a0) {
-  return ASM_CONSTS[code](a0);
-}
-function _initPthreadsJS(){ PThread.initRuntime(); }
+  return ASM_CONSTS[code].apply(null, args);
+}function initPthreadsJS(){ PThread.initRuntime(); }
 
 
 
-// STATICTOP = STATIC_BASE + 21040;
-/* global initializers */ if (!ENVIRONMENT_IS_PTHREAD) __ATINIT__.push({ func: function() { ___emscripten_pthread_data_constructor() } });
-
-
-if (!ENVIRONMENT_IS_PTHREAD) {
-memoryInitializer = "pthreads.html.mem";
-}
-
+// STATICTOP = STATIC_BASE + 7216;
+/* global initializers */ if (!ENVIRONMENT_IS_PTHREAD) __ATINIT__.push({ func: function() { ___wasm_call_ctors() } });
 
 
 
 
 /* no memory initializer */
-var tempDoublePtr;
-if (!ENVIRONMENT_IS_PTHREAD) tempDoublePtr = 22048;
-
-function copyTempFloat(ptr) { // functions, because inlining this code increases code size too much
-  HEAP8[tempDoublePtr] = HEAP8[ptr];
-  HEAP8[tempDoublePtr+1] = HEAP8[ptr+1];
-  HEAP8[tempDoublePtr+2] = HEAP8[ptr+2];
-  HEAP8[tempDoublePtr+3] = HEAP8[ptr+3];
-}
-
-function copyTempDouble(ptr) {
-  HEAP8[tempDoublePtr] = HEAP8[ptr];
-  HEAP8[tempDoublePtr+1] = HEAP8[ptr+1];
-  HEAP8[tempDoublePtr+2] = HEAP8[ptr+2];
-  HEAP8[tempDoublePtr+3] = HEAP8[ptr+3];
-  HEAP8[tempDoublePtr+4] = HEAP8[ptr+4];
-  HEAP8[tempDoublePtr+5] = HEAP8[ptr+5];
-  HEAP8[tempDoublePtr+6] = HEAP8[ptr+6];
-  HEAP8[tempDoublePtr+7] = HEAP8[ptr+7];
-}
-
 // {{PRE_LIBRARY}}
 
 
@@ -1667,7 +1835,7 @@ function copyTempDouble(ptr) {
 
   function demangleAll(text) {
       var regex =
-        /\b__Z[\w\d_]+/g;
+        /\b_Z[\w\d_]+/g;
       return text.replace(regex,
         function(x) {
           var y = demangle(x);
@@ -1675,13 +1843,334 @@ function copyTempDouble(ptr) {
         });
     }
 
+  
+  
+  
+  var __pthread_ptr=0;
+  
+  var __pthread_is_main_runtime_thread=0;
+  
+  var __pthread_is_main_browser_thread=0;function registerPthreadPtr(pthreadPtr, isMainBrowserThread, isMainRuntimeThread) {
+      pthreadPtr = pthreadPtr|0;
+      isMainBrowserThread = isMainBrowserThread|0;
+      isMainRuntimeThread = isMainRuntimeThread|0;
+      __pthread_ptr = pthreadPtr;
+      __pthread_is_main_browser_thread = isMainBrowserThread;
+      __pthread_is_main_runtime_thread = isMainRuntimeThread;
+    }
+  Module["registerPthreadPtr"] = registerPthreadPtr;
+  
+  var ERRNO_CODES={EPERM:63,ENOENT:44,ESRCH:71,EINTR:27,EIO:29,ENXIO:60,E2BIG:1,ENOEXEC:45,EBADF:8,ECHILD:12,EAGAIN:6,EWOULDBLOCK:6,ENOMEM:48,EACCES:2,EFAULT:21,ENOTBLK:105,EBUSY:10,EEXIST:20,EXDEV:75,ENODEV:43,ENOTDIR:54,EISDIR:31,EINVAL:28,ENFILE:41,EMFILE:33,ENOTTY:59,ETXTBSY:74,EFBIG:22,ENOSPC:51,ESPIPE:70,EROFS:69,EMLINK:34,EPIPE:64,EDOM:18,ERANGE:68,ENOMSG:49,EIDRM:24,ECHRNG:106,EL2NSYNC:156,EL3HLT:107,EL3RST:108,ELNRNG:109,EUNATCH:110,ENOCSI:111,EL2HLT:112,EDEADLK:16,ENOLCK:46,EBADE:113,EBADR:114,EXFULL:115,ENOANO:104,EBADRQC:103,EBADSLT:102,EDEADLOCK:16,EBFONT:101,ENOSTR:100,ENODATA:116,ETIME:117,ENOSR:118,ENONET:119,ENOPKG:120,EREMOTE:121,ENOLINK:47,EADV:122,ESRMNT:123,ECOMM:124,EPROTO:65,EMULTIHOP:36,EDOTDOT:125,EBADMSG:9,ENOTUNIQ:126,EBADFD:127,EREMCHG:128,ELIBACC:129,ELIBBAD:130,ELIBSCN:131,ELIBMAX:132,ELIBEXEC:133,ENOSYS:52,ENOTEMPTY:55,ENAMETOOLONG:37,ELOOP:32,EOPNOTSUPP:138,EPFNOSUPPORT:139,ECONNRESET:15,ENOBUFS:42,EAFNOSUPPORT:5,EPROTOTYPE:67,ENOTSOCK:57,ENOPROTOOPT:50,ESHUTDOWN:140,ECONNREFUSED:14,EADDRINUSE:3,ECONNABORTED:13,ENETUNREACH:40,ENETDOWN:38,ETIMEDOUT:73,EHOSTDOWN:142,EHOSTUNREACH:23,EINPROGRESS:26,EALREADY:7,EDESTADDRREQ:17,EMSGSIZE:35,EPROTONOSUPPORT:66,ESOCKTNOSUPPORT:137,EADDRNOTAVAIL:4,ENETRESET:39,EISCONN:30,ENOTCONN:53,ETOOMANYREFS:141,EUSERS:136,EDQUOT:19,ESTALE:72,ENOTSUP:138,ENOMEDIUM:148,EILSEQ:25,EOVERFLOW:61,ECANCELED:11,ENOTRECOVERABLE:56,EOWNERDEAD:62,ESTRPIPE:135};
+  
+  
+  var __main_thread_futex_wait_address=8224;function _emscripten_futex_wake(addr, count) {
+      if (addr <= 0 || addr > HEAP8.length || addr&3 != 0 || count < 0) return -28;
+      if (count == 0) return 0;
+      // Waking (at least) INT_MAX waiters is defined to mean wake all callers.
+      // For Atomics.notify() API Infinity is to be passed in that case.
+      if (count >= 2147483647) count = Infinity;
+  
+      // See if main thread is waiting on this address? If so, wake it up by resetting its wake location to zero.
+      // Note that this is not a fair procedure, since we always wake main thread first before any workers, so
+      // this scheme does not adhere to real queue-based waiting.
+      var mainThreadWaitAddress = Atomics.load(HEAP32, __main_thread_futex_wait_address >> 2);
+      var mainThreadWoken = 0;
+      if (mainThreadWaitAddress == addr) {
+        var loadedAddr = Atomics.compareExchange(HEAP32, __main_thread_futex_wait_address >> 2, mainThreadWaitAddress, 0);
+        if (loadedAddr == mainThreadWaitAddress) {
+          --count;
+          mainThreadWoken = 1;
+          if (count <= 0) return 1;
+        }
+      }
+  
+      // Wake any workers waiting on this address.
+      var ret = Atomics.notify(HEAP32, addr >> 2, count);
+      if (ret >= 0) return ret + mainThreadWoken;
+      throw 'Atomics.notify returned an unexpected value ' + ret;
+    }
+  Module["_emscripten_futex_wake"] = _emscripten_futex_wake;
+  
+  function killThread(pthread_ptr) {
+      if (ENVIRONMENT_IS_PTHREAD) throw 'Internal Error! killThread() can only ever be called from main application thread!';
+      if (!pthread_ptr) throw 'Internal Error! Null pthread_ptr in killThread!';
+      HEAP32[(((pthread_ptr)+(12))>>2)]=0;
+      var pthread = PThread.pthreads[pthread_ptr];
+      pthread.worker.terminate();
+      PThread.freeThreadData(pthread);
+      // The worker was completely nuked (not just the pthread execution it was hosting), so remove it from running workers
+      // but don't put it back to the pool.
+      PThread.runningWorkers.splice(PThread.runningWorkers.indexOf(pthread.worker), 1); // Not a running Worker anymore.
+      pthread.worker.pthread = undefined;
+    }
+  
+  function cancelThread(pthread_ptr) {
+      if (ENVIRONMENT_IS_PTHREAD) throw 'Internal Error! cancelThread() can only ever be called from main application thread!';
+      if (!pthread_ptr) throw 'Internal Error! Null pthread_ptr in cancelThread!';
+      var pthread = PThread.pthreads[pthread_ptr];
+      pthread.worker.postMessage({ 'cmd': 'cancel' });
+    }
+  
+  function cleanupThread(pthread_ptr) {
+      if (ENVIRONMENT_IS_PTHREAD) throw 'Internal Error! cleanupThread() can only ever be called from main application thread!';
+      if (!pthread_ptr) throw 'Internal Error! Null pthread_ptr in cleanupThread!';
+      HEAP32[(((pthread_ptr)+(12))>>2)]=0;
+      var pthread = PThread.pthreads[pthread_ptr];
+      if (pthread) {
+        var worker = pthread.worker;
+        PThread.returnWorkerToPool(worker);
+      }
+    }var PThread={MAIN_THREAD_ID:1,mainThreadInfo:{schedPolicy:0,schedPrio:0},unusedWorkers:[],runningWorkers:[],initRuntime:function() {
+        // Pass the thread address inside the asm.js scope to store it for fast access that avoids the need for a FFI out.
+        // Global constructors trying to access this value will read the wrong value, but that is UB anyway.
+        registerPthreadPtr(PThread.mainThreadBlock, /*isMainBrowserThread=*/!ENVIRONMENT_IS_WORKER, /*isMainRuntimeThread=*/1);
+        _emscripten_register_main_browser_thread_id(PThread.mainThreadBlock);
+      },initMainThreadBlock:function() {
+  
+        var pthreadPoolSize = 4;
+        // Start loading up the Worker pool, if requested.
+        for(var i = 0; i < pthreadPoolSize; ++i) {
+          PThread.allocateUnusedWorker();
+        }
+  
+        // In asm.js we do not need to wait for Wasm Module to compile on the main thread, so can load
+        // up each Worker immediately. (in asm.js mode ignore PTHREAD_POOL_DELAY_LOAD altogether for
+        // simplicity, as multithreading performance optimizations are not interesting there)
+  
+        PThread.mainThreadBlock = 7472;
+  
+        for (var i = 0; i < 232/4; ++i) HEAPU32[PThread.mainThreadBlock/4+i] = 0;
+  
+        // The pthread struct has a field that points to itself - this is used as a magic ID to detect whether the pthread_t
+        // structure is 'alive'.
+        HEAP32[(((PThread.mainThreadBlock)+(12))>>2)]=PThread.mainThreadBlock;
+  
+        // pthread struct robust_list head should point to itself.
+        var headPtr = PThread.mainThreadBlock + 156;
+        HEAP32[((headPtr)>>2)]=headPtr;
+  
+        // Allocate memory for thread-local storage.
+        var tlsMemory = 7712;
+        for (var i = 0; i < 128; ++i) HEAPU32[tlsMemory/4+i] = 0;
+        Atomics.store(HEAPU32, (PThread.mainThreadBlock + 104 ) >> 2, tlsMemory); // Init thread-local-storage memory array.
+        Atomics.store(HEAPU32, (PThread.mainThreadBlock + 40 ) >> 2, PThread.mainThreadBlock); // Main thread ID.
+        Atomics.store(HEAPU32, (PThread.mainThreadBlock + 44 ) >> 2, 42); // Process ID.
+  
+      },initWorker:function() {
+      },pthreads:{},threadExitHandlers:[],setThreadStatus:function() {},runExitHandlers:function() {
+        while (PThread.threadExitHandlers.length > 0) {
+          PThread.threadExitHandlers.pop()();
+        }
+  
+        // Call into the musl function that runs destructors of all thread-specific data.
+        if (ENVIRONMENT_IS_PTHREAD && threadInfoStruct) ___pthread_tsd_run_dtors();
+      },threadExit:function(exitCode) {
+        var tb = _pthread_self();
+        if (tb) { // If we haven't yet exited?
+          Atomics.store(HEAPU32, (tb + 4 ) >> 2, exitCode);
+          // When we publish this, the main thread is free to deallocate the thread object and we are done.
+          // Therefore set threadInfoStruct = 0; above to 'release' the object in this worker thread.
+          Atomics.store(HEAPU32, (tb + 0 ) >> 2, 1);
+  
+          // Disable all cancellation so that executing the cleanup handlers won't trigger another JS
+          // canceled exception to be thrown.
+          Atomics.store(HEAPU32, (tb + 60 ) >> 2, 1/*PTHREAD_CANCEL_DISABLE*/);
+          Atomics.store(HEAPU32, (tb + 64 ) >> 2, 0/*PTHREAD_CANCEL_DEFERRED*/);
+          PThread.runExitHandlers();
+  
+          _emscripten_futex_wake(tb + 0, 2147483647);
+          registerPthreadPtr(0, 0, 0); // Unregister the thread block also inside the asm.js scope.
+          threadInfoStruct = 0;
+          if (ENVIRONMENT_IS_PTHREAD) {
+            // Note: in theory we would like to return any offscreen canvases back to the main thread,
+            // but if we ever fetched a rendering context for them that would not be valid, so we don't try.
+            postMessage({ 'cmd': 'exit' });
+          }
+        }
+      },threadCancel:function() {
+        PThread.runExitHandlers();
+        Atomics.store(HEAPU32, (threadInfoStruct + 4 ) >> 2, -1/*PTHREAD_CANCELED*/);
+        Atomics.store(HEAPU32, (threadInfoStruct + 0 ) >> 2, 1); // Mark the thread as no longer running.
+        _emscripten_futex_wake(threadInfoStruct + 0, 2147483647); // wake all threads
+        threadInfoStruct = selfThreadId = 0; // Not hosting a pthread anymore in this worker, reset the info structures to null.
+        registerPthreadPtr(0, 0, 0); // Unregister the thread block also inside the asm.js scope.
+        postMessage({ 'cmd': 'cancelDone' });
+      },terminateAllThreads:function() {
+        for (var t in PThread.pthreads) {
+          var pthread = PThread.pthreads[t];
+          if (pthread && pthread.worker) {
+            PThread.returnWorkerToPool(pthread.worker);
+          }
+        }
+        PThread.pthreads = {};
+  
+        for (var i = 0; i < PThread.unusedWorkers.length; ++i) {
+          var worker = PThread.unusedWorkers[i];
+          worker.terminate();
+        }
+        PThread.unusedWorkers = [];
+  
+        for (var i = 0; i < PThread.runningWorkers.length; ++i) {
+          var worker = PThread.runningWorkers[i];
+          var pthread = worker.pthread;
+          PThread.freeThreadData(pthread);
+          worker.terminate();
+        }
+        PThread.runningWorkers = [];
+      },freeThreadData:function(pthread) {
+        if (!pthread) return;
+        if (pthread.threadInfoStruct) {
+          var tlsMemory = HEAP32[(((pthread.threadInfoStruct)+(104))>>2)];
+          HEAP32[(((pthread.threadInfoStruct)+(104))>>2)]=0;
+          _free(tlsMemory);
+          _free(pthread.threadInfoStruct);
+        }
+        pthread.threadInfoStruct = 0;
+        if (pthread.allocatedOwnStack && pthread.stackBase) _free(pthread.stackBase);
+        pthread.stackBase = 0;
+        if (pthread.worker) pthread.worker.pthread = null;
+      },returnWorkerToPool:function(worker) {
+        delete PThread.pthreads[worker.pthread.thread];
+        //Note: worker is intentionally not terminated so the pool can dynamically grow.
+        PThread.unusedWorkers.push(worker);
+        PThread.runningWorkers.splice(PThread.runningWorkers.indexOf(worker), 1); // Not a running Worker anymore
+        PThread.freeThreadData(worker.pthread);
+        worker.pthread = undefined; // Detach the worker from the pthread object, and return it to the worker pool as an unused worker.
+      },receiveObjectTransfer:function(data) {
+      },loadWasmModuleToWorker:function(worker, onFinishedLoading) {
+        worker.onmessage = function(e) {
+          var d = e['data'];
+          var cmd = d['cmd'];
+          // Sometimes we need to backproxy events to the calling thread (e.g. HTML5 DOM events handlers such as emscripten_set_mousemove_callback()), so keep track in a globally accessible variable about the thread that initiated the proxying.
+          if (worker.pthread) PThread.currentProxiedOperationCallerThread = worker.pthread.threadInfoStruct;
+  
+          // If this message is intended to a recipient that is not the main thread, forward it to the target thread.
+          if (d['targetThread'] && d['targetThread'] != _pthread_self()) {
+            var thread = PThread.pthreads[d.targetThread];
+            if (thread) {
+              thread.worker.postMessage(e.data, d['transferList']);
+            } else {
+              console.error('Internal error! Worker sent a message "' + cmd + '" to target pthread ' + d['targetThread'] + ', but that thread no longer exists!');
+            }
+            PThread.currentProxiedOperationCallerThread = undefined;
+            return;
+          }
+  
+          if (cmd === 'processQueuedMainThreadWork') {
+            // TODO: Must post message to main Emscripten thread in PROXY_TO_WORKER mode.
+            _emscripten_main_thread_process_queued_calls();
+          } else if (cmd === 'spawnThread') {
+            spawnThread(e.data);
+          } else if (cmd === 'cleanupThread') {
+            cleanupThread(d['thread']);
+          } else if (cmd === 'killThread') {
+            killThread(d['thread']);
+          } else if (cmd === 'cancelThread') {
+            cancelThread(d['thread']);
+          } else if (cmd === 'loaded') {
+            worker.loaded = true;
+            if (onFinishedLoading) onFinishedLoading(worker);
+            // If this Worker is already pending to start running a thread, launch the thread now
+            if (worker.runPthread) {
+              worker.runPthread();
+              delete worker.runPthread;
+            }
+          } else if (cmd === 'print') {
+            out('Thread ' + d['threadId'] + ': ' + d['text']);
+          } else if (cmd === 'printErr') {
+            err('Thread ' + d['threadId'] + ': ' + d['text']);
+          } else if (cmd === 'alert') {
+            alert('Thread ' + d['threadId'] + ': ' + d['text']);
+          } else if (cmd === 'exit') {
+            var detached = worker.pthread && Atomics.load(HEAPU32, (worker.pthread.thread + 68) >> 2);
+            if (detached) {
+              PThread.returnWorkerToPool(worker);
+            }
+          } else if (cmd === 'cancelDone') {
+            PThread.returnWorkerToPool(worker);
+          } else if (cmd === 'objectTransfer') {
+            PThread.receiveObjectTransfer(e.data);
+          } else if (e.data.target === 'setimmediate') {
+            worker.postMessage(e.data); // Worker wants to postMessage() to itself to implement setImmediate() emulation.
+          } else {
+            err("worker sent an unknown command " + cmd);
+          }
+          PThread.currentProxiedOperationCallerThread = undefined;
+        };
+  
+        worker.onerror = function(e) {
+          err('pthread sent an error! ' + e.filename + ':' + e.lineno + ': ' + e.message);
+        };
+  
+        if (ENVIRONMENT_IS_NODE) {
+          worker.on('message', function(data) {
+            worker.onmessage({ data: data });
+          });
+          worker.on('error', function(data) {
+            worker.onerror(data);
+          });
+          worker.on('exit', function(data) {
+            console.log('worker exited - TODO: update the worker queue?');
+          });
+        }
+  
+  
+        // Ask the new worker to load up the Emscripten-compiled page. This is a heavy operation.
+        worker.postMessage({
+          'cmd': 'load',
+          // If the application main .js file was loaded from a Blob, then it is not possible
+          // to access the URL of the current script that could be passed to a Web Worker so that
+          // it could load up the same file. In that case, developer must either deliver the Blob
+          // object in Module['mainScriptUrlOrBlob'], or a URL to it, so that pthread Workers can
+          // independently load up the same main application file.
+          'urlOrBlob': Module['mainScriptUrlOrBlob'] || _scriptDir,
+          'wasmMemory': wasmMemory,
+          'wasmModule': wasmModule,
+          'DYNAMIC_BASE': DYNAMIC_BASE,
+          'DYNAMICTOP_PTR': DYNAMICTOP_PTR
+        });
+      },allocateUnusedWorker:function() {
+        // Allow HTML module to configure the location where the 'worker.js' file will be loaded from,
+        // via Module.locateFile() function. If not specified, then the default URL 'worker.js' relative
+        // to the main html file is loaded.
+        var pthreadMainJs = locateFile('pthreads.worker.js');
+        PThread.unusedWorkers.push(new Worker(pthreadMainJs));
+      },getNewWorker:function() {
+        if (PThread.unusedWorkers.length == 0) {
+          PThread.allocateUnusedWorker();
+          PThread.loadWasmModuleToWorker(PThread.unusedWorkers[0]);
+        }
+        if (PThread.unusedWorkers.length > 0) return PThread.unusedWorkers.pop();
+        else return null;
+      },busySpinWait:function(msecs) {
+        var t = performance.now() + msecs;
+        while(performance.now() < t) {
+          ;
+        }
+      }};function establishStackSpace(stackTop, stackMax) {
+      STACK_BASE = STACKTOP = stackTop;
+      STACK_MAX = stackMax;
+  
+  
+  
+      // Call inside wasm module to set up the stack frame for this pthread in asm.js/wasm module scope
+      stackRestore(stackTop);
+  
+    }
+  Module["establishStackSpace"] = establishStackSpace;
+
+  function getNoExitRuntime() {
+      return noExitRuntime;
+    }
+  Module["getNoExitRuntime"] = getNoExitRuntime;
+
   function jsStackTrace() {
       var err = new Error();
       if (!err.stack) {
         // IE10+ special cases: It does have callstack info, but it is only populated if an Error object is thrown,
         // so try that as a special-case.
         try {
-          throw new Error(0);
+          throw new Error();
         } catch(e) {
           err = e;
         }
@@ -1704,307 +2193,32 @@ function copyTempDouble(ptr) {
 
   
   
-  var PROCINFO={ppid:1,pid:42,sid:42,pgid:42};
+  var _emscripten_get_now;if (ENVIRONMENT_IS_NODE) {
+    _emscripten_get_now = function() {
+      var t = process['hrtime']();
+      return t[0] * 1e3 + t[1] / 1e6;
+    };
+  } else if (ENVIRONMENT_IS_PTHREAD) {
+    _emscripten_get_now = function() { return performance.now() - Module['__performance_now_clock_drift']; };
+  } else if (typeof dateNow !== 'undefined') {
+    _emscripten_get_now = dateNow;
+  } else _emscripten_get_now = function() { return performance.now(); }
+  ;
   
+  var _emscripten_get_now_is_monotonic=true;;
   
-  var __pthread_ptr=0;
-  
-  var __pthread_is_main_runtime_thread=0;
-  
-  var __pthread_is_main_browser_thread=0; 
-  
-  var ERRNO_CODES={EPERM:1,ENOENT:2,ESRCH:3,EINTR:4,EIO:5,ENXIO:6,E2BIG:7,ENOEXEC:8,EBADF:9,ECHILD:10,EAGAIN:11,EWOULDBLOCK:11,ENOMEM:12,EACCES:13,EFAULT:14,ENOTBLK:15,EBUSY:16,EEXIST:17,EXDEV:18,ENODEV:19,ENOTDIR:20,EISDIR:21,EINVAL:22,ENFILE:23,EMFILE:24,ENOTTY:25,ETXTBSY:26,EFBIG:27,ENOSPC:28,ESPIPE:29,EROFS:30,EMLINK:31,EPIPE:32,EDOM:33,ERANGE:34,ENOMSG:42,EIDRM:43,ECHRNG:44,EL2NSYNC:45,EL3HLT:46,EL3RST:47,ELNRNG:48,EUNATCH:49,ENOCSI:50,EL2HLT:51,EDEADLK:35,ENOLCK:37,EBADE:52,EBADR:53,EXFULL:54,ENOANO:55,EBADRQC:56,EBADSLT:57,EDEADLOCK:35,EBFONT:59,ENOSTR:60,ENODATA:61,ETIME:62,ENOSR:63,ENONET:64,ENOPKG:65,EREMOTE:66,ENOLINK:67,EADV:68,ESRMNT:69,ECOMM:70,EPROTO:71,EMULTIHOP:72,EDOTDOT:73,EBADMSG:74,ENOTUNIQ:76,EBADFD:77,EREMCHG:78,ELIBACC:79,ELIBBAD:80,ELIBSCN:81,ELIBMAX:82,ELIBEXEC:83,ENOSYS:38,ENOTEMPTY:39,ENAMETOOLONG:36,ELOOP:40,EOPNOTSUPP:95,EPFNOSUPPORT:96,ECONNRESET:104,ENOBUFS:105,EAFNOSUPPORT:97,EPROTOTYPE:91,ENOTSOCK:88,ENOPROTOOPT:92,ESHUTDOWN:108,ECONNREFUSED:111,EADDRINUSE:98,ECONNABORTED:103,ENETUNREACH:101,ENETDOWN:100,ETIMEDOUT:110,EHOSTDOWN:112,EHOSTUNREACH:113,EINPROGRESS:115,EALREADY:114,EDESTADDRREQ:89,EMSGSIZE:90,EPROTONOSUPPORT:93,ESOCKTNOSUPPORT:94,EADDRNOTAVAIL:99,ENETRESET:102,EISCONN:106,ENOTCONN:107,ETOOMANYREFS:109,EUSERS:87,EDQUOT:122,ESTALE:116,ENOTSUP:95,ENOMEDIUM:123,EILSEQ:84,EOVERFLOW:75,ECANCELED:125,ENOTRECOVERABLE:131,EOWNERDEAD:130,ESTRPIPE:86};
-  
-  
-  var __main_thread_futex_wait_address; if (ENVIRONMENT_IS_PTHREAD) __main_thread_futex_wait_address = PthreadWorkerInit.__main_thread_futex_wait_address; else PthreadWorkerInit.__main_thread_futex_wait_address = __main_thread_futex_wait_address = 22032;function _emscripten_futex_wake(addr, count) {
-      if (addr <= 0 || addr > HEAP8.length || addr&3 != 0 || count < 0) return -22;
-      if (count == 0) return 0;
-      // Waking (at least) INT_MAX waiters is defined to mean wake all callers.
-      // For Atomics.notify() API Infinity is to be passed in that case.
-      if (count >= 2147483647) count = Infinity;
-  //    dump('futex_wake addr:' + addr + ' by thread: ' + _pthread_self() + (ENVIRONMENT_IS_PTHREAD?'(pthread)':'') + '\n');
-  
-      // See if main thread is waiting on this address? If so, wake it up by resetting its wake location to zero.
-      // Note that this is not a fair procedure, since we always wake main thread first before any workers, so
-      // this scheme does not adhere to real queue-based waiting.
-      var mainThreadWaitAddress = Atomics.load(HEAP32, __main_thread_futex_wait_address >> 2);
-      var mainThreadWoken = 0;
-      if (mainThreadWaitAddress == addr) {
-        var loadedAddr = Atomics.compareExchange(HEAP32, __main_thread_futex_wait_address >> 2, mainThreadWaitAddress, 0);
-        if (loadedAddr == mainThreadWaitAddress) {
-          --count;
-          mainThreadWoken = 1;
-          if (count <= 0) return 1;
-        }
-      }
-  
-      // Wake any workers waiting on this address.
-      var ret = Atomics.notify(HEAP32, addr >> 2, count);
-      if (ret >= 0) return ret + mainThreadWoken;
-      throw 'Atomics.notify returned an unexpected value ' + ret;
-    }var PThread={MAIN_THREAD_ID:1,mainThreadInfo:{schedPolicy:0,schedPrio:0},unusedWorkers:[],runningWorkers:[],initRuntime:function() {
-        // Pass the thread address inside the asm.js scope to store it for fast access that avoids the need for a FFI out.
-        // Global constructors trying to access this value will read the wrong value, but that is UB anyway.
-        __register_pthread_ptr(PThread.mainThreadBlock, /*isMainBrowserThread=*/!ENVIRONMENT_IS_WORKER, /*isMainRuntimeThread=*/1);
-        _emscripten_register_main_browser_thread_id(PThread.mainThreadBlock);
-      },initMainThreadBlock:function() {
-        if (ENVIRONMENT_IS_PTHREAD) return undefined;
-        PThread.mainThreadBlock = 21248;
-  
-        for (var i = 0; i < 244/4; ++i) HEAPU32[PThread.mainThreadBlock/4+i] = 0;
-  
-        // The pthread struct has a field that points to itself - this is used as a magic ID to detect whether the pthread_t
-        // structure is 'alive'.
-        HEAP32[(((PThread.mainThreadBlock)+(24))>>2)]=PThread.mainThreadBlock;
-  
-        // pthread struct robust_list head should point to itself.
-        var headPtr = PThread.mainThreadBlock + 168;
-        HEAP32[((headPtr)>>2)]=headPtr;
-  
-        // Allocate memory for thread-local storage.
-        var tlsMemory = 21504;
-        for (var i = 0; i < 128; ++i) HEAPU32[tlsMemory/4+i] = 0;
-        Atomics.store(HEAPU32, (PThread.mainThreadBlock + 116 ) >> 2, tlsMemory); // Init thread-local-storage memory array.
-        Atomics.store(HEAPU32, (PThread.mainThreadBlock + 52 ) >> 2, PThread.mainThreadBlock); // Main thread ID.
-        Atomics.store(HEAPU32, (PThread.mainThreadBlock + 56 ) >> 2, PROCINFO.pid); // Process ID.
-  
-      },pthreads:{},exitHandlers:null,setThreadStatus:function() {},runExitHandlers:function() {
-        if (PThread.exitHandlers !== null) {
-          while (PThread.exitHandlers.length > 0) {
-            PThread.exitHandlers.pop()();
-          }
-          PThread.exitHandlers = null;
-        }
-  
-        // Call into the musl function that runs destructors of all thread-specific data.
-        if (ENVIRONMENT_IS_PTHREAD && threadInfoStruct) ___pthread_tsd_run_dtors();
-      },threadExit:function(exitCode) {
-        var tb = _pthread_self();
-        if (tb) { // If we haven't yet exited?
-          Atomics.store(HEAPU32, (tb + 4 ) >> 2, exitCode);
-          // When we publish this, the main thread is free to deallocate the thread object and we are done.
-          // Therefore set threadInfoStruct = 0; above to 'release' the object in this worker thread.
-          Atomics.store(HEAPU32, (tb + 0 ) >> 2, 1);
-  
-          // Disable all cancellation so that executing the cleanup handlers won't trigger another JS
-          // canceled exception to be thrown.
-          Atomics.store(HEAPU32, (tb + 72 ) >> 2, 1/*PTHREAD_CANCEL_DISABLE*/);
-          Atomics.store(HEAPU32, (tb + 76 ) >> 2, 0/*PTHREAD_CANCEL_DEFERRED*/);
-          PThread.runExitHandlers();
-  
-          _emscripten_futex_wake(tb + 0, 2147483647);
-          __register_pthread_ptr(0, 0, 0); // Unregister the thread block also inside the asm.js scope.
-          threadInfoStruct = 0;
-          if (ENVIRONMENT_IS_PTHREAD) {
-            // Note: in theory we would like to return any offscreen canvases back to the main thread,
-            // but if we ever fetched a rendering context for them that would not be valid, so we don't try.
-            postMessage({ cmd: 'exit' });
-          }
-        }
-      },threadCancel:function() {
-        PThread.runExitHandlers();
-        Atomics.store(HEAPU32, (threadInfoStruct + 4 ) >> 2, -1/*PTHREAD_CANCELED*/);
-        Atomics.store(HEAPU32, (threadInfoStruct + 0 ) >> 2, 1); // Mark the thread as no longer running.
-        _emscripten_futex_wake(threadInfoStruct + 0, 2147483647); // wake all threads
-        threadInfoStruct = selfThreadId = 0; // Not hosting a pthread anymore in this worker, reset the info structures to null.
-        __register_pthread_ptr(0, 0, 0); // Unregister the thread block also inside the asm.js scope.
-        postMessage({ cmd: 'cancelDone' });
-      },terminateAllThreads:function() {
-        for (var t in PThread.pthreads) {
-          var pthread = PThread.pthreads[t];
-          if (pthread) {
-            PThread.freeThreadData(pthread);
-            if (pthread.worker) pthread.worker.terminate();
-          }
-        }
-        PThread.pthreads = {};
-  
-        for (var i = 0; i < PThread.unusedWorkers.length; ++i) {
-          var worker = PThread.unusedWorkers[i];
-          worker.terminate();
-        }
-        PThread.unusedWorkers = [];
-  
-        for (var i = 0; i < PThread.runningWorkers.length; ++i) {
-          var worker = PThread.runningWorkers[i];
-          var pthread = worker.pthread;
-          PThread.freeThreadData(pthread);
-          worker.terminate();
-        }
-        PThread.runningWorkers = [];
-      },freeThreadData:function(pthread) {
-        if (!pthread) return;
-        if (pthread.threadInfoStruct) {
-          var tlsMemory = HEAP32[(((pthread.threadInfoStruct)+(116))>>2)];
-          HEAP32[(((pthread.threadInfoStruct)+(116))>>2)]=0;
-          _free(tlsMemory);
-          _free(pthread.threadInfoStruct);
-        }
-        pthread.threadInfoStruct = 0;
-        if (pthread.allocatedOwnStack && pthread.stackBase) _free(pthread.stackBase);
-        pthread.stackBase = 0;
-        if (pthread.worker) pthread.worker.pthread = null;
-      },returnWorkerToPool:function(worker) {
-        delete PThread.pthreads[worker.pthread.thread];
-        //Note: worker is intentionally not terminated so the pool can dynamically grow.
-        PThread.unusedWorkers.push(worker);
-        PThread.runningWorkers.splice(PThread.runningWorkers.indexOf(worker), 1); // Not a running Worker anymore
-        PThread.freeThreadData(worker.pthread);
-        worker.pthread = undefined; // Detach the worker from the pthread object, and return it to the worker pool as an unused worker.
-      },receiveObjectTransfer:function(data) {
-      },allocateUnusedWorkers:function(numWorkers, onFinishedLoading) {
-        if (typeof SharedArrayBuffer === 'undefined') return; // No multithreading support, no-op.
-  
-        var numWorkersLoaded = 0;
-        var pthreadMainJs = "pthreads.worker.js";
-        // Allow HTML module to configure the location where the 'worker.js' file will be loaded from,
-        // via Module.locateFile() function. If not specified, then the default URL 'worker.js' relative
-        // to the main html file is loaded.
-        pthreadMainJs = locateFile(pthreadMainJs);
-  
-        for (var i = 0; i < numWorkers; ++i) {
-          var worker = new Worker(pthreadMainJs);
-  
-          (function(worker) {
-            worker.onmessage = function(e) {
-              var d = e.data;
-              // Sometimes we need to backproxy events to the calling thread (e.g. HTML5 DOM events handlers such as emscripten_set_mousemove_callback()), so keep track in a globally accessible variable about the thread that initiated the proxying.
-              if (worker.pthread) PThread.currentProxiedOperationCallerThread = worker.pthread.threadInfoStruct;
-  
-              // If this message is intended to a recipient that is not the main thread, forward it to the target thread.
-              if (d.targetThread && d.targetThread != _pthread_self()) {
-                var thread = PThread.pthreads[d.targetThread];
-                if (thread) {
-                  thread.worker.postMessage(e.data, d.transferList);
-                } else {
-                  console.error('Internal error! Worker sent a message "' + d.cmd + '" to target pthread ' + d.targetThread + ', but that thread no longer exists!');
-                }
-                PThread.currentProxiedOperationCallerThread = undefined;
-                return;
-              }
-  
-              if (d.cmd === 'processQueuedMainThreadWork') {
-                // TODO: Must post message to main Emscripten thread in PROXY_TO_WORKER mode.
-                _emscripten_main_thread_process_queued_calls();
-              } else if (d.cmd === 'spawnThread') {
-                __spawn_thread(e.data);
-              } else if (d.cmd === 'cleanupThread') {
-                __cleanup_thread(d.thread);
-              } else if (d.cmd === 'killThread') {
-                __kill_thread(d.thread);
-              } else if (d.cmd === 'cancelThread') {
-                __cancel_thread(d.thread);
-              } else if (d.cmd === 'loaded') {
-                worker.loaded = true;
-                // If this Worker is already pending to start running a thread, launch the thread now
-                if (worker.runPthread) {
-                  worker.runPthread();
-                  delete worker.runPthread;
-                }
-                ++numWorkersLoaded;
-                if (numWorkersLoaded === numWorkers && onFinishedLoading) {
-                  onFinishedLoading();
-                }
-              } else if (d.cmd === 'print') {
-                out('Thread ' + d.threadId + ': ' + d.text);
-              } else if (d.cmd === 'printErr') {
-                err('Thread ' + d.threadId + ': ' + d.text);
-              } else if (d.cmd === 'alert') {
-                alert('Thread ' + d.threadId + ': ' + d.text);
-              } else if (d.cmd === 'exit') {
-                var detached = worker.pthread && Atomics.load(HEAPU32, (worker.pthread.thread + 80) >> 2);
-                if (detached) {
-                  PThread.returnWorkerToPool(worker);
-                }
-              } else if (d.cmd === 'exitProcess') {
-                // A pthread has requested to exit the whole application process (runtime).
-                noExitRuntime = false;
-                try {
-                  exit(d.returnCode);
-                } catch (e) {
-                  if (e instanceof ExitStatus) return;
-                  throw e;
-                }
-              } else if (d.cmd === 'cancelDone') {
-                PThread.returnWorkerToPool(worker);
-              } else if (d.cmd === 'objectTransfer') {
-                PThread.receiveObjectTransfer(e.data);
-              } else if (e.data.target === 'setimmediate') {
-                worker.postMessage(e.data); // Worker wants to postMessage() to itself to implement setImmediate() emulation.
-              } else {
-                err("worker sent an unknown command " + d.cmd);
-              }
-              PThread.currentProxiedOperationCallerThread = undefined;
-            };
-  
-            worker.onerror = function(e) {
-              err('pthread sent an error! ' + e.filename + ':' + e.lineno + ': ' + e.message);
-            };
-          }(worker));
-  
-          // Allocate tempDoublePtr for the worker. This is done here on the worker's behalf, since we may need to do this statically
-          // if the runtime has not been loaded yet, etc. - so we just use getMemory, which is main-thread only.
-          var tempDoublePtr = getMemory(8); // TODO: leaks. Cleanup after worker terminates.
-  
-          // Ask the new worker to load up the Emscripten-compiled page. This is a heavy operation.
-          worker.postMessage({
-            cmd: 'load',
-            // If the application main .js file was loaded from a Blob, then it is not possible
-            // to access the URL of the current script that could be passed to a Web Worker so that
-            // it could load up the same file. In that case, developer must either deliver the Blob
-            // object in Module['mainScriptUrlOrBlob'], or a URL to it, so that pthread Workers can
-            // independently load up the same main application file.
-            urlOrBlob: Module['mainScriptUrlOrBlob'] || _scriptDir,
-            wasmMemory: wasmMemory,
-            wasmModule: wasmModule,
-            tempDoublePtr: tempDoublePtr,
-            DYNAMIC_BASE: DYNAMIC_BASE,
-            DYNAMICTOP_PTR: DYNAMICTOP_PTR,
-            PthreadWorkerInit: PthreadWorkerInit
-          });
-          PThread.unusedWorkers.push(worker);
-        }
-      },getNewWorker:function() {
-        if (PThread.unusedWorkers.length == 0) PThread.allocateUnusedWorkers(1);
-        if (PThread.unusedWorkers.length > 0) return PThread.unusedWorkers.pop();
-        else return null;
-      },busySpinWait:function(msecs) {
-        var t = performance.now() + msecs;
-        while(performance.now() < t) {
-          ;
-        }
-      }};function ___call_main(argc, argv) {
-      var returnCode = _main(argc, argv);
-      if (!noExitRuntime) postMessage({ cmd: 'exitProcess', returnCode: returnCode });
-      return returnCode;
-    }
-
-  
-  
-  function _emscripten_get_now() { abort() }
-  
-  function _emscripten_get_now_is_monotonic() {
-      // return whether emscripten_get_now is guaranteed monotonic; the Date.now
-      // implementation is not :(
-      return (0
-        || ENVIRONMENT_IS_NODE
-        || (typeof dateNow !== 'undefined')
-        || (typeof performance === 'object' && performance && typeof performance['now'] === 'function')
-        );
-    }
-  
-  function ___setErrNo(value) {
-      if (Module['___errno_location']) HEAP32[((Module['___errno_location']())>>2)]=value;
+  function setErrNo(value) {
+      HEAP32[((___errno_location())>>2)]=value;
       return value;
     }function _clock_gettime(clk_id, tp) {
       // int clock_gettime(clockid_t clk_id, struct timespec *tp);
       var now;
       if (clk_id === 0) {
         now = Date.now();
-      } else if (clk_id === 1 && _emscripten_get_now_is_monotonic()) {
+      } else if ((clk_id === 1 || clk_id === 4) && _emscripten_get_now_is_monotonic) {
         now = _emscripten_get_now();
       } else {
-        ___setErrNo(22);
+        setErrNo(28);
         return -1;
       }
       HEAP32[((tp)>>2)]=(now/1000)|0; // seconds
@@ -2020,50 +2234,14 @@ function copyTempDouble(ptr) {
     }
 
   
-  var ___exception_infos={};
+  var exceptionInfos={};
   
-  var ___exception_caught= [];
+  var exceptionLast=0;
   
-  function ___exception_addRef(ptr) {
-      if (!ptr) return;
-      var info = ___exception_infos[ptr];
-      info.refcount++;
-    }
-  
-  function ___exception_deAdjust(adjusted) {
-      if (!adjusted || ___exception_infos[adjusted]) return adjusted;
-      for (var key in ___exception_infos) {
-        var ptr = +key; // the iteration key is a string, and if we throw this, it must be an integer as that is what we look for
-        var adj = ___exception_infos[ptr].adjusted;
-        var len = adj.length;
-        for (var i = 0; i < len; i++) {
-          if (adj[i] === adjusted) {
-            return ptr;
-          }
-        }
-      }
-      return adjusted;
-    }function ___cxa_begin_catch(ptr) {
-      var info = ___exception_infos[ptr];
-      if (info && !info.caught) {
-        info.caught = true;
-        __ZSt18uncaught_exceptionv.uncaught_exceptions--;
-      }
-      if (info) info.rethrown = false;
-      ___exception_caught.push(ptr);
-      ___exception_addRef(___exception_deAdjust(ptr));
-      return ptr;
-    }
-
-  function ___cxa_pure_virtual() {
-      ABORT = true;
-  
-      throw 'Pure virtual function called!';
-    }
-
-  
-  var ___exception_last=0;function ___cxa_throw(ptr, type, destructor) {
-      ___exception_infos[ptr] = {
+  function __ZSt18uncaught_exceptionv() { // std::uncaught_exception()
+      return __ZSt18uncaught_exceptionv.uncaught_exceptions > 0;
+    }function ___cxa_throw(ptr, type, destructor) {
+      exceptionInfos[ptr] = {
         ptr: ptr,
         adjusted: [ptr],
         type: type,
@@ -2072,7 +2250,7 @@ function copyTempDouble(ptr) {
         caught: false,
         rethrown: false
       };
-      ___exception_last = ptr;
+      exceptionLast = ptr;
       if (!("uncaught_exception" in __ZSt18uncaught_exceptionv)) {
         __ZSt18uncaught_exceptionv.uncaught_exceptions = 1;
       } else {
@@ -2081,188 +2259,46 @@ function copyTempDouble(ptr) {
       throw ptr;
     }
 
-  function ___cxa_uncaught_exceptions() {
-      return __ZSt18uncaught_exceptionv.uncaught_exceptions;
-    }
-
-  function ___gxx_personality_v0() {
-    }
-
-  
-  
-  var PATH={splitPath:function(filename) {
-        var splitPathRe = /^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/;
-        return splitPathRe.exec(filename).slice(1);
-      },normalizeArray:function(parts, allowAboveRoot) {
-        // if the path tries to go above the root, `up` ends up > 0
-        var up = 0;
-        for (var i = parts.length - 1; i >= 0; i--) {
-          var last = parts[i];
-          if (last === '.') {
-            parts.splice(i, 1);
-          } else if (last === '..') {
-            parts.splice(i, 1);
-            up++;
-          } else if (up) {
-            parts.splice(i, 1);
-            up--;
-          }
+  function __emscripten_notify_thread_queue(targetThreadId, mainThreadId) {
+      if (targetThreadId == mainThreadId) {
+        postMessage({'cmd' : 'processQueuedMainThreadWork'});
+      } else if (ENVIRONMENT_IS_PTHREAD) {
+        postMessage({'targetThread': targetThreadId, 'cmd': 'processThreadQueue'});
+      } else {
+        var pthread = PThread.pthreads[targetThreadId];
+        var worker = pthread && pthread.worker;
+        if (!worker) {
+          return /*0*/;
         }
-        // if the path is allowed to go above the root, restore leading ..s
-        if (allowAboveRoot) {
-          for (; up; up--) {
-            parts.unshift('..');
-          }
-        }
-        return parts;
-      },normalize:function(path) {
-        var isAbsolute = path.charAt(0) === '/',
-            trailingSlash = path.substr(-1) === '/';
-        // Normalize the path
-        path = PATH.normalizeArray(path.split('/').filter(function(p) {
-          return !!p;
-        }), !isAbsolute).join('/');
-        if (!path && !isAbsolute) {
-          path = '.';
-        }
-        if (path && trailingSlash) {
-          path += '/';
-        }
-        return (isAbsolute ? '/' : '') + path;
-      },dirname:function(path) {
-        var result = PATH.splitPath(path),
-            root = result[0],
-            dir = result[1];
-        if (!root && !dir) {
-          // No dirname whatsoever
-          return '.';
-        }
-        if (dir) {
-          // It has a dirname, strip trailing slash
-          dir = dir.substr(0, dir.length - 1);
-        }
-        return root + dir;
-      },basename:function(path) {
-        // EMSCRIPTEN return '/'' for '/', not an empty string
-        if (path === '/') return '/';
-        var lastSlash = path.lastIndexOf('/');
-        if (lastSlash === -1) return path;
-        return path.substr(lastSlash+1);
-      },extname:function(path) {
-        return PATH.splitPath(path)[3];
-      },join:function() {
-        var paths = Array.prototype.slice.call(arguments, 0);
-        return PATH.normalize(paths.join('/'));
-      },join2:function(l, r) {
-        return PATH.normalize(l + '/' + r);
-      }};var SYSCALLS={buffers:[null,[],[]],printChar:function(stream, curr) {
-        var buffer = SYSCALLS.buffers[stream];
-        if (curr === 0 || curr === 10) {
-          (stream === 1 ? out : err)(UTF8ArrayToString(buffer, 0));
-          buffer.length = 0;
-        } else {
-          buffer.push(curr);
-        }
-      },varargs:0,get:function(varargs) {
-        SYSCALLS.varargs += 4;
-        var ret = HEAP32[(((SYSCALLS.varargs)-(4))>>2)];
-        return ret;
-      },getStr:function() {
-        var ret = UTF8ToString(SYSCALLS.get());
-        return ret;
-      },get64:function() {
-        var low = SYSCALLS.get(), high = SYSCALLS.get();
-        return low;
-      },getZero:function() {
-        SYSCALLS.get();
-      }};function ___syscall140(which, varargs) {
-  if (ENVIRONMENT_IS_PTHREAD) return _emscripten_proxy_to_main_thread_js(1, 1, which, varargs);
-  SYSCALLS.varargs = varargs;
-  try {
-   // llseek
-      var stream = SYSCALLS.getStreamFromFD(), offset_high = SYSCALLS.get(), offset_low = SYSCALLS.get(), result = SYSCALLS.get(), whence = SYSCALLS.get();
-      return 0;
-    } catch (e) {
-    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
-    return -e.errno;
-  }
-  }
-  
-
-  function ___syscall6(which, varargs) {
-  if (ENVIRONMENT_IS_PTHREAD) return _emscripten_proxy_to_main_thread_js(2, 1, which, varargs);
-  SYSCALLS.varargs = varargs;
-  try {
-   // close
-      var stream = SYSCALLS.getStreamFromFD();
-      return 0;
-    } catch (e) {
-    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
-    return -e.errno;
-  }
-  }
-  
-
-  
-  
-  function flush_NO_FILESYSTEM() {
-      // flush anything remaining in the buffers during shutdown
-      var fflush = Module["_fflush"];
-      if (fflush) fflush(0);
-      var buffers = SYSCALLS.buffers;
-      if (buffers[1].length) SYSCALLS.printChar(1, 10);
-      if (buffers[2].length) SYSCALLS.printChar(2, 10);
-    }function _fd_write(stream, iov, iovcnt, pnum) {
-  if (ENVIRONMENT_IS_PTHREAD) return _emscripten_proxy_to_main_thread_js(3, 1, stream, iov, iovcnt, pnum);
-  try {
-  
-      // hack to support printf in SYSCALLS_REQUIRE_FILESYSTEM=0
-      var num = 0;
-      for (var i = 0; i < iovcnt; i++) {
-        var ptr = HEAP32[(((iov)+(i*8))>>2)];
-        var len = HEAP32[(((iov)+(i*8 + 4))>>2)];
-        for (var j = 0; j < len; j++) {
-          SYSCALLS.printChar(stream, HEAPU8[ptr+j]);
-        }
-        num += len;
+        worker.postMessage({'cmd' : 'processThreadQueue'});
       }
-      HEAP32[((pnum)>>2)]=num
-      return 0;
-    } catch (e) {
-    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
-    return -e.errno;
-  }
-  }
-  function ___wasi_fd_write(
-  ) {
-  return _fd_write.apply(null, arguments)
-  }
+      return 1;
+    }
 
   function _abort() {
       abort();
     }
 
 
-  var _emscripten_asm_const_int=true;
-
   
   function _emscripten_conditional_set_current_thread_status_js(expectedStatus, newStatus) {
-    } 
+    }function _emscripten_conditional_set_current_thread_status(expectedStatus, newStatus) {
+      expectedStatus = expectedStatus|0;
+      newStatus = newStatus|0;
+    }
 
   function _emscripten_futex_wait(addr, val, timeout) {
-      if (addr <= 0 || addr > HEAP8.length || addr&3 != 0) return -22;
-  //    dump('futex_wait addr:' + addr + ' by thread: ' + _pthread_self() + (ENVIRONMENT_IS_PTHREAD?'(pthread)':'') + '\n');
+      if (addr <= 0 || addr > HEAP8.length || addr&3 != 0) return -28;
       if (ENVIRONMENT_IS_WORKER) {
         var ret = Atomics.wait(HEAP32, addr >> 2, val, timeout);
-  //    dump('futex_wait done by thread: ' + _pthread_self() + (ENVIRONMENT_IS_PTHREAD?'(pthread)':'') + '\n');
-        if (ret === 'timed-out') return -110;
-        if (ret === 'not-equal') return -11;
+        if (ret === 'timed-out') return -73;
+        if (ret === 'not-equal') return -6;
         if (ret === 'ok') return 0;
         throw 'Atomics.wait returned an unexpected value ' + ret;
       } else {
         // Atomics.wait is not available in the main browser thread, so simulate it via busy spinning.
         var loadedVal = Atomics.load(HEAP32, addr >> 2);
-        if (val != loadedVal) return -11;
+        if (val != loadedVal) return -6;
   
         var tNow = performance.now();
         var tEnd = tNow + timeout;
@@ -2275,7 +2311,7 @@ function copyTempDouble(ptr) {
         while (addr == ourWaitAddress) {
           tNow = performance.now();
           if (tNow > tEnd) {
-            return -110;
+            return -73;
           }
           _emscripten_main_thread_process_queued_calls(); // We are performing a blocking loop here, so must pump any pthreads if they want to perform operations that are proxied.
           addr = Atomics.load(HEAP32, __main_thread_futex_wait_address >> 2); // Look for a worker thread waking us up.
@@ -2285,22 +2321,21 @@ function copyTempDouble(ptr) {
     }
 
 
-  function _emscripten_get_heap_size() {
-      return HEAP8.length;
+
+  function _emscripten_get_sbrk_ptr() {
+      return 7312;
     }
 
-
-   
-
-  function _emscripten_has_threading_support() {
-      return typeof SharedArrayBuffer !== 'undefined';
+  function _emscripten_is_main_browser_thread() {
+      return __pthread_is_main_browser_thread|0; // Semantically the same as testing "!ENVIRONMENT_IS_WORKER" outside the asm.js scope
     }
 
-   
-
-   
+  function _emscripten_memcpy_big(dest, src, num) {
+      HEAPU8.copyWithin(dest, src, src + num);
+    }
 
   
+  /** @type{function(number, (number|boolean), ...(number|boolean))} */
   function _emscripten_proxy_to_main_thread_js(index, sync) {
       // Additional arguments are passed after those two, which are the actual
       // function arguments.
@@ -2321,7 +2356,25 @@ function copyTempDouble(ptr) {
       return ret;
     }
   
-  var _emscripten_receive_on_main_thread_js_callArgs=[];function _emscripten_receive_on_main_thread_js(index, numCallArgs, args) {
+  var _emscripten_receive_on_main_thread_js_callArgs=[];
+  
+  
+  var readAsmConstArgsArray=[];function readAsmConstArgs(sigPtr, buf) {
+      readAsmConstArgsArray.length = 0;
+      var ch;
+      // Most arguments are i32s, so shift the buffer pointer so it is a plain
+      // index into HEAP32.
+      buf >>= 2;
+      while (ch = HEAPU8[sigPtr++]) {
+        // A double takes two 32-bit slots, and must also be aligned - the backend
+        // will emit padding to avoid that.
+        var double = ch < 105;
+        if (double && (buf & 1)) buf++;
+        readAsmConstArgsArray.push(double ? HEAPF64[buf++ >> 1] : HEAP32[buf]);
+        ++buf;
+      }
+      return readAsmConstArgsArray;
+    }function _emscripten_receive_on_main_thread_js(index, numCallArgs, args) {
       _emscripten_receive_on_main_thread_js_callArgs.length = numCallArgs;
       var b = args >> 3;
       for (var i = 0; i < numCallArgs; i++) {
@@ -2329,19 +2382,25 @@ function copyTempDouble(ptr) {
       }
       // Proxied JS library funcs are encoded as positive values, and
       // EM_ASMs as negative values (see include_asm_consts)
-      var func = index > 0 ? proxiedFunctionTable[index] : ASM_CONSTS[-index - 1];
+      var isEmAsmConst = index < 0;
+      var func = !isEmAsmConst ? proxiedFunctionTable[index] : ASM_CONSTS[-index - 1];
       return func.apply(null, _emscripten_receive_on_main_thread_js_callArgs);
     }
 
   
+  function _emscripten_get_heap_size() {
+      return HEAPU8.length;
+    }
+  
   function abortOnCannotGrowMemory(requestedSize) {
       abort('OOM');
     }function _emscripten_resize_heap(requestedSize) {
+      requestedSize = requestedSize >>> 0;
       abortOnCannotGrowMemory(requestedSize);
     }
 
   
-  var JSEvents={keyEvent:0,mouseEvent:0,wheelEvent:0,uiEvent:0,focusEvent:0,deviceOrientationEvent:0,deviceMotionEvent:0,fullscreenChangeEvent:0,pointerlockChangeEvent:0,visibilityChangeEvent:0,touchEvent:0,previousFullscreenElement:null,previousScreenX:null,previousScreenY:null,removeEventListenersRegistered:false,removeAllEventListeners:function() {
+  var JSEvents={inEventHandler:0,removeAllEventListeners:function() {
         for(var i = JSEvents.eventHandlers.length-1; i >= 0; --i) {
           JSEvents._removeHandler(i);
         }
@@ -2392,9 +2451,9 @@ function copyTempDouble(ptr) {
           var call = JSEvents.deferredCalls[i];
           JSEvents.deferredCalls.splice(i, 1);
           --i;
-          call.targetFunction.apply(this, call.argsList);
+          call.targetFunction.apply(null, call.argsList);
         }
-      },inEventHandler:0,currentEventHandler:null,eventHandlers:[],isInternetExplorer:function() { return navigator.userAgent.indexOf('MSIE') !== -1 || navigator.appVersion.indexOf('Trident/') > 0; },removeAllHandlersOnTarget:function(target, eventTypeString) {
+      },eventHandlers:[],removeAllHandlersOnTarget:function(target, eventTypeString) {
         for(var i = 0; i < JSEvents.eventHandlers.length; ++i) {
           if (JSEvents.eventHandlers[i].target == target && 
             (!eventTypeString || eventTypeString == JSEvents.eventHandlers[i].eventTypeString)) {
@@ -2439,34 +2498,25 @@ function copyTempDouble(ptr) {
         HEAP32[((varargs)>>2)]=eventTypeId;
         HEAP32[(((varargs)+(4))>>2)]=eventData;
         HEAP32[(((varargs)+(8))>>2)]=userData;
-        _emscripten_async_queue_on_thread_(targetThread, 637534208, eventHandlerFunc, eventData, varargs);
+        __emscripten_call_on_thread(0, targetThread, 637534208, eventHandlerFunc, eventData, varargs);
         stackRestore(stackTop);
       },getTargetThreadForEventCallback:function(targetThread) {
         switch(targetThread) {
           case 1: return 0; // The event callback for the current event should be called on the main browser thread. (0 == don't proxy)
-          case 2: return PThread.currentProxiedOperationCallerThread; // The event callback for the current event should be backproxied to the the thread that is registering the event.
+          case 2: return PThread.currentProxiedOperationCallerThread; // The event callback for the current event should be backproxied to the thread that is registering the event.
           default: return targetThread; // The event callback for the current event should be proxied to the given specific thread.
         }
-      },getBoundingClientRectOrZeros:function(target) {
-        return target.getBoundingClientRect ? target.getBoundingClientRect() : { left: 0, top: 0 };
-      },pageScrollPos:function() {
-        if (pageXOffset > 0 || pageYOffset > 0) {
-          return [pageXOffset, pageYOffset];
-        }
-        if (typeof document.documentElement.scrollLeft !== 'undefined' || typeof document.documentElement.scrollTop !== 'undefined') {
-          return [document.documentElement.scrollLeft, document.documentElement.scrollTop];
-        }
-        return [document.body.scrollLeft|0, document.body.scrollTop|0];
       },getNodeNameForTarget:function(target) {
         if (!target) return '';
         if (target == window) return '#window';
         if (target == screen) return '#screen';
         return (target && target.nodeName) ? target.nodeName : '';
-      },tick:function() {
-        if (window['performance'] && window['performance']['now']) return window['performance']['now']();
-        else return Date.now();
       },fullscreenEnabled:function() {
-        return document.fullscreenEnabled || document.mozFullScreenEnabled || document.webkitFullscreenEnabled || document.msFullscreenEnabled;
+        return document.fullscreenEnabled
+        // Safari 13.0.3 on macOS Catalina 10.15.1 still ships with prefixed webkitFullscreenEnabled.
+        // TODO: If Safari at some point ships with unprefixed version, update the version check above.
+        || document.webkitFullscreenEnabled
+         ;
       }};
   
   
@@ -2491,7 +2541,7 @@ function copyTempDouble(ptr) {
       // these two threads will deadlock. At the moment, we'd like to consider that this kind of deadlock would be an Emscripten runtime bug, although if
       // emscripten_set_canvas_element_size() was documented to require running an event in the queue of thread that owns the OffscreenCanvas, then that might be ok.
       // (safer this way however)
-      _emscripten_async_queue_on_thread_(targetThread, 657457152, 0, targetCanvasPtr /* satellite data */, varargs);
+      __emscripten_call_on_thread(0, targetThread, 657457152, 0, targetCanvasPtr /* satellite data */, varargs);
       stackRestore(stackTop);
     }function _emscripten_set_offscreencanvas_size_on_target_thread(targetThread, targetCanvas, width, height) {
       targetCanvas = targetCanvas ? UTF8ToString(targetCanvas) : '';
@@ -2500,33 +2550,20 @@ function copyTempDouble(ptr) {
   
   
   
-  var __specialEventTargets=[0, typeof document !== 'undefined' ? document : 0, typeof window !== 'undefined' ? window : 0];function __findEventTarget(target) {
-      try {
-        // The sensible "default" target varies between events, but use window as the default
-        // since DOM events mostly can default to that. Specific callback registrations
-        // override their own defaults.
-        if (!target) return window;
-        if (typeof target === "number") target = __specialEventTargets[target] || UTF8ToString(target);
-        if (target === '#window') return window;
-        else if (target === '#document') return document;
-        else if (target === '#screen') return screen;
-        else if (target === '#canvas') return Module['canvas'];
-        return (typeof target === 'string') ? document.getElementById(target) : target;
-      } catch(e) {
-        // In Web Workers, some objects above, such as '#document' do not exist. Gracefully
-        // return null for them.
-        return null;
-      }
-    }function __findCanvasEventTarget(target) {
-      if (typeof target === 'number') target = UTF8ToString(target);
-      if (!target || target === '#canvas') {
-        if (typeof GL !== 'undefined' && GL.offscreenCanvases['canvas']) return GL.offscreenCanvases['canvas']; // TODO: Remove this line, target '#canvas' should refer only to Module['canvas'], not to GL.offscreenCanvases['canvas'] - but need stricter tests to be able to remove this line.
-        return Module['canvas'];
-      }
-      if (typeof GL !== 'undefined' && GL.offscreenCanvases[target]) return GL.offscreenCanvases[target];
-      return __findEventTarget(target);
-    }function _emscripten_set_canvas_element_size_calling_thread(target, width, height) {
-      var canvas = __findCanvasEventTarget(target);
+  function maybeCStringToJsString(cString) {
+      // "cString > 2" checks if the input is a number, and isn't of the special
+      // values we accept here, EMSCRIPTEN_EVENT_TARGET_* (which map to 0, 1, 2).
+      // In other words, if cString > 2 then it's a pointer to a valid place in
+      // memory, and points to a C string.
+      return cString > 2 ? UTF8ToString(cString) : cString;
+    }
+  
+  var specialHTMLTargets=[0, typeof document !== 'undefined' ? document : 0, typeof window !== 'undefined' ? window : 0];function findEventTarget(target) {
+      target = maybeCStringToJsString(target);
+      var domElement = specialHTMLTargets[target] || (typeof document !== 'undefined' ? document.querySelector(target) : undefined);
+      return domElement;
+    }function findCanvasEventTarget(target) { return findEventTarget(target); }function _emscripten_set_canvas_element_size_calling_thread(target, width, height) {
+      var canvas = findCanvasEventTarget(target);
       if (!canvas) return -4;
   
       if (canvas.canvasSharedPtr) {
@@ -2543,7 +2580,7 @@ function copyTempDouble(ptr) {
         if (canvas.offscreenCanvas) canvas = canvas.offscreenCanvas;
         var autoResizeViewport = false;
         if (canvas.GLctxObject && canvas.GLctxObject.GLctx) {
-          var prevViewport = canvas.GLctxObject.GLctx.getParameter(canvas.GLctxObject.GLctx.VIEWPORT);
+          var prevViewport = canvas.GLctxObject.GLctx.getParameter(0xBA2 /* GL_VIEWPORT */);
           // TODO: Perhaps autoResizeViewport should only be true if FBO 0 is currently active?
           autoResizeViewport = (prevViewport[0] === 0 && prevViewport[1] === 0 && prevViewport[2] === canvas.width && prevViewport[3] === canvas.height);
         }
@@ -2565,10 +2602,10 @@ function copyTempDouble(ptr) {
     }
   
   function _emscripten_set_canvas_element_size_main_thread(target, width, height) {
-  if (ENVIRONMENT_IS_PTHREAD) return _emscripten_proxy_to_main_thread_js(4, 1, target, width, height);
+  if (ENVIRONMENT_IS_PTHREAD) return _emscripten_proxy_to_main_thread_js(1, 1, target, width, height);
    return _emscripten_set_canvas_element_size_calling_thread(target, width, height); }
   function _emscripten_set_canvas_element_size(target, width, height) {
-      var canvas = __findCanvasEventTarget(target);
+      var canvas = findCanvasEventTarget(target);
       if (canvas) {
         return _emscripten_set_canvas_element_size_calling_thread(target, width, height);
       } else {
@@ -2578,28 +2615,44 @@ function copyTempDouble(ptr) {
 
   
   function _emscripten_set_current_thread_status_js(newStatus) {
-    } 
-
-  
-  function _emscripten_set_thread_name_js(threadId, name) {
-    } 
-
-  function _emscripten_syscall(which, varargs) {
-    switch (which) {
-      case 140: return ___syscall140(which, varargs);
-      case 6: return ___syscall6(which, varargs);
-      default: throw "surprising proxied syscall: " + which;
+    }function _emscripten_set_current_thread_status(newStatus) {
+      newStatus = newStatus|0;
     }
-  }
 
   
   
-  var GL={counter:1,lastError:0,buffers:[],mappedBuffers:{},programs:[],framebuffers:[],renderbuffers:[],textures:[],uniforms:[],shaders:[],vaos:[],contexts:{},currentContext:null,offscreenCanvases:{},timerQueriesEXT:[],programInfos:{},stringCache:{},unpackAlignment:4,init:function() {
-        GL.miniTempBuffer = new Float32Array(GL.MINI_TEMP_BUFFER_SIZE);
-        for (var i = 0; i < GL.MINI_TEMP_BUFFER_SIZE; i++) {
-          GL.miniTempBufferViews[i] = GL.miniTempBuffer.subarray(0, i+1);
-        }
-      },recordError:function recordError(errorCode) {
+  
+  function __webgl_enable_ANGLE_instanced_arrays(ctx) {
+      // Extension available in WebGL 1 from Firefox 26 and Google Chrome 30 onwards. Core feature in WebGL 2.
+      var ext = ctx.getExtension('ANGLE_instanced_arrays');
+      if (ext) {
+        ctx['vertexAttribDivisor'] = function(index, divisor) { ext['vertexAttribDivisorANGLE'](index, divisor); };
+        ctx['drawArraysInstanced'] = function(mode, first, count, primcount) { ext['drawArraysInstancedANGLE'](mode, first, count, primcount); };
+        ctx['drawElementsInstanced'] = function(mode, count, type, indices, primcount) { ext['drawElementsInstancedANGLE'](mode, count, type, indices, primcount); };
+        return 1;
+      }
+    }
+  
+  function __webgl_enable_OES_vertex_array_object(ctx) {
+      // Extension available in WebGL 1 from Firefox 25 and WebKit 536.28/desktop Safari 6.0.3 onwards. Core feature in WebGL 2.
+      var ext = ctx.getExtension('OES_vertex_array_object');
+      if (ext) {
+        ctx['createVertexArray'] = function() { return ext['createVertexArrayOES'](); };
+        ctx['deleteVertexArray'] = function(vao) { ext['deleteVertexArrayOES'](vao); };
+        ctx['bindVertexArray'] = function(vao) { ext['bindVertexArrayOES'](vao); };
+        ctx['isVertexArray'] = function(vao) { return ext['isVertexArrayOES'](vao); };
+        return 1;
+      }
+    }
+  
+  function __webgl_enable_WEBGL_draw_buffers(ctx) {
+      // Extension available in WebGL 1 from Firefox 28 onwards. Core feature in WebGL 2.
+      var ext = ctx.getExtension('WEBGL_draw_buffers');
+      if (ext) {
+        ctx['drawBuffers'] = function(n, bufs) { ext['drawBuffersWEBGL'](n, bufs); };
+        return 1;
+      }
+    }var GL={counter:1,buffers:[],programs:[],framebuffers:[],renderbuffers:[],textures:[],uniforms:[],shaders:[],vaos:[],contexts:{},offscreenCanvases:{},timerQueriesEXT:[],programInfos:{},stringCache:{},unpackAlignment:4,recordError:function recordError(errorCode) {
         if (!GL.lastError) {
           GL.lastError = errorCode;
         }
@@ -2609,7 +2662,7 @@ function copyTempDouble(ptr) {
           table[i] = null;
         }
         return ret;
-      },MINI_TEMP_BUFFER_SIZE:256,miniTempBuffer:null,miniTempBufferViews:[0],getSource:function(shader, count, string, length) {
+      },getSource:function(shader, count, string, length) {
         var source = '';
         for (var i = 0; i < count; ++i) {
           var len = length ? HEAP32[(((length)+(i*4))>>2)] : -1;
@@ -2621,8 +2674,11 @@ function copyTempDouble(ptr) {
   
   
   
+  
         var ctx = 
-          (canvas.getContext("webgl", webGLContextAttributes) || canvas.getContext("experimental-webgl", webGLContextAttributes));
+          (canvas.getContext("webgl", webGLContextAttributes)
+            // https://caniuse.com/#feat=webgl
+            );
   
   
         if (!ctx) return 0;
@@ -2633,15 +2689,16 @@ function copyTempDouble(ptr) {
   
         return handle;
       },registerContext:function(ctx, webGLContextAttributes) {
-        var handle = _malloc(8); // Make space on the heap to store GL context attributes that need to be accessible as shared between threads.
+        // with pthreads a context is a location in memory with some synchronized data between threads
+        var handle = _malloc(8);
         HEAP32[(((handle)+(4))>>2)]=_pthread_self(); // the thread pointer of the thread that owns the control of the context
+  
         var context = {
           handle: handle,
           attributes: webGLContextAttributes,
           version: webGLContextAttributes.majorVersion,
           GLctx: ctx
         };
-  
   
   
         // Store the created context object so that we can access the context given a canvas without having to pass the parameters again.
@@ -2666,31 +2723,8 @@ function copyTempDouble(ptr) {
         if (GL.currentContext === GL.contexts[contextHandle]) GL.currentContext = null;
         if (typeof JSEvents === 'object') JSEvents.removeAllHandlersOnTarget(GL.contexts[contextHandle].GLctx.canvas); // Release all JS event handlers on the DOM element that the GL context is associated with since the context is now deleted.
         if (GL.contexts[contextHandle] && GL.contexts[contextHandle].GLctx.canvas) GL.contexts[contextHandle].GLctx.canvas.GLctxObject = undefined; // Make sure the canvas object no longer refers to the context object so there are no GC surprises.
-        _free(GL.contexts[contextHandle]);
+        _free(GL.contexts[contextHandle].handle);
         GL.contexts[contextHandle] = null;
-      },acquireInstancedArraysExtension:function(ctx) {
-        // Extension available in WebGL 1 from Firefox 26 and Google Chrome 30 onwards. Core feature in WebGL 2.
-        var ext = ctx.getExtension('ANGLE_instanced_arrays');
-        if (ext) {
-          ctx['vertexAttribDivisor'] = function(index, divisor) { ext['vertexAttribDivisorANGLE'](index, divisor); };
-          ctx['drawArraysInstanced'] = function(mode, first, count, primcount) { ext['drawArraysInstancedANGLE'](mode, first, count, primcount); };
-          ctx['drawElementsInstanced'] = function(mode, count, type, indices, primcount) { ext['drawElementsInstancedANGLE'](mode, count, type, indices, primcount); };
-        }
-      },acquireVertexArrayObjectExtension:function(ctx) {
-        // Extension available in WebGL 1 from Firefox 25 and WebKit 536.28/desktop Safari 6.0.3 onwards. Core feature in WebGL 2.
-        var ext = ctx.getExtension('OES_vertex_array_object');
-        if (ext) {
-          ctx['createVertexArray'] = function() { return ext['createVertexArrayOES'](); };
-          ctx['deleteVertexArray'] = function(vao) { ext['deleteVertexArrayOES'](vao); };
-          ctx['bindVertexArray'] = function(vao) { ext['bindVertexArrayOES'](vao); };
-          ctx['isVertexArray'] = function(vao) { return ext['isVertexArrayOES'](vao); };
-        }
-      },acquireDrawBuffersExtension:function(ctx) {
-        // Extension available in WebGL 1 from Firefox 28 onwards. Core feature in WebGL 2.
-        var ext = ctx.getExtension('WEBGL_draw_buffers');
-        if (ext) {
-          ctx['drawBuffers'] = function(n, bufs) { ext['drawBuffersWEBGL'](n, bufs); };
-        }
       },initExtensions:function(context) {
         // If this function is called without a specific context object, init the extensions of the currently active context.
         if (!context) context = GL.currentContext;
@@ -2702,11 +2736,10 @@ function copyTempDouble(ptr) {
   
         // Detect the presence of a few extensions manually, this GL interop layer itself will need to know if they exist.
   
-        if (context.version < 2) {
-          GL.acquireInstancedArraysExtension(GLctx);
-          GL.acquireVertexArrayObjectExtension(GLctx);
-          GL.acquireDrawBuffersExtension(GLctx);
-        }
+        // Extensions that are only available in WebGL 1 (the calls will be no-ops if called on a WebGL 2 context active)
+        __webgl_enable_ANGLE_instanced_arrays(GLctx);
+        __webgl_enable_OES_vertex_array_object(GLctx);
+        __webgl_enable_WEBGL_draw_buffers(GLctx);
   
         GLctx.disjointTimerQueryExt = GLctx.getExtension("EXT_disjoint_timer_query");
   
@@ -2721,11 +2754,15 @@ function copyTempDouble(ptr) {
                                                "OES_element_index_uint", "EXT_texture_filter_anisotropic", "EXT_frag_depth",
                                                "WEBGL_draw_buffers", "ANGLE_instanced_arrays", "OES_texture_float_linear",
                                                "OES_texture_half_float_linear", "EXT_blend_minmax", "EXT_shader_texture_lod",
+                                               "EXT_texture_norm16",
                                                // Community approved WebGL extensions ordered by number:
                                                "WEBGL_compressed_texture_pvrtc", "EXT_color_buffer_half_float", "WEBGL_color_buffer_float",
                                                "EXT_sRGB", "WEBGL_compressed_texture_etc1", "EXT_disjoint_timer_query",
                                                "WEBGL_compressed_texture_etc", "WEBGL_compressed_texture_astc", "EXT_color_buffer_float",
-                                               "WEBGL_compressed_texture_s3tc_srgb", "EXT_disjoint_timer_query_webgl2"];
+                                               "WEBGL_compressed_texture_s3tc_srgb", "EXT_disjoint_timer_query_webgl2",
+                                               // Old style prefixed forms of extensions (but still currently used on e.g. iPhone Xs as
+                                               // tested on iOS 12.4.1):
+                                               "WEBKIT_WEBGL_compressed_texture_pvrtc"];
   
         function shouldEnableAutomatically(extension) {
           var ret = false;
@@ -2807,16 +2844,16 @@ function copyTempDouble(ptr) {
       contextAttributes.proxyContextToMainThread = HEAP32[a + (48>>2)];
       contextAttributes.renderViaOffscreenBackBuffer = HEAP32[a + (52>>2)];
   
-      var canvas = __findCanvasEventTarget(target);
+      var canvas = findCanvasEventTarget(target);
   
   
   
       if (!canvas) {
-        return 0;
+        return -4;
       }
   
       if (contextAttributes.explicitSwapControl) {
-        return 0;
+        return -1;
       }
   
   
@@ -2827,43 +2864,138 @@ function copyTempDouble(ptr) {
   return _emscripten_webgl_do_create_context(a0,a1);
   }
 
-   
-
-  function _llvm_trap() {
-      abort('trap!');
+  
+  
+  var PATH={splitPath:function(filename) {
+        var splitPathRe = /^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/;
+        return splitPathRe.exec(filename).slice(1);
+      },normalizeArray:function(parts, allowAboveRoot) {
+        // if the path tries to go above the root, `up` ends up > 0
+        var up = 0;
+        for (var i = parts.length - 1; i >= 0; i--) {
+          var last = parts[i];
+          if (last === '.') {
+            parts.splice(i, 1);
+          } else if (last === '..') {
+            parts.splice(i, 1);
+            up++;
+          } else if (up) {
+            parts.splice(i, 1);
+            up--;
+          }
+        }
+        // if the path is allowed to go above the root, restore leading ..s
+        if (allowAboveRoot) {
+          for (; up; up--) {
+            parts.unshift('..');
+          }
+        }
+        return parts;
+      },normalize:function(path) {
+        var isAbsolute = path.charAt(0) === '/',
+            trailingSlash = path.substr(-1) === '/';
+        // Normalize the path
+        path = PATH.normalizeArray(path.split('/').filter(function(p) {
+          return !!p;
+        }), !isAbsolute).join('/');
+        if (!path && !isAbsolute) {
+          path = '.';
+        }
+        if (path && trailingSlash) {
+          path += '/';
+        }
+        return (isAbsolute ? '/' : '') + path;
+      },dirname:function(path) {
+        var result = PATH.splitPath(path),
+            root = result[0],
+            dir = result[1];
+        if (!root && !dir) {
+          // No dirname whatsoever
+          return '.';
+        }
+        if (dir) {
+          // It has a dirname, strip trailing slash
+          dir = dir.substr(0, dir.length - 1);
+        }
+        return root + dir;
+      },basename:function(path) {
+        // EMSCRIPTEN return '/'' for '/', not an empty string
+        if (path === '/') return '/';
+        var lastSlash = path.lastIndexOf('/');
+        if (lastSlash === -1) return path;
+        return path.substr(lastSlash+1);
+      },extname:function(path) {
+        return PATH.splitPath(path)[3];
+      },join:function() {
+        var paths = Array.prototype.slice.call(arguments, 0);
+        return PATH.normalize(paths.join('/'));
+      },join2:function(l, r) {
+        return PATH.normalize(l + '/' + r);
+      }};var SYSCALLS={mappings:{},buffers:[null,[],[]],printChar:function(stream, curr) {
+        var buffer = SYSCALLS.buffers[stream];
+        if (curr === 0 || curr === 10) {
+          (stream === 1 ? out : err)(UTF8ArrayToString(buffer, 0));
+          buffer.length = 0;
+        } else {
+          buffer.push(curr);
+        }
+      },varargs:undefined,get:function() {
+        SYSCALLS.varargs += 4;
+        var ret = HEAP32[(((SYSCALLS.varargs)-(4))>>2)];
+        return ret;
+      },getStr:function(ptr) {
+        var ret = UTF8ToString(ptr);
+        return ret;
+      },get64:function(low, high) {
+        return low;
+      }};function _fd_close(fd) {
+  if (ENVIRONMENT_IS_PTHREAD) return _emscripten_proxy_to_main_thread_js(2, 1, fd);
+  
+      return 0;
     }
+  
+
+  function _fd_seek(fd, offset_low, offset_high, whence, newOffset) {
+  if (ENVIRONMENT_IS_PTHREAD) return _emscripten_proxy_to_main_thread_js(3, 1, fd, offset_low, offset_high, whence, newOffset);
+  
+  }
+  
 
   
-  function _emscripten_memcpy_big(dest, src, num) {
-      HEAPU8.set(HEAPU8.subarray(src, src+num), dest);
+  function flush_NO_FILESYSTEM() {
+      // flush anything remaining in the buffers during shutdown
+      if (typeof _fflush !== 'undefined') _fflush(0);
+      var buffers = SYSCALLS.buffers;
+      if (buffers[1].length) SYSCALLS.printChar(1, 10);
+      if (buffers[2].length) SYSCALLS.printChar(2, 10);
+    }function _fd_write(fd, iov, iovcnt, pnum) {
+  if (ENVIRONMENT_IS_PTHREAD) return _emscripten_proxy_to_main_thread_js(4, 1, fd, iov, iovcnt, pnum);
+  
+      // hack to support printf in SYSCALLS_REQUIRE_FILESYSTEM=0
+      var num = 0;
+      for (var i = 0; i < iovcnt; i++) {
+        var ptr = HEAP32[(((iov)+(i*8))>>2)];
+        var len = HEAP32[(((iov)+(i*8 + 4))>>2)];
+        for (var j = 0; j < len; j++) {
+          SYSCALLS.printChar(fd, HEAPU8[ptr+j]);
+        }
+        num += len;
+      }
+      HEAP32[((pnum)>>2)]=num
+      return 0;
     }
   
-   
-
-   
-
-   
-
-  function _pthread_cleanup_pop(execute) {
-      var routine = PThread.exitHandlers.pop();
-      if (execute) routine();
-    }
 
   function _pthread_cleanup_push(routine, arg) {
-      if (PThread.exitHandlers === null) {
-        PThread.exitHandlers = [];
-        if (!ENVIRONMENT_IS_PTHREAD) {
-          __ATEXIT__.push(function() { PThread.runExitHandlers(); });
-        }
-      }
-      PThread.exitHandlers.push(function() { dynCall_vi(routine, arg) });
+      PThread.threadExitHandlers.push(function() { dynCall_vi(routine, arg) });
     }
 
   
-  function __spawn_thread(threadParams) {
-      if (ENVIRONMENT_IS_PTHREAD) throw 'Internal Error! _spawn_thread() can only ever be called from main application thread!';
+  function spawnThread(threadParams) {
+      if (ENVIRONMENT_IS_PTHREAD) throw 'Internal Error! spawnThread() can only ever be called from main application thread!';
   
       var worker = PThread.getNewWorker();
+  
       if (worker.pthread !== undefined) throw 'Internal error!';
       if (!threadParams.pthread_ptr) throw 'Internal error, no pthread ptr!';
       PThread.runningWorkers.push(worker);
@@ -2884,39 +3016,40 @@ function copyTempDouble(ptr) {
         thread: threadParams.pthread_ptr,
         threadInfoStruct: threadParams.pthread_ptr // Info area for this thread in Emscripten HEAP (shared)
       };
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 0 ) >> 2, 0); // threadStatus <- 0, meaning not yet exited.
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 4 ) >> 2, 0); // threadExitCode <- 0.
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 20 ) >> 2, 0); // profilerBlock <- 0.
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 80 ) >> 2, threadParams.detached);
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 116 ) >> 2, tlsMemory); // Init thread-local-storage memory array.
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 60 ) >> 2, 0); // Mark initial status to unused.
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 52 ) >> 2, pthread.threadInfoStruct); // Main thread ID.
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 56 ) >> 2, PROCINFO.pid); // Process ID.
+      var tis = pthread.threadInfoStruct >> 2;
+      Atomics.store(HEAPU32, tis + (0 >> 2), 0); // threadStatus <- 0, meaning not yet exited.
+      Atomics.store(HEAPU32, tis + (4 >> 2), 0); // threadExitCode <- 0.
+      Atomics.store(HEAPU32, tis + (8 >> 2), 0); // profilerBlock <- 0.
+      Atomics.store(HEAPU32, tis + (68 >> 2), threadParams.detached);
+      Atomics.store(HEAPU32, tis + (104 >> 2), tlsMemory); // Init thread-local-storage memory array.
+      Atomics.store(HEAPU32, tis + (48 >> 2), 0); // Mark initial status to unused.
+      Atomics.store(HEAPU32, tis + (40 >> 2), pthread.threadInfoStruct); // Main thread ID.
+      Atomics.store(HEAPU32, tis + (44 >> 2), 42); // Process ID.
   
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 120) >> 2, threadParams.stackSize);
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 96) >> 2, threadParams.stackSize);
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 92) >> 2, stackHigh);
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 120 + 8) >> 2, stackHigh);
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 120 + 12) >> 2, threadParams.detached);
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 120 + 20) >> 2, threadParams.schedPolicy);
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 120 + 24) >> 2, threadParams.schedPrio);
+      Atomics.store(HEAPU32, tis + (108 >> 2), threadParams.stackSize);
+      Atomics.store(HEAPU32, tis + (84 >> 2), threadParams.stackSize);
+      Atomics.store(HEAPU32, tis + (80 >> 2), stackHigh);
+      Atomics.store(HEAPU32, tis + (108 + 8 >> 2), stackHigh);
+      Atomics.store(HEAPU32, tis + (108 + 12 >> 2), threadParams.detached);
+      Atomics.store(HEAPU32, tis + (108 + 20 >> 2), threadParams.schedPolicy);
+      Atomics.store(HEAPU32, tis + (108 + 24 >> 2), threadParams.schedPrio);
   
       var global_libc = _emscripten_get_global_libc();
       var global_locale = global_libc + 40;
-      Atomics.store(HEAPU32, (pthread.threadInfoStruct + 188) >> 2, global_locale);
+      Atomics.store(HEAPU32, tis + (176 >> 2), global_locale);
   
   
       worker.pthread = pthread;
       var msg = {
-          cmd: 'run',
-          start_routine: threadParams.startRoutine,
-          arg: threadParams.arg,
-          threadInfoStruct: threadParams.pthread_ptr,
-          selfThreadId: threadParams.pthread_ptr, // TODO: Remove this since thread ID is now the same as the thread address.
-          parentThreadId: threadParams.parent_pthread_ptr,
-          stackBase: threadParams.stackBase,
-          stackSize: threadParams.stackSize,
-        };
+          'cmd': 'run',
+          'start_routine': threadParams.startRoutine,
+          'arg': threadParams.arg,
+          'threadInfoStruct': threadParams.pthread_ptr,
+          'selfThreadId': threadParams.pthread_ptr, // TODO: Remove this since thread ID is now the same as the thread address.
+          'parentThreadId': threadParams.parent_pthread_ptr,
+          'stackBase': threadParams.stackBase,
+          'stackSize': threadParams.stackSize
+      };
       worker.runPthread = function() {
         // Ask the worker to start executing its pthread entry point function.
         msg.time = performance.now();
@@ -2935,28 +3068,41 @@ function copyTempDouble(ptr) {
         err('pthread_getschedparam called with a null thread pointer!');
         return ERRNO_CODES.ESRCH;
       }
-      var self = HEAP32[(((thread)+(24))>>2)];
+      var self = HEAP32[(((thread)+(12))>>2)];
       if (self !== thread) {
         err('pthread_getschedparam attempted on thread ' + thread + ', which does not point to a valid thread, or does not exist anymore!');
         return ERRNO_CODES.ESRCH;
       }
   
-      var schedPolicy = Atomics.load(HEAPU32, (thread + 120 + 20 ) >> 2);
-      var schedPrio = Atomics.load(HEAPU32, (thread + 120 + 24 ) >> 2);
+      var schedPolicy = Atomics.load(HEAPU32, (thread + 108 + 20 ) >> 2);
+      var schedPrio = Atomics.load(HEAPU32, (thread + 108 + 24 ) >> 2);
   
       if (policy) HEAP32[((policy)>>2)]=schedPolicy;
       if (schedparam) HEAP32[((schedparam)>>2)]=schedPrio;
       return 0;
     }
   
-   function _pthread_create(pthread_ptr, attr, start_routine, arg) {
+  function _pthread_self() {
+      return __pthread_ptr|0;
+    }
+  Module["_pthread_self"] = _pthread_self;
+  
+  function resetPrototype(constructor, attrs) {
+      var object = Object.create(constructor.prototype);
+      for (var key in attrs) {
+        if (attrs.hasOwnProperty(key)) {
+          object[key] = attrs[key];
+        }
+      }
+      return object;
+    }function _pthread_create(pthread_ptr, attr, start_routine, arg) {
       if (typeof SharedArrayBuffer === 'undefined') {
         err('Current environment does not support SharedArrayBuffer, pthreads are not available!');
-        return 11;
+        return 6;
       }
       if (!pthread_ptr) {
         err('pthread_create called with a null thread pointer!');
-        return 22;
+        return 28;
       }
   
       var transferList = []; // List of JS objects that will transfer ownership to the Worker hosting the thread
@@ -3017,16 +3163,16 @@ function copyTempDouble(ptr) {
       }
   
       // Allocate thread block (pthread_t structure).
-      var threadInfoStruct = _malloc(244);
-      for (var i = 0; i < 244 >> 2; ++i) HEAPU32[(threadInfoStruct>>2) + i] = 0; // zero-initialize thread structure.
+      var threadInfoStruct = _malloc(232);
+      for (var i = 0; i < 232 >> 2; ++i) HEAPU32[(threadInfoStruct>>2) + i] = 0; // zero-initialize thread structure.
       HEAP32[((pthread_ptr)>>2)]=threadInfoStruct;
   
       // The pthread struct has a field that points to itself - this is used as a magic ID to detect whether the pthread_t
       // structure is 'alive'.
-      HEAP32[(((threadInfoStruct)+(24))>>2)]=threadInfoStruct;
+      HEAP32[(((threadInfoStruct)+(12))>>2)]=threadInfoStruct;
   
       // pthread struct robust_list head should point to itself.
-      var headPtr = threadInfoStruct + 168;
+      var headPtr = threadInfoStruct + 156;
       HEAP32[((headPtr)>>2)]=headPtr;
   
   
@@ -3052,32 +3198,31 @@ function copyTempDouble(ptr) {
       } else {
         // We are the main thread, so we have the pthread warmup pool in this thread and can fire off JS thread creation
         // directly ourselves.
-        __spawn_thread(threadParams);
+        spawnThread(threadParams);
       }
   
       return 0;
     }
 
   
-  function __cleanup_thread(pthread_ptr) {
-      if (ENVIRONMENT_IS_PTHREAD) throw 'Internal Error! _cleanup_thread() can only ever be called from main application thread!';
-      if (!pthread_ptr) throw 'Internal Error! Null pthread_ptr in _cleanup_thread!';
-      HEAP32[(((pthread_ptr)+(24))>>2)]=0;
-      var pthread = PThread.pthreads[pthread_ptr];
-      if (pthread) {
-        var worker = pthread.worker;
-        PThread.returnWorkerToPool(worker);
-      }
-    }
   
   function __pthread_testcancel_js() {
       if (!ENVIRONMENT_IS_PTHREAD) return;
       if (!threadInfoStruct) return;
-      var cancelDisabled = Atomics.load(HEAPU32, (threadInfoStruct + 72 ) >> 2);
+      var cancelDisabled = Atomics.load(HEAPU32, (threadInfoStruct + 60 ) >> 2);
       if (cancelDisabled) return;
       var canceled = Atomics.load(HEAPU32, (threadInfoStruct + 0 ) >> 2);
       if (canceled == 2) throw 'Canceled!';
-    }function _pthread_join(thread, status) {
+    }
+  
+  function _emscripten_check_blocking_allowed() {
+      if (ENVIRONMENT_IS_NODE) return;
+  
+      if (ENVIRONMENT_IS_WORKER) return; // Blocking in a worker/pthread is fine.
+  
+      warnOnce('Blocking on the main thread is very dangerous, see https://emscripten.org/docs/porting/pthreads.html#blocking-on-the-main-browser-thread');
+  
+    }function __emscripten_do_pthread_join(thread, status, block) {
       if (!thread) {
         err('pthread_join attempted on a null thread pointer!');
         return ERRNO_CODES.ESRCH;
@@ -3090,27 +3235,35 @@ function copyTempDouble(ptr) {
         err('Main thread ' + thread + ' is attempting to join to itself!');
         return ERRNO_CODES.EDEADLK;
       }
-      var self = HEAP32[(((thread)+(24))>>2)];
+      var self = HEAP32[(((thread)+(12))>>2)];
       if (self !== thread) {
         err('pthread_join attempted on thread ' + thread + ', which does not point to a valid thread, or does not exist anymore!');
         return ERRNO_CODES.ESRCH;
       }
   
-      var detached = Atomics.load(HEAPU32, (thread + 80 ) >> 2);
+      var detached = Atomics.load(HEAPU32, (thread + 68 ) >> 2);
       if (detached) {
         err('Attempted to join thread ' + thread + ', which was already detached!');
         return ERRNO_CODES.EINVAL; // The thread is already detached, can no longer join it!
       }
+  
+      if (block) {
+        _emscripten_check_blocking_allowed();
+      }
+  
       for (;;) {
         var threadStatus = Atomics.load(HEAPU32, (thread + 0 ) >> 2);
         if (threadStatus == 1) { // Exited?
           var threadExitCode = Atomics.load(HEAPU32, (thread + 4 ) >> 2);
           if (status) HEAP32[((status)>>2)]=threadExitCode;
-          Atomics.store(HEAPU32, (thread + 80 ) >> 2, 1); // Mark the thread as detached.
+          Atomics.store(HEAPU32, (thread + 68 ) >> 2, 1); // Mark the thread as detached.
   
-          if (!ENVIRONMENT_IS_PTHREAD) __cleanup_thread(thread);
-          else postMessage({ cmd: 'cleanupThread', thread: thread });
+          if (!ENVIRONMENT_IS_PTHREAD) cleanupThread(thread);
+          else postMessage({ 'cmd': 'cleanupThread', 'thread': thread });
           return 0;
+        }
+        if (!block) {
+          return ERRNO_CODES.EBUSY;
         }
         // TODO HACK! Replace the _js variant with just _pthread_testcancel:
         //_pthread_testcancel();
@@ -3120,35 +3273,25 @@ function copyTempDouble(ptr) {
         if (!ENVIRONMENT_IS_PTHREAD) _emscripten_main_thread_process_queued_calls();
         _emscripten_futex_wait(thread + 0, threadStatus, ENVIRONMENT_IS_PTHREAD ? 100 : 1);
       }
+    }function _pthread_join(thread, status) {
+      return __emscripten_do_pthread_join(thread, status, true);
     }
 
-if (!ENVIRONMENT_IS_PTHREAD) PThread.initMainThreadBlock();;
-if (ENVIRONMENT_IS_NODE) {
-    _emscripten_get_now = function _emscripten_get_now_actual() {
-      var t = process['hrtime']();
-      return t[0] * 1e3 + t[1] / 1e6;
-    };
-  } else if (ENVIRONMENT_IS_PTHREAD) {
-    _emscripten_get_now = function() { return performance['now']() - __performance_now_clock_drift; };
-  } else if (typeof dateNow !== 'undefined') {
-    _emscripten_get_now = dateNow;
-  } else if (typeof performance === 'object' && performance && typeof performance['now'] === 'function') {
-    _emscripten_get_now = function() { return performance['now'](); };
-  } else {
-    _emscripten_get_now = Date.now;
-  };
-var GLctx; GL.init();
+
+  function _setTempRet0($i) {
+      setTempRet0(($i) | 0);
+    }
+
+if (!ENVIRONMENT_IS_PTHREAD) PThread.initMainThreadBlock(); else PThread.initWorker();;
+var GLctx;;
 
  // proxiedFunctionTable specifies the list of functions that can be called either synchronously or asynchronously from other threads in postMessage()d or internally queued events. This way a pthread in a Worker can synchronously access e.g. the DOM on the main thread.
 
-var proxiedFunctionTable = [null,___syscall140,___syscall6,_fd_write,_emscripten_set_canvas_element_size_main_thread];
+var proxiedFunctionTable = [null,_emscripten_set_canvas_element_size_main_thread,_fd_close,_fd_seek,_fd_write];
 
 var ASSERTIONS = false;
 
-// Copyright 2017 The Emscripten Authors.  All rights reserved.
-// Emscripten is available under two separate licenses, the MIT license and the
-// University of Illinois/NCSA Open Source License.  Both these licenses can be
-// found in the LICENSE file.
+
 
 /** @type {function(string, boolean=, number=)} */
 function intArrayFromString(stringy, dontAddNull, length) {
@@ -3175,419 +3318,230 @@ function intArrayToString(array) {
 }
 
 
-// ASM_LIBRARY EXTERN PRIMITIVES: Int8Array,Int32Array
-
-
 var asmGlobalArg = {};
-
-var asmLibraryArg = { "___assert_fail": ___assert_fail, "___call_main": ___call_main, "___clock_gettime": ___clock_gettime, "___cxa_allocate_exception": ___cxa_allocate_exception, "___cxa_begin_catch": ___cxa_begin_catch, "___cxa_pure_virtual": ___cxa_pure_virtual, "___cxa_throw": ___cxa_throw, "___cxa_uncaught_exceptions": ___cxa_uncaught_exceptions, "___exception_addRef": ___exception_addRef, "___exception_deAdjust": ___exception_deAdjust, "___gxx_personality_v0": ___gxx_personality_v0, "___setErrNo": ___setErrNo, "___syscall140": ___syscall140, "___syscall6": ___syscall6, "___wasi_fd_write": ___wasi_fd_write, "__cleanup_thread": __cleanup_thread, "__findCanvasEventTarget": __findCanvasEventTarget, "__findEventTarget": __findEventTarget, "__memory_base": 1024, "__pthread_testcancel_js": __pthread_testcancel_js, "__spawn_thread": __spawn_thread, "__table_base": 0, "_abort": _abort, "_clock_gettime": _clock_gettime, "_emscripten_asm_const_i": _emscripten_asm_const_i, "_emscripten_asm_const_ii": _emscripten_asm_const_ii, "_emscripten_conditional_set_current_thread_status_js": _emscripten_conditional_set_current_thread_status_js, "_emscripten_futex_wait": _emscripten_futex_wait, "_emscripten_futex_wake": _emscripten_futex_wake, "_emscripten_get_heap_size": _emscripten_get_heap_size, "_emscripten_get_now": _emscripten_get_now, "_emscripten_get_now_is_monotonic": _emscripten_get_now_is_monotonic, "_emscripten_has_threading_support": _emscripten_has_threading_support, "_emscripten_memcpy_big": _emscripten_memcpy_big, "_emscripten_proxy_to_main_thread_js": _emscripten_proxy_to_main_thread_js, "_emscripten_receive_on_main_thread_js": _emscripten_receive_on_main_thread_js, "_emscripten_resize_heap": _emscripten_resize_heap, "_emscripten_set_canvas_element_size": _emscripten_set_canvas_element_size, "_emscripten_set_canvas_element_size_calling_thread": _emscripten_set_canvas_element_size_calling_thread, "_emscripten_set_canvas_element_size_main_thread": _emscripten_set_canvas_element_size_main_thread, "_emscripten_set_current_thread_status_js": _emscripten_set_current_thread_status_js, "_emscripten_set_offscreencanvas_size_on_target_thread": _emscripten_set_offscreencanvas_size_on_target_thread, "_emscripten_set_offscreencanvas_size_on_target_thread_js": _emscripten_set_offscreencanvas_size_on_target_thread_js, "_emscripten_set_thread_name_js": _emscripten_set_thread_name_js, "_emscripten_syscall": _emscripten_syscall, "_emscripten_webgl_create_context": _emscripten_webgl_create_context, "_emscripten_webgl_do_create_context": _emscripten_webgl_do_create_context, "_fd_write": _fd_write, "_initPthreadsJS": _initPthreadsJS, "_llvm_trap": _llvm_trap, "_pthread_cleanup_pop": _pthread_cleanup_pop, "_pthread_cleanup_push": _pthread_cleanup_push, "_pthread_create": _pthread_create, "_pthread_getschedparam": _pthread_getschedparam, "_pthread_join": _pthread_join, "abort": abort, "abortOnCannotGrowMemory": abortOnCannotGrowMemory, "demangle": demangle, "demangleAll": demangleAll, "flush_NO_FILESYSTEM": flush_NO_FILESYSTEM, "getTempRet0": getTempRet0, "jsStackTrace": jsStackTrace, "memory": wasmMemory, "setTempRet0": setTempRet0, "stackTrace": stackTrace, "stringToNewUTF8": stringToNewUTF8, "table": wasmTable, "tempDoublePtr": tempDoublePtr };
-// EMSCRIPTEN_START_ASM
-var asm =Module["asm"]// EMSCRIPTEN_END_ASM
-(asmGlobalArg, asmLibraryArg, buffer);
-
-Module["asm"] = asm;
-var __ZSt18uncaught_exceptionv = Module["__ZSt18uncaught_exceptionv"] = function() {
-  return Module["asm"]["__ZSt18uncaught_exceptionv"].apply(null, arguments)
+var asmLibraryArg = { "__assert_fail": ___assert_fail, "__clock_gettime": ___clock_gettime, "__cxa_allocate_exception": ___cxa_allocate_exception, "__cxa_throw": ___cxa_throw, "_emscripten_notify_thread_queue": __emscripten_notify_thread_queue, "abort": _abort, "clock_gettime": _clock_gettime, "emscripten_asm_const_iii": _emscripten_asm_const_iii, "emscripten_conditional_set_current_thread_status": _emscripten_conditional_set_current_thread_status, "emscripten_futex_wait": _emscripten_futex_wait, "emscripten_futex_wake": _emscripten_futex_wake, "emscripten_get_now": _emscripten_get_now, "emscripten_get_sbrk_ptr": _emscripten_get_sbrk_ptr, "emscripten_is_main_browser_thread": _emscripten_is_main_browser_thread, "emscripten_memcpy_big": _emscripten_memcpy_big, "emscripten_receive_on_main_thread_js": _emscripten_receive_on_main_thread_js, "emscripten_resize_heap": _emscripten_resize_heap, "emscripten_set_canvas_element_size": _emscripten_set_canvas_element_size, "emscripten_set_current_thread_status": _emscripten_set_current_thread_status, "emscripten_webgl_create_context": _emscripten_webgl_create_context, "fd_close": _fd_close, "fd_seek": _fd_seek, "fd_write": _fd_write, "initPthreadsJS": initPthreadsJS, "memory": wasmMemory, "pthread_cleanup_push": _pthread_cleanup_push, "pthread_create": _pthread_create, "pthread_join": _pthread_join, "pthread_self": _pthread_self, "setTempRet0": _setTempRet0, "table": wasmTable };
+var asm = createWasm();
+/** @type {function(...*):?} */
+var ___wasm_call_ctors = Module["___wasm_call_ctors"] = function() {
+  return (___wasm_call_ctors = Module["___wasm_call_ctors"] = Module["asm"]["__wasm_call_ctors"]).apply(null, arguments);
 };
 
-var ___cxa_can_catch = Module["___cxa_can_catch"] = function() {
-  return Module["asm"]["___cxa_can_catch"].apply(null, arguments)
-};
-
-var ___cxa_is_pointer_type = Module["___cxa_is_pointer_type"] = function() {
-  return Module["asm"]["___cxa_is_pointer_type"].apply(null, arguments)
-};
-
-var ___em_js__initPthreadsJS = Module["___em_js__initPthreadsJS"] = function() {
-  return Module["asm"]["___em_js__initPthreadsJS"].apply(null, arguments)
-};
-
-var ___emscripten_pthread_data_constructor = Module["___emscripten_pthread_data_constructor"] = function() {
-  return Module["asm"]["___emscripten_pthread_data_constructor"].apply(null, arguments)
-};
-
-var ___errno_location = Module["___errno_location"] = function() {
-  return Module["asm"]["___errno_location"].apply(null, arguments)
-};
-
-var ___pthread_tsd_run_dtors = Module["___pthread_tsd_run_dtors"] = function() {
-  return Module["asm"]["___pthread_tsd_run_dtors"].apply(null, arguments)
-};
-
-var __emscripten_atomic_fetch_and_add_u64 = Module["__emscripten_atomic_fetch_and_add_u64"] = function() {
-  return Module["asm"]["__emscripten_atomic_fetch_and_add_u64"].apply(null, arguments)
-};
-
-var __emscripten_atomic_fetch_and_and_u64 = Module["__emscripten_atomic_fetch_and_and_u64"] = function() {
-  return Module["asm"]["__emscripten_atomic_fetch_and_and_u64"].apply(null, arguments)
-};
-
-var __emscripten_atomic_fetch_and_or_u64 = Module["__emscripten_atomic_fetch_and_or_u64"] = function() {
-  return Module["asm"]["__emscripten_atomic_fetch_and_or_u64"].apply(null, arguments)
-};
-
-var __emscripten_atomic_fetch_and_sub_u64 = Module["__emscripten_atomic_fetch_and_sub_u64"] = function() {
-  return Module["asm"]["__emscripten_atomic_fetch_and_sub_u64"].apply(null, arguments)
-};
-
-var __emscripten_atomic_fetch_and_xor_u64 = Module["__emscripten_atomic_fetch_and_xor_u64"] = function() {
-  return Module["asm"]["__emscripten_atomic_fetch_and_xor_u64"].apply(null, arguments)
-};
-
-var __register_pthread_ptr = Module["__register_pthread_ptr"] = function() {
-  return Module["asm"]["__register_pthread_ptr"].apply(null, arguments)
-};
-
-var _emscripten_async_queue_call_on_thread = Module["_emscripten_async_queue_call_on_thread"] = function() {
-  return Module["asm"]["_emscripten_async_queue_call_on_thread"].apply(null, arguments)
-};
-
-var _emscripten_async_queue_on_thread_ = Module["_emscripten_async_queue_on_thread_"] = function() {
-  return Module["asm"]["_emscripten_async_queue_on_thread_"].apply(null, arguments)
-};
-
-var _emscripten_async_run_in_main_thread = Module["_emscripten_async_run_in_main_thread"] = function() {
-  return Module["asm"]["_emscripten_async_run_in_main_thread"].apply(null, arguments)
-};
-
-var _emscripten_atomic_add_u64 = Module["_emscripten_atomic_add_u64"] = function() {
-  return Module["asm"]["_emscripten_atomic_add_u64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_and_u64 = Module["_emscripten_atomic_and_u64"] = function() {
-  return Module["asm"]["_emscripten_atomic_and_u64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_cas_u64 = Module["_emscripten_atomic_cas_u64"] = function() {
-  return Module["asm"]["_emscripten_atomic_cas_u64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_exchange_u64 = Module["_emscripten_atomic_exchange_u64"] = function() {
-  return Module["asm"]["_emscripten_atomic_exchange_u64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_load_f32 = Module["_emscripten_atomic_load_f32"] = function() {
-  return Module["asm"]["_emscripten_atomic_load_f32"].apply(null, arguments)
-};
-
-var _emscripten_atomic_load_f64 = Module["_emscripten_atomic_load_f64"] = function() {
-  return Module["asm"]["_emscripten_atomic_load_f64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_load_u64 = Module["_emscripten_atomic_load_u64"] = function() {
-  return Module["asm"]["_emscripten_atomic_load_u64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_or_u64 = Module["_emscripten_atomic_or_u64"] = function() {
-  return Module["asm"]["_emscripten_atomic_or_u64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_store_f32 = Module["_emscripten_atomic_store_f32"] = function() {
-  return Module["asm"]["_emscripten_atomic_store_f32"].apply(null, arguments)
-};
-
-var _emscripten_atomic_store_f64 = Module["_emscripten_atomic_store_f64"] = function() {
-  return Module["asm"]["_emscripten_atomic_store_f64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_store_u64 = Module["_emscripten_atomic_store_u64"] = function() {
-  return Module["asm"]["_emscripten_atomic_store_u64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_sub_u64 = Module["_emscripten_atomic_sub_u64"] = function() {
-  return Module["asm"]["_emscripten_atomic_sub_u64"].apply(null, arguments)
-};
-
-var _emscripten_atomic_xor_u64 = Module["_emscripten_atomic_xor_u64"] = function() {
-  return Module["asm"]["_emscripten_atomic_xor_u64"].apply(null, arguments)
-};
-
-var _emscripten_conditional_set_current_thread_status = Module["_emscripten_conditional_set_current_thread_status"] = function() {
-  return Module["asm"]["_emscripten_conditional_set_current_thread_status"].apply(null, arguments)
-};
-
-var _emscripten_current_thread_process_queued_calls = Module["_emscripten_current_thread_process_queued_calls"] = function() {
-  return Module["asm"]["_emscripten_current_thread_process_queued_calls"].apply(null, arguments)
-};
-
-var _emscripten_get_global_libc = Module["_emscripten_get_global_libc"] = function() {
-  return Module["asm"]["_emscripten_get_global_libc"].apply(null, arguments)
-};
-
-var _emscripten_get_sbrk_ptr = Module["_emscripten_get_sbrk_ptr"] = function() {
-  return Module["asm"]["_emscripten_get_sbrk_ptr"].apply(null, arguments)
-};
-
-var _emscripten_is_main_browser_thread = Module["_emscripten_is_main_browser_thread"] = function() {
-  return Module["asm"]["_emscripten_is_main_browser_thread"].apply(null, arguments)
-};
-
-var _emscripten_is_main_runtime_thread = Module["_emscripten_is_main_runtime_thread"] = function() {
-  return Module["asm"]["_emscripten_is_main_runtime_thread"].apply(null, arguments)
-};
-
-var _emscripten_main_browser_thread_id = Module["_emscripten_main_browser_thread_id"] = function() {
-  return Module["asm"]["_emscripten_main_browser_thread_id"].apply(null, arguments)
-};
-
-var _emscripten_main_thread_process_queued_calls = Module["_emscripten_main_thread_process_queued_calls"] = function() {
-  return Module["asm"]["_emscripten_main_thread_process_queued_calls"].apply(null, arguments)
-};
-
-var _emscripten_register_main_browser_thread_id = Module["_emscripten_register_main_browser_thread_id"] = function() {
-  return Module["asm"]["_emscripten_register_main_browser_thread_id"].apply(null, arguments)
-};
-
-var _emscripten_run_in_main_runtime_thread_js = Module["_emscripten_run_in_main_runtime_thread_js"] = function() {
-  return Module["asm"]["_emscripten_run_in_main_runtime_thread_js"].apply(null, arguments)
-};
-
-var _emscripten_set_current_thread_status = Module["_emscripten_set_current_thread_status"] = function() {
-  return Module["asm"]["_emscripten_set_current_thread_status"].apply(null, arguments)
-};
-
-var _emscripten_set_thread_name = Module["_emscripten_set_thread_name"] = function() {
-  return Module["asm"]["_emscripten_set_thread_name"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread = Module["_emscripten_sync_run_in_main_thread"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread_0 = Module["_emscripten_sync_run_in_main_thread_0"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread_0"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread_1 = Module["_emscripten_sync_run_in_main_thread_1"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread_1"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread_2 = Module["_emscripten_sync_run_in_main_thread_2"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread_2"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread_3 = Module["_emscripten_sync_run_in_main_thread_3"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread_3"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread_4 = Module["_emscripten_sync_run_in_main_thread_4"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread_4"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread_5 = Module["_emscripten_sync_run_in_main_thread_5"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread_5"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread_6 = Module["_emscripten_sync_run_in_main_thread_6"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread_6"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread_7 = Module["_emscripten_sync_run_in_main_thread_7"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread_7"].apply(null, arguments)
-};
-
-var _emscripten_sync_run_in_main_thread_xprintf_varargs = Module["_emscripten_sync_run_in_main_thread_xprintf_varargs"] = function() {
-  return Module["asm"]["_emscripten_sync_run_in_main_thread_xprintf_varargs"].apply(null, arguments)
-};
-
-var _free = Module["_free"] = function() {
-  return Module["asm"]["_free"].apply(null, arguments)
-};
-
-var _llvm_bswap_i32 = Module["_llvm_bswap_i32"] = function() {
-  return Module["asm"]["_llvm_bswap_i32"].apply(null, arguments)
-};
-
+/** @type {function(...*):?} */
 var _main = Module["_main"] = function() {
-  return Module["asm"]["_main"].apply(null, arguments)
+  return (_main = Module["_main"] = Module["asm"]["main"]).apply(null, arguments);
 };
 
-var _malloc = Module["_malloc"] = function() {
-  return Module["asm"]["_malloc"].apply(null, arguments)
+/** @type {function(...*):?} */
+var ___errno_location = Module["___errno_location"] = function() {
+  return (___errno_location = Module["___errno_location"] = Module["asm"]["__errno_location"]).apply(null, arguments);
 };
 
-var _memalign = Module["_memalign"] = function() {
-  return Module["asm"]["_memalign"].apply(null, arguments)
+/** @type {function(...*):?} */
+var _emscripten_get_global_libc = Module["_emscripten_get_global_libc"] = function() {
+  return (_emscripten_get_global_libc = Module["_emscripten_get_global_libc"] = Module["asm"]["emscripten_get_global_libc"]).apply(null, arguments);
 };
 
-var _memcpy = Module["_memcpy"] = function() {
-  return Module["asm"]["_memcpy"].apply(null, arguments)
+/** @type {function(...*):?} */
+var ___em_js__initPthreadsJS = Module["___em_js__initPthreadsJS"] = function() {
+  return (___em_js__initPthreadsJS = Module["___em_js__initPthreadsJS"] = Module["asm"]["__em_js__initPthreadsJS"]).apply(null, arguments);
 };
 
-var _memmove = Module["_memmove"] = function() {
-  return Module["asm"]["_memmove"].apply(null, arguments)
+/** @type {function(...*):?} */
+var ___emscripten_pthread_data_constructor = Module["___emscripten_pthread_data_constructor"] = function() {
+  return (___emscripten_pthread_data_constructor = Module["___emscripten_pthread_data_constructor"] = Module["asm"]["__emscripten_pthread_data_constructor"]).apply(null, arguments);
 };
 
-var _memset = Module["_memset"] = function() {
-  return Module["asm"]["_memset"].apply(null, arguments)
+/** @type {function(...*):?} */
+var _setThrew = Module["_setThrew"] = function() {
+  return (_setThrew = Module["_setThrew"] = Module["asm"]["setThrew"]).apply(null, arguments);
 };
 
-var _proxy_main = Module["_proxy_main"] = function() {
-  return Module["asm"]["_proxy_main"].apply(null, arguments)
-};
-
-var _pthread_self = Module["_pthread_self"] = function() {
-  return Module["asm"]["_pthread_self"].apply(null, arguments)
-};
-
-var establishStackSpace = Module["establishStackSpace"] = function() {
-  return Module["asm"]["establishStackSpace"].apply(null, arguments)
-};
-
-var stackAlloc = Module["stackAlloc"] = function() {
-  return Module["asm"]["stackAlloc"].apply(null, arguments)
-};
-
-var stackRestore = Module["stackRestore"] = function() {
-  return Module["asm"]["stackRestore"].apply(null, arguments)
-};
-
+/** @type {function(...*):?} */
 var stackSave = Module["stackSave"] = function() {
-  return Module["asm"]["stackSave"].apply(null, arguments)
+  return (stackSave = Module["stackSave"] = Module["asm"]["stackSave"]).apply(null, arguments);
 };
 
-var dynCall_i = Module["dynCall_i"] = function() {
-  return Module["asm"]["dynCall_i"].apply(null, arguments)
+/** @type {function(...*):?} */
+var stackRestore = Module["stackRestore"] = function() {
+  return (stackRestore = Module["stackRestore"] = Module["asm"]["stackRestore"]).apply(null, arguments);
 };
 
+/** @type {function(...*):?} */
+var stackAlloc = Module["stackAlloc"] = function() {
+  return (stackAlloc = Module["stackAlloc"] = Module["asm"]["stackAlloc"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _malloc = Module["_malloc"] = function() {
+  return (_malloc = Module["_malloc"] = Module["asm"]["malloc"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _free = Module["_free"] = function() {
+  return (_free = Module["_free"] = Module["asm"]["free"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _memalign = Module["_memalign"] = function() {
+  return (_memalign = Module["_memalign"] = Module["asm"]["memalign"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_main_browser_thread_id = Module["_emscripten_main_browser_thread_id"] = function() {
+  return (_emscripten_main_browser_thread_id = Module["_emscripten_main_browser_thread_id"] = Module["asm"]["emscripten_main_browser_thread_id"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var ___pthread_tsd_run_dtors = Module["___pthread_tsd_run_dtors"] = function() {
+  return (___pthread_tsd_run_dtors = Module["___pthread_tsd_run_dtors"] = Module["asm"]["__pthread_tsd_run_dtors"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_main_thread_process_queued_calls = Module["_emscripten_main_thread_process_queued_calls"] = function() {
+  return (_emscripten_main_thread_process_queued_calls = Module["_emscripten_main_thread_process_queued_calls"] = Module["asm"]["emscripten_main_thread_process_queued_calls"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_current_thread_process_queued_calls = Module["_emscripten_current_thread_process_queued_calls"] = function() {
+  return (_emscripten_current_thread_process_queued_calls = Module["_emscripten_current_thread_process_queued_calls"] = Module["asm"]["emscripten_current_thread_process_queued_calls"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_register_main_browser_thread_id = Module["_emscripten_register_main_browser_thread_id"] = function() {
+  return (_emscripten_register_main_browser_thread_id = Module["_emscripten_register_main_browser_thread_id"] = Module["asm"]["emscripten_register_main_browser_thread_id"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _do_emscripten_dispatch_to_thread = Module["_do_emscripten_dispatch_to_thread"] = function() {
+  return (_do_emscripten_dispatch_to_thread = Module["_do_emscripten_dispatch_to_thread"] = Module["asm"]["do_emscripten_dispatch_to_thread"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_async_run_in_main_thread = Module["_emscripten_async_run_in_main_thread"] = function() {
+  return (_emscripten_async_run_in_main_thread = Module["_emscripten_async_run_in_main_thread"] = Module["asm"]["emscripten_async_run_in_main_thread"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread = Module["_emscripten_sync_run_in_main_thread"] = function() {
+  return (_emscripten_sync_run_in_main_thread = Module["_emscripten_sync_run_in_main_thread"] = Module["asm"]["emscripten_sync_run_in_main_thread"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_0 = Module["_emscripten_sync_run_in_main_thread_0"] = function() {
+  return (_emscripten_sync_run_in_main_thread_0 = Module["_emscripten_sync_run_in_main_thread_0"] = Module["asm"]["emscripten_sync_run_in_main_thread_0"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_1 = Module["_emscripten_sync_run_in_main_thread_1"] = function() {
+  return (_emscripten_sync_run_in_main_thread_1 = Module["_emscripten_sync_run_in_main_thread_1"] = Module["asm"]["emscripten_sync_run_in_main_thread_1"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_2 = Module["_emscripten_sync_run_in_main_thread_2"] = function() {
+  return (_emscripten_sync_run_in_main_thread_2 = Module["_emscripten_sync_run_in_main_thread_2"] = Module["asm"]["emscripten_sync_run_in_main_thread_2"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_xprintf_varargs = Module["_emscripten_sync_run_in_main_thread_xprintf_varargs"] = function() {
+  return (_emscripten_sync_run_in_main_thread_xprintf_varargs = Module["_emscripten_sync_run_in_main_thread_xprintf_varargs"] = Module["asm"]["emscripten_sync_run_in_main_thread_xprintf_varargs"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_3 = Module["_emscripten_sync_run_in_main_thread_3"] = function() {
+  return (_emscripten_sync_run_in_main_thread_3 = Module["_emscripten_sync_run_in_main_thread_3"] = Module["asm"]["emscripten_sync_run_in_main_thread_3"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_4 = Module["_emscripten_sync_run_in_main_thread_4"] = function() {
+  return (_emscripten_sync_run_in_main_thread_4 = Module["_emscripten_sync_run_in_main_thread_4"] = Module["asm"]["emscripten_sync_run_in_main_thread_4"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_5 = Module["_emscripten_sync_run_in_main_thread_5"] = function() {
+  return (_emscripten_sync_run_in_main_thread_5 = Module["_emscripten_sync_run_in_main_thread_5"] = Module["asm"]["emscripten_sync_run_in_main_thread_5"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_6 = Module["_emscripten_sync_run_in_main_thread_6"] = function() {
+  return (_emscripten_sync_run_in_main_thread_6 = Module["_emscripten_sync_run_in_main_thread_6"] = Module["asm"]["emscripten_sync_run_in_main_thread_6"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_7 = Module["_emscripten_sync_run_in_main_thread_7"] = function() {
+  return (_emscripten_sync_run_in_main_thread_7 = Module["_emscripten_sync_run_in_main_thread_7"] = Module["asm"]["emscripten_sync_run_in_main_thread_7"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_run_in_main_runtime_thread_js = Module["_emscripten_run_in_main_runtime_thread_js"] = function() {
+  return (_emscripten_run_in_main_runtime_thread_js = Module["_emscripten_run_in_main_runtime_thread_js"] = Module["asm"]["emscripten_run_in_main_runtime_thread_js"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var __emscripten_call_on_thread = Module["__emscripten_call_on_thread"] = function() {
+  return (__emscripten_call_on_thread = Module["__emscripten_call_on_thread"] = Module["asm"]["_emscripten_call_on_thread"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_tls_init = Module["_emscripten_tls_init"] = function() {
+  return (_emscripten_tls_init = Module["_emscripten_tls_init"] = Module["asm"]["emscripten_tls_init"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var __growWasmMemory = Module["__growWasmMemory"] = function() {
+  return (__growWasmMemory = Module["__growWasmMemory"] = Module["asm"]["__growWasmMemory"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
 var dynCall_ii = Module["dynCall_ii"] = function() {
-  return Module["asm"]["dynCall_ii"].apply(null, arguments)
+  return (dynCall_ii = Module["dynCall_ii"] = Module["asm"]["dynCall_ii"]).apply(null, arguments);
 };
 
-var dynCall_iidiiii = Module["dynCall_iidiiii"] = function() {
-  return Module["asm"]["dynCall_iidiiii"].apply(null, arguments)
-};
-
-var dynCall_iii = Module["dynCall_iii"] = function() {
-  return Module["asm"]["dynCall_iii"].apply(null, arguments)
-};
-
+/** @type {function(...*):?} */
 var dynCall_iiii = Module["dynCall_iiii"] = function() {
-  return Module["asm"]["dynCall_iiii"].apply(null, arguments)
+  return (dynCall_iiii = Module["dynCall_iiii"] = Module["asm"]["dynCall_iiii"]).apply(null, arguments);
 };
 
-var dynCall_iiiii = Module["dynCall_iiiii"] = function() {
-  return Module["asm"]["dynCall_iiiii"].apply(null, arguments)
-};
-
-var dynCall_iiiiii = Module["dynCall_iiiiii"] = function() {
-  return Module["asm"]["dynCall_iiiiii"].apply(null, arguments)
-};
-
-var dynCall_iiiiiii = Module["dynCall_iiiiiii"] = function() {
-  return Module["asm"]["dynCall_iiiiiii"].apply(null, arguments)
-};
-
-var dynCall_iiiiiiii = Module["dynCall_iiiiiiii"] = function() {
-  return Module["asm"]["dynCall_iiiiiiii"].apply(null, arguments)
-};
-
-var dynCall_iiiiiiiii = Module["dynCall_iiiiiiiii"] = function() {
-  return Module["asm"]["dynCall_iiiiiiiii"].apply(null, arguments)
-};
-
-var dynCall_iiiiiiiiii = Module["dynCall_iiiiiiiiii"] = function() {
-  return Module["asm"]["dynCall_iiiiiiiiii"].apply(null, arguments)
-};
-
+/** @type {function(...*):?} */
 var dynCall_jiji = Module["dynCall_jiji"] = function() {
-  return Module["asm"]["dynCall_jiji"].apply(null, arguments)
+  return (dynCall_jiji = Module["dynCall_jiji"] = Module["asm"]["dynCall_jiji"]).apply(null, arguments);
 };
 
-var dynCall_v = Module["dynCall_v"] = function() {
-  return Module["asm"]["dynCall_v"].apply(null, arguments)
+/** @type {function(...*):?} */
+var dynCall_iidiiii = Module["dynCall_iidiiii"] = function() {
+  return (dynCall_iidiiii = Module["dynCall_iidiiii"] = Module["asm"]["dynCall_iidiiii"]).apply(null, arguments);
 };
 
-var dynCall_vf = Module["dynCall_vf"] = function() {
-  return Module["asm"]["dynCall_vf"].apply(null, arguments)
-};
-
-var dynCall_vff = Module["dynCall_vff"] = function() {
-  return Module["asm"]["dynCall_vff"].apply(null, arguments)
-};
-
-var dynCall_vfff = Module["dynCall_vfff"] = function() {
-  return Module["asm"]["dynCall_vfff"].apply(null, arguments)
-};
-
-var dynCall_vffff = Module["dynCall_vffff"] = function() {
-  return Module["asm"]["dynCall_vffff"].apply(null, arguments)
-};
-
-var dynCall_vi = Module["dynCall_vi"] = function() {
-  return Module["asm"]["dynCall_vi"].apply(null, arguments)
-};
-
-var dynCall_vif = Module["dynCall_vif"] = function() {
-  return Module["asm"]["dynCall_vif"].apply(null, arguments)
-};
-
-var dynCall_viff = Module["dynCall_viff"] = function() {
-  return Module["asm"]["dynCall_viff"].apply(null, arguments)
-};
-
-var dynCall_vifff = Module["dynCall_vifff"] = function() {
-  return Module["asm"]["dynCall_vifff"].apply(null, arguments)
-};
-
-var dynCall_viffff = Module["dynCall_viffff"] = function() {
-  return Module["asm"]["dynCall_viffff"].apply(null, arguments)
-};
-
+/** @type {function(...*):?} */
 var dynCall_vii = Module["dynCall_vii"] = function() {
-  return Module["asm"]["dynCall_vii"].apply(null, arguments)
+  return (dynCall_vii = Module["dynCall_vii"] = Module["asm"]["dynCall_vii"]).apply(null, arguments);
 };
 
-var dynCall_viif = Module["dynCall_viif"] = function() {
-  return Module["asm"]["dynCall_viif"].apply(null, arguments)
+/** @type {function(...*):?} */
+var dynCall_vi = Module["dynCall_vi"] = function() {
+  return (dynCall_vi = Module["dynCall_vi"] = Module["asm"]["dynCall_vi"]).apply(null, arguments);
 };
 
-var dynCall_viifi = Module["dynCall_viifi"] = function() {
-  return Module["asm"]["dynCall_viifi"].apply(null, arguments)
-};
-
-var dynCall_viii = Module["dynCall_viii"] = function() {
-  return Module["asm"]["dynCall_viii"].apply(null, arguments)
-};
-
-var dynCall_viiii = Module["dynCall_viiii"] = function() {
-  return Module["asm"]["dynCall_viiii"].apply(null, arguments)
-};
-
-var dynCall_viiiii = Module["dynCall_viiiii"] = function() {
-  return Module["asm"]["dynCall_viiiii"].apply(null, arguments)
-};
-
+/** @type {function(...*):?} */
 var dynCall_viiiiii = Module["dynCall_viiiiii"] = function() {
-  return Module["asm"]["dynCall_viiiiii"].apply(null, arguments)
+  return (dynCall_viiiiii = Module["dynCall_viiiiii"] = Module["asm"]["dynCall_viiiiii"]).apply(null, arguments);
 };
 
-var dynCall_viiiiiii = Module["dynCall_viiiiiii"] = function() {
-  return Module["asm"]["dynCall_viiiiiii"].apply(null, arguments)
+/** @type {function(...*):?} */
+var dynCall_viiiii = Module["dynCall_viiiii"] = function() {
+  return (dynCall_viiiii = Module["dynCall_viiiii"] = Module["asm"]["dynCall_viiiii"]).apply(null, arguments);
 };
 
-var dynCall_viiiiiiii = Module["dynCall_viiiiiiii"] = function() {
-  return Module["asm"]["dynCall_viiiiiiii"].apply(null, arguments)
+/** @type {function(...*):?} */
+var dynCall_viiii = Module["dynCall_viiii"] = function() {
+  return (dynCall_viiii = Module["dynCall_viiii"] = Module["asm"]["dynCall_viiii"]).apply(null, arguments);
 };
 
-var dynCall_viiiiiiiii = Module["dynCall_viiiiiiiii"] = function() {
-  return Module["asm"]["dynCall_viiiiiiiii"].apply(null, arguments)
-};
 
-var dynCall_viiiiiiiiii = Module["dynCall_viiiiiiiiii"] = function() {
-  return Module["asm"]["dynCall_viiiiiiiiii"].apply(null, arguments)
-};
-
-var dynCall_viiiiiiiiiii = Module["dynCall_viiiiiiiiiii"] = function() {
-  return Module["asm"]["dynCall_viiiiiiiiiii"].apply(null, arguments)
-};
-;
 
 
 
 // === Auto-generated postamble setup entry stuff ===
 
-Module['asm'] = asm;
 
 
 
@@ -3650,7 +3604,6 @@ Module['asm'] = asm;
 
 
 
-Module["establishStackSpace"] = establishStackSpace;
 
 
 
@@ -3659,65 +3612,110 @@ Module["establishStackSpace"] = establishStackSpace;
 
 
 
-Module["dynCall_ii"] = dynCall_ii;
 
 
 
 
 
-if (memoryInitializer && !ENVIRONMENT_IS_PTHREAD) {
-  if (!isDataURI(memoryInitializer)) {
-    memoryInitializer = locateFile(memoryInitializer);
-  }
-  if (ENVIRONMENT_IS_NODE || ENVIRONMENT_IS_SHELL) {
-    var data = readBinary(memoryInitializer);
-    HEAPU8.set(data, GLOBAL_BASE);
-  } else {
-    addRunDependency('memory initializer');
-    var applyMemoryInitializer = function(data) {
-      if (data.byteLength) data = new Uint8Array(data);
-      HEAPU8.set(data, GLOBAL_BASE);
-      // Delete the typed array that contains the large blob of the memory initializer request response so that
-      // we won't keep unnecessary memory lying around. However, keep the XHR object itself alive so that e.g.
-      // its .status field can still be accessed later.
-      if (Module['memoryInitializerRequest']) delete Module['memoryInitializerRequest'].response;
-      removeRunDependency('memory initializer');
-    };
-    var doBrowserLoad = function() {
-      readAsync(memoryInitializer, applyMemoryInitializer, function() {
-        throw 'could not load memory initializer ' + memoryInitializer;
-      });
-    };
-    if (Module['memoryInitializerRequest']) {
-      // a network request has already been created, just use that
-      var useRequest = function() {
-        var request = Module['memoryInitializerRequest'];
-        var response = request.response;
-        if (request.status !== 200 && request.status !== 0) {
-            // If you see this warning, the issue may be that you are using locateFile and defining it in JS. That
-            // means that the HTML file doesn't know about it, and when it tries to create the mem init request early, does it to the wrong place.
-            // Look in your browser's devtools network console to see what's going on.
-            console.warn('a problem seems to have happened with Module.memoryInitializerRequest, status: ' + request.status + ', retrying ' + memoryInitializer);
-            doBrowserLoad();
-            return;
-        }
-        applyMemoryInitializer(response);
-      };
-      if (Module['memoryInitializerRequest'].response) {
-        setTimeout(useRequest, 0); // it's already here; but, apply it asynchronously
-      } else {
-        Module['memoryInitializerRequest'].addEventListener('load', useRequest); // wait for it
-      }
-    } else {
-      // fetch it from the network ourselves
-      doBrowserLoad();
-    }
-  }
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Module["PThread"] = PThread;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Module["PThread"] = PThread;
+Module["_pthread_self"] = _pthread_self;
+Module["wasmMemory"] = wasmMemory;
+Module["ExitStatus"] = ExitStatus;
+
+
+
+
 
 
 var calledRun;
-
 
 /**
  * @constructor
@@ -3731,6 +3729,7 @@ function ExitStatus(status) {
 
 var calledMain = false;
 
+
 dependenciesFulfilled = function runCaller() {
   // If run has never been called, and we should call run (INVOKE_RUN is true, and Module.noInitialRun is not false)
   if (!calledRun) run();
@@ -3739,24 +3738,20 @@ dependenciesFulfilled = function runCaller() {
 
 function callMain(args) {
 
+  var entryFunction = Module['_main'];
 
-  args = args || [];
 
-  var argc = args.length+1;
-  var argv = stackAlloc((argc + 1) * 4);
-  HEAP32[argv >> 2] = allocateUTF8OnStack(thisProgram);
-  for (var i = 1; i < argc; i++) {
-    HEAP32[(argv >> 2) + i] = allocateUTF8OnStack(args[i - 1]);
-  }
-  HEAP32[(argv >> 2) + argc] = 0;
-
+  var argc = 0;
+  var argv = 0;
 
   try {
 
 
-    var ret = Module['_main'](argc, argv);
+    var ret = entryFunction(argc, argv);
 
 
+    // In PROXY_TO_PTHREAD builds, we should never exit the runtime below, as execution is asynchronously handed
+    // off to a pthread.
     // if we're not running an evented main loop, it's time to exit
       exit(ret, /* implicit = */ true);
   }
@@ -3765,7 +3760,7 @@ function callMain(args) {
       // exit() throws this once it's done to make sure execution
       // has been stopped completely
       return;
-    } else if (e == 'SimulateInfiniteLoop') {
+    } else if (e == 'unwind') {
       // running an evented main loop, don't immediately exit
       noExitRuntime = true;
       return;
@@ -3803,6 +3798,7 @@ function run(args) {
     // or while the async setStatus time below was happening
     if (calledRun) return;
     calledRun = true;
+    Module['calledRun'] = true;
 
     if (ABORT) return;
 
@@ -3833,6 +3829,7 @@ function run(args) {
 Module['run'] = run;
 
 
+/** @param {boolean|number=} implicit */
 function exit(status, implicit) {
 
   // if this is just main exit-ing implicitly, and the status is 0, then we
@@ -3874,7 +3871,11 @@ if (Module['noInitialRun']) shouldRunNow = false;
 if (!ENVIRONMENT_IS_PTHREAD) // EXIT_RUNTIME=0 only applies to default behavior of the main browser thread
   noExitRuntime = true;
 
-if (!ENVIRONMENT_IS_PTHREAD) run();
+if (!ENVIRONMENT_IS_PTHREAD) {
+  run();
+} else {
+}
+
 
 
 
