@@ -2,9 +2,10 @@
 
 <img src="https://images.manning.com/180/240/resize/book/7/97eac5c-498e-4454-bdb2-677ec3406f29/Gallant-WA-HI.png" align="left" /> This repository holds the companion code for the book "[WebAssembly in Action](https://www.manning.com/books/webassembly-in-action)" in the [original-code](https://github.com/cggallant/WebAssembly-in-Action/tree/master/original-code) folder.
 
-One of the tools used in the book is version _1.38.45_ of the _Emscripten toolkit_. Because the toolkit is constantly being improved, some of the items shown in the book need to be adjusted if you wish to use some of the more recent versions of the toolkit. Over the coming days, I'll update the code and push it to the [updated-code](https://github.com/cggallant/WebAssembly-in-Action/tree/master/updated-code) folder.
+One of the tools used in the book is version _1.38.45_ of the _Emscripten toolkit_. Because the toolkit is constantly being improved, some of the items shown in the book need to be adjusted if you wish to use some of the more recent versions of the toolkit. 
 
-<p>&nbsp;</p>
+Over the coming days, I'll update the code and push it to the [updated-code](https://github.com/cggallant/WebAssembly-in-Action/tree/master/updated-code) folder.
+
 <p>&nbsp;</p>
   
 # Bonus content
