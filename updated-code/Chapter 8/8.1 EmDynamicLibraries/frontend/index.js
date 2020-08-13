@@ -45,7 +45,9 @@ function switchForm(showEditProduct) {
   if (showEditProduct) {
     // Only create the Emscripten Module object for the Edit Product form the once...
     if (productModule === null) {
-      productModule = new Module({ dynamicLibraries: ['validate_product.wasm'] });
+      Module({ dynamicLibraries: ['validate_product.wasm'] }).then((module) => {
+        productModule = module;
+      });
     }
  
     // Show the Edit Product controls
@@ -54,7 +56,9 @@ function switchForm(showEditProduct) {
   } else {
     // Only create the Emscripten Module object for the Order form the once...
     if (orderModule === null) {
-      orderModule = new Module({ dynamicLibraries: ['validate_order.wasm'] });
+      Module({ dynamicLibraries: ['validate_order.wasm'] }).then((module) => {
+        orderModule = module;
+      });
     }
 
     // Show the Order form's controls

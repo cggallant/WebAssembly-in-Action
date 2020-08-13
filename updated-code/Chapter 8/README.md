@@ -1,6 +1,6 @@
-This is the initial commit of the original code for chapter 8 so that you're able to compare the changes when I push them up. 
-
-No changes have been made to this folder's code yet. Stay tuned.
+When the _MODULARIZE_ flag is used when compiling the WebAssembly module, creating a _Module_ object will now return a _Promise_. As a result, a couple changes were needed in the _switchForm_ function of the _index.js_ file (_frontend_ folder):
+- The _productModule = new Module_ line of code has been replaced with a _Module_ object call having a _then_ method. The module instance received by the _then_ method is placed in the _productModule_ global variable.
+- The _orderModule = new Module_ line of code has been replaced with a _Module_ object call having a _then_ method. The module instance received by the _then_ method is placed in the _orderModule_ global variable.
 
 
 ---
