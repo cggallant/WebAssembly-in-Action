@@ -13,7 +13,7 @@ function instantiateWebAssembly(bytes) {
   };
 
   WebAssembly.instantiate(bytes, importObject).then(result => {
-    const value = result.instance.exports._Increment(2);
+    const value = result.instance.exports.Increment(2);
     console.log(value.toString());
   });
 }

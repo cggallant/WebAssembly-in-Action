@@ -19,17 +19,15 @@ fs.readFile('validate.wasm', function(error, bytes) {
 });
 
 function instantiateWebAssembly(bytes) {
-  moduleMemory = new WebAssembly.Memory({initial: 256});
-
   const importObject = {    
-    env: {
-      __memory_base: 0,
-      memory: moduleMemory,
+    wasi_snapshot_preview1 : {
+      proc_exit: (value) => {}
     }
   };
 
   WebAssembly.instantiate(bytes, importObject).then(result => {
     moduleExports = result.instance.exports;
+    moduleMemory = moduleExports.memory;
     validateData();
   });
 }
@@ -38,14 +36,14 @@ function setErrorMessage(error) { console.log(error); }
 
 function validateData() {
   let errorMessage = "";
-  const errorMessagePointer = moduleExports._create_buffer(256);
+  const errorMessagePointer = moduleExports.create_buffer(256);
 
   if (!validateName(clientData.name, errorMessagePointer) ||
       !validateCategory(clientData.categoryId, errorMessagePointer)) {
     errorMessage = getStringFromMemory(errorMessagePointer);
   }
 
-  moduleExports._free_buffer(errorMessagePointer);
+  moduleExports.free_buffer(errorMessagePointer);
 
   setErrorMessage(errorMessage);
   if (errorMessage === "") {
@@ -76,31 +74,31 @@ function copyStringToMemory(value, memoryOffset) {
 }
 
 function validateName(name, errorMessagePointer) {
-  const namePointer = moduleExports._create_buffer((name.length + 1));
+  const namePointer = moduleExports.create_buffer((name.length + 1));
   copyStringToMemory(name, namePointer);
 
-  const isValid = moduleExports._ValidateName(namePointer, MAXIMUM_NAME_LENGTH, errorMessagePointer);
+  const isValid = moduleExports.ValidateName(namePointer, MAXIMUM_NAME_LENGTH, errorMessagePointer);
 
-  moduleExports._free_buffer(namePointer);
+  moduleExports.free_buffer(namePointer);
 
   return (isValid === 1);
 }
 
 function validateCategory(categoryId, errorMessagePointer) {
-  const categoryIdPointer = moduleExports._create_buffer((categoryId.length + 1));
+  const categoryIdPointer = moduleExports.create_buffer((categoryId.length + 1));
   copyStringToMemory(categoryId, categoryIdPointer);
 
   const arrayLength = VALID_CATEGORY_IDS.length;
   const bytesPerElement = Int32Array.BYTES_PER_ELEMENT;
-  const arrayPointer = moduleExports._create_buffer((arrayLength * bytesPerElement));
+  const arrayPointer = moduleExports.create_buffer((arrayLength * bytesPerElement));
 
   const bytesForArray = new Int32Array(moduleMemory.buffer);
   bytesForArray.set(VALID_CATEGORY_IDS, (arrayPointer / bytesPerElement));
 
-  const isValid = moduleExports._ValidateCategory(categoryIdPointer, arrayPointer, arrayLength, errorMessagePointer);
+  const isValid = moduleExports.ValidateCategory(categoryIdPointer, arrayPointer, arrayLength, errorMessagePointer);
 
-  moduleExports._free_buffer(arrayPointer);
-  moduleExports._free_buffer(categoryIdPointer);
+  moduleExports.free_buffer(arrayPointer);
+  moduleExports.free_buffer(categoryIdPointer);
 
   return (isValid === 1);
 }
