@@ -1,0 +1,63 @@
+.root-container{ position:relative; }
+.container-fluid { text-align:center; }
+
+/* The card itself */
+.CardBack,.CardFace {
+  display:inline-block;
+  width:150px;
+  height:200px;
+  margin:6px;
+  border:1px solid black;
+  border-radius:5px;
+  box-shadow: 5px 5px 5px grey;
+  position:relative; /* so that position absolute for the span is relative to this div */
+}
+
+/* The span within the card holds the image */
+.CardBack > span,.CardFace > span{
+  display:inline-block;
+
+  /* using an image sprite for the cards' images */
+  width:95px;
+  height:95px;
+  background-image:url('logos.png');
+  background-repeat:no-repeat;
+
+  /* center the image */
+  position:absolute;
+  top:50%;
+  left:50%;
+  transform:translate(-50%, -50%);
+}
+
+.CardBack { 
+  background-color:#263F7C; 
+  background-position:0 center;
+}
+
+/* level 1 (2 x 2) */
+.Type0 > span { background-position:-95px center; }
+.Type1 > span { background-position:-190px center; }
+
+/* level 2 (2 x 3...+2 cards) */
+.Type2 > span { background-position:-285px center; }
+
+/* level 3 (2 x 4...+2 cards) */
+.Type3 > span { background-position:-380px center; }
+
+/* level 4 (3 x 4...+4 cards) */
+.Type4 > span { background-position:-475px center; }
+.Type5 > span { background-position:-570px center; }
+
+/* level 5 (4 x 4...+4 cards) */
+.Type6 > span { background-position:-665px center; }
+.Type7 > span { background-position:-760px center; }
+
+/* level 6 (4 x 5...+4 cards) */
+.Type8 > span { background-position:-855px center; }
+.Type9 > span { background-position:-950px center; }
+
+.summary {
+  position:absolute;
+  top:50%;
+}

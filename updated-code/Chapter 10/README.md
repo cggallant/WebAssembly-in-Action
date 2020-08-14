@@ -15,7 +15,6 @@ No changes were needed for this folder.
 No changes were needed for this folder.
 
 <p>&nbsp;</p>
-<p>&nbsp;</p>
 
 ### The _10.4.1 SideModuleIncrement_ folder
 
