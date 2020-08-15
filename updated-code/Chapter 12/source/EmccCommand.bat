@@ -1,0 +1,1 @@
+emcc main.cpp -o main.js
