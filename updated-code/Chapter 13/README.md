@@ -1,6 +1,6 @@
-This is the initial commit of the original code for chapter 13 so that you're able to compare the changes when I push them up. 
+The npm install of Mocha and Chai updated Mocha's version from _6.2.1_ to _6.2.3_. It also updated some items in the _package-lock.json_ file.
 
-No changes have been made to this folder's code yet. Stay tuned.
+Other than copying the latest version of the _validate.js_ and _validate.wasm_ files from the _updated-code\\Chapter 4_ folder, no changes were needed to this folder's code.
 
 
 ---
