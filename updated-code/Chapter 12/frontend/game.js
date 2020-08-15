@@ -14,10 +14,10 @@ var Module = {
       const sideImportObject = {    
         env: {
           memory: moduleMemory,
-          _malloc: mainInstance.exports._malloc,
-          _free: mainInstance.exports._free,
-          _SeedRandomNumberGenerator: mainInstance.exports._SeedRandomNumberGenerator,
-          _GetRandomNumber: mainInstance.exports._GetRandomNumber,
+          _malloc: mainInstance.exports.malloc,
+          _free: mainInstance.exports.free,
+          _SeedRandomNumberGenerator: mainInstance.exports.SeedRandomNumberGenerator,
+          _GetRandomNumber: mainInstance.exports.GetRandomNumber,
           _GenerateCards: generateCards,
           _UpdateTriesTotal: updateTriesTotal,
           _FlipCard: flipCard,

@@ -501,7 +501,7 @@
         ;; that was selected before we either turn it face down or remove it. The UI
         ;; calls the function that we specify once the time is up.
         (call $Pause
-          (i32.const 1024) ;; Location in memory of the string "SecondCardSelectedCallback"
+          (i32.const 5120) ;; Location in memory of the string "SecondCardSelectedCallback"
           (i32.const 600)
         )
       )
@@ -649,5 +649,5 @@
   ;;==========
   ;; Data
   ;;----------
-  (data (i32.const 1024) "SecondCardSelectedCallback")
+  (data (i32.const 5120) "SecondCardSelectedCallback")
 )

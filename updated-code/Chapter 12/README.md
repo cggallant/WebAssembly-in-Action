@@ -1,6 +1,21 @@
-This is the initial commit of the original code for chapter 12 so that you're able to compare the changes when I push them up. 
+In the _frontend_ folder, the _game.js_ file needs to be modified.
 
-No changes have been made to this folder's code yet. Stay tuned.
+The _env_ object, of the _sideImportObject_ object, needs to be adjusted because the exported functions from the _main.wasm_ file no longer contain the underscore character. The following four lines of code need to be changed:
+- _\_malloc: mainInstance.exports.\_malloc,_ to _\_malloc: mainInstance.exports.malloc,_
+- _\_free: mainInstance.exports.\_free_, to _\_free: mainInstance.exports.free,_
+- _\_SeedRandomNumberGenerator: mainInstance.exports.\_SeedRandomNumberGenerator,_ to _\_SeedRandomNumberGenerator: mainInstance.exports.SeedRandomNumberGenerator,_
+- _\_GetRandomNumber: mainInstance.exports.\_GetRandomNumber,_ to _\_GetRandomNumber: mainInstance.exports.GetRandomNumber,_
+
+
+In the _source_ folder, the _cards.wast_ file needs to be modified.
+
+In the _cards.wast_ file, locate the _$CardSelected_ function and scroll to the end. Just before the _call $Pause_ line of code is an _i32.const 1024_ line of code. Change this value to 5,120. The line of code should now be: _i32.const 5120_
+
+Scroll to the very bottom of the _cards.wast_ file and change the value in the _data_ node from _1024_ to _5120_. The _data_ node should now be the following: _(data (i32.const 5120) "SecondCardSelectedCallback")_
+
+Rebuild the _cards.wasm_ file by going to the _wat2wasm online tool_ (https://webassembly.github.io/wabt/demo/wat2wasm/), pasting the contents of the _cards.wast_ file into the top-left pane, and then click the _Download_ button. Name the file that you download to: _cards.wasm_  
+
+
 
 
 ---
