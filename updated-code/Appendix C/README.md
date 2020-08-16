@@ -1,7 +1,38 @@
-This is the initial commit of the original code for appendix C so that you're able to compare the changes when I push them up. 
+### The _C.2.1 EM\_JS_ folder
+  
+  No changes were needed for this folder.
 
-No changes have been made to this folder's code yet. Stay tuned.
+### The _C.2.2 EM\_JS_ folder
+  
+  No changes were needed for this folder.
 
+### The _C.2.3 EM\_JS_ folder
+  
+  No changes were needed for this folder.
+
+### The _C.2.4 EM\_JS_ folder
+  
+  No changes were needed for this folder.
+
+### The _C.3.1 EM\_ASM_ folder
+  
+  No changes were needed for this folder.
+
+### The _C.3.2 EM\_ASM\__ folder
+  
+  No changes were needed for this folder.
+
+### The _C.3.3 EM\_ASM\__ folder
+  
+  No changes were needed for this folder.
+
+### The _C.3.4 EM\_ASM\_DOUBLE_ folder
+  
+  No changes were needed for this folder.
+
+### The _C.3.5 EM\_ASM\_INT_ folder
+  
+  No changes were needed for this folder.
 
 ---
 
