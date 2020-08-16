@@ -1,6 +1,14 @@
-This is the initial commit of the original code for appendix B so that you're able to compare the changes when I push them up. 
+### The _B.1 ccall_ folder
+  
+  No changes were needed for this folder.
 
-No changes have been made to this folder's code yet. Stay tuned.
+### The _B.2 cwrap_ folder
+  
+  No changes were needed for this folder.
+
+### The _B.3 direct_ folder
+  
+  No changes were needed for this folder.
 
 
 ---
