@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+  </head>
+  <body>
+    <input type="button" value="Add" onclick="callAdd()" />
+
+    <script>
+      function callAdd() {
+        const result = Module.ccall('Add',
+            'number',
+            ['number', 'number'],
+            [1, 2]);
+
+        console.log(`Result: ${result}`);
+      }
+    </script>
+    <script src="js_plumbing.js"></script>
+  </body>
+</html>
