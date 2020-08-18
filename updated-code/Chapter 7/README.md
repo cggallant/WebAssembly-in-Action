@@ -20,7 +20,7 @@ A few changes were needed in the _frontend_ folder's _main.js_ file:
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 1.40.1_.
+To compile the code in the _updated-code_ folder requires _Emscripten 2.0.0_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 

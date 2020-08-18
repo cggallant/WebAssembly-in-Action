@@ -11331,20 +11331,79 @@ var ASM_CONSTS = {
 
   
   
-  var exceptionInfos={};
-  Module["exceptionInfos"] = exceptionInfos;
+  
+  var ExceptionInfoAttrs={DESTRUCTOR_OFFSET:0,REFCOUNT_OFFSET:4,TYPE_OFFSET:8,CAUGHT_OFFSET:12,RETHROWN_OFFSET:13,SIZE:16};
+  Module["ExceptionInfoAttrs"] = ExceptionInfoAttrs;function ExceptionInfo(excPtr) {
+      this.excPtr = excPtr;
+      this.ptr = excPtr - ExceptionInfoAttrs.SIZE;
+  
+      this.set_type = function(type) {
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.TYPE_OFFSET))>>2)]=type;
+      };
+  
+      this.get_type = function() {
+        return HEAP32[(((this.ptr)+(ExceptionInfoAttrs.TYPE_OFFSET))>>2)];
+      };
+  
+      this.set_destructor = function(destructor) {
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.DESTRUCTOR_OFFSET))>>2)]=destructor;
+      };
+  
+      this.get_destructor = function() {
+        return HEAP32[(((this.ptr)+(ExceptionInfoAttrs.DESTRUCTOR_OFFSET))>>2)];
+      };
+  
+      this.set_refcount = function(refcount) {
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)]=refcount;
+      };
+  
+      this.set_caught = function (caught) {
+        caught = caught ? 1 : 0;
+        HEAP8[(((this.ptr)+(ExceptionInfoAttrs.CAUGHT_OFFSET))>>0)]=caught;
+      };
+  
+      this.get_caught = function () {
+        return HEAP8[(((this.ptr)+(ExceptionInfoAttrs.CAUGHT_OFFSET))>>0)] != 0;
+      };
+  
+      this.set_rethrown = function (rethrown) {
+        rethrown = rethrown ? 1 : 0;
+        HEAP8[(((this.ptr)+(ExceptionInfoAttrs.RETHROWN_OFFSET))>>0)]=rethrown;
+      };
+  
+      this.get_rethrown = function () {
+        return HEAP8[(((this.ptr)+(ExceptionInfoAttrs.RETHROWN_OFFSET))>>0)] != 0;
+      };
+  
+      // Initialize native structure fields. Should be called once after allocated.
+      this.init = function(type, destructor) {
+        this.set_type(type);
+        this.set_destructor(destructor);
+        this.set_refcount(0);
+        this.set_caught(false);
+        this.set_rethrown(false);
+      }
+  
+      this.add_ref = function() {
+        var value = HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)];
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)]=value + 1;
+      };
+  
+      // Returns true if last reference released.
+      this.release_ref = function() {
+        var prev = HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)];
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)]=prev - 1;
+        assert(prev > 0);
+        return prev === 1;
+      };
+    }
+  Module["ExceptionInfo"] = ExceptionInfo;
   
   var exceptionLast=0;
   Module["exceptionLast"] = exceptionLast;function ___cxa_throw(ptr, type, destructor) {
-      exceptionInfos[ptr] = {
-        ptr: ptr,
-        adjusted: [ptr],
-        type: type,
-        destructor: destructor,
-        refcount: 0,
-        caught: false,
-        rethrown: false
-      };
+      var info = new ExceptionInfo(ptr);
+      // Initialize ExceptionInfo content after it was allocated in __cxa_allocate_exception.
+      info.init(type, destructor);
       exceptionLast = ptr;
       if (!("uncaught_exception" in __ZSt18uncaught_exceptionv)) {
         __ZSt18uncaught_exceptionv.uncaught_exceptions = 1;
@@ -13984,58 +14043,93 @@ var ASM_CONSTS = {
   Module["exceptionCaught"] = exceptionCaught;
 
 
-  function exception_deAdjust(adjusted) {
-      if (!adjusted || exceptionInfos[adjusted]) return adjusted;
-      for (var key in exceptionInfos) {
-        var ptr = +key; // the iteration key is a string, and if we throw this, it must be an integer as that is what we look for
-        var adj = exceptionInfos[ptr].adjusted;
-        var len = adj.length;
-        for (var i = 0; i < len; i++) {
-          if (adj[i] === adjusted) {
-            return ptr;
-          }
-        }
-      }
-      return adjusted;
-    }
-  Module["exception_deAdjust"] = exception_deAdjust;
 
-  function exception_addRef(ptr) {
-      if (!ptr) return;
-      var info = exceptionInfos[ptr];
-      info.refcount++;
+  function CatchInfo(ptr) {
+  
+      this.free = function() {
+        _free(this.ptr);
+        this.ptr = 0;
+      };
+  
+      this.set_base_ptr = function(basePtr) {
+        HEAP32[((this.ptr)>>2)]=basePtr;
+      };
+  
+      this.get_base_ptr = function() {
+        return HEAP32[((this.ptr)>>2)];
+      };
+  
+      this.set_adjusted_ptr = function(adjustedPtr) {
+        var ptrSize = 4;
+        HEAP32[(((this.ptr)+(ptrSize))>>2)]=adjustedPtr;
+      };
+  
+      this.get_adjusted_ptr = function() {
+        var ptrSize = 4;
+        return HEAP32[(((this.ptr)+(ptrSize))>>2)];
+      };
+  
+      // Get pointer which is expected to be received by catch clause in C++ code. It may be adjusted
+      // when the pointer is casted to some of the exception object base classes (e.g. when virtual
+      // inheritance is used). When a pointer is thrown this method should return the thrown pointer
+      // itself.
+      this.get_exception_ptr = function() {
+        // Work around a fastcomp bug, this code is still included for some reason in a build without
+        // exceptions support.
+        var isPointer = Module['___cxa_is_pointer_type'](
+          this.get_exception_info().get_type());
+        if (isPointer) {
+          return HEAP32[((this.get_base_ptr())>>2)];
+        }
+        var adjusted = this.get_adjusted_ptr();
+        if (adjusted !== 0) return adjusted;
+        return this.get_base_ptr();
+      };
+  
+      this.get_exception_info = function() {
+        return new ExceptionInfo(this.get_base_ptr());
+      };
+  
+      if (ptr === undefined) {
+        this.ptr = _malloc(8);
+        this.set_adjusted_ptr(0);
+      } else {
+        this.ptr = ptr;
+      }
+    }
+  Module["CatchInfo"] = CatchInfo;
+
+  function exception_addRef(info) {
+      info.add_ref();
     }
   Module["exception_addRef"] = exception_addRef;
 
   
   function ___cxa_free_exception(ptr) {
       try {
-        return _free(ptr);
+        return _free(new ExceptionInfo(ptr).ptr);
       } catch(e) {
         err('exception during cxa_free_exception: ' + e);
       }
     }
-  Module["___cxa_free_exception"] = ___cxa_free_exception;function exception_decRef(ptr) {
-      if (!ptr) return;
-      var info = exceptionInfos[ptr];
-      assert(info.refcount > 0);
-      info.refcount--;
+  Module["___cxa_free_exception"] = ___cxa_free_exception;function exception_decRef(info) {
       // A rethrown exception can reach refcount 0; it must not be discarded
       // Its next handler will clear the rethrown flag and addRef it, prior to
       // final decRef and destruction here
-      if (info.refcount === 0 && !info.rethrown) {
-        if (info.destructor) {
+      if (info.release_ref() && !info.get_rethrown()) {
+        var destructor = info.get_destructor();
+        if (destructor) {
           // In Wasm, destructors return 'this' as in ARM
-          Module['dynCall_ii'](info.destructor, ptr);
+          Module['dynCall_ii'](destructor, info.excPtr);
         }
-        delete exceptionInfos[ptr];
-        ___cxa_free_exception(ptr);
+        ___cxa_free_exception(info.excPtr);
       }
     }
   Module["exception_decRef"] = exception_decRef;
 
   function ___cxa_allocate_exception(size) {
-      return _malloc(size);
+      // Thrown object is prepended by exception metadata block
+      return _malloc(size + ExceptionInfoAttrs.SIZE) + ExceptionInfoAttrs.SIZE;
     }
   Module["___cxa_allocate_exception"] = ___cxa_allocate_exception;
 
@@ -14044,12 +14138,15 @@ var ASM_CONSTS = {
 
 
   function ___cxa_rethrow() {
-      var ptr = exceptionCaught.pop();
-      ptr = exception_deAdjust(ptr);
-      if (!exceptionInfos[ptr].rethrown) {
+      var catchInfo = exceptionCaught.pop();
+      var info = catchInfo.get_exception_info();
+      var ptr = catchInfo.get_base_ptr();
+      if (!info.get_rethrown()) {
         // Only pop if the corresponding push was through rethrow_primary_exception
-        exceptionCaught.push(ptr);
-        exceptionInfos[ptr].rethrown = true;
+        exceptionCaught.push(catchInfo);
+        info.set_rethrown(true);
+      } else {
+        catchInfo.free();
       }
       exceptionLast = ptr;
       throw ptr + " - Exception catching is disabled, this exception cannot be caught. Compile with -s DISABLE_EXCEPTION_CATCHING=0 or DISABLE_EXCEPTION_CATCHING=2 to catch." + " (note: in dynamic linking, if a side module wants exceptions, the main module must be built with that support)";
@@ -14067,7 +14164,7 @@ var ASM_CONSTS = {
   function _llvm_eh_selector(unused_exception_value, personality/*, varargs*/) {
       var type = exceptionLast;
       for (var i = 2; i < arguments.length; i++) {
-        if (arguments[i] ==  type) return type;
+        if (arguments[i] == type) return type;
       }
       return 0;
     }
@@ -14079,33 +14176,34 @@ var ASM_CONSTS = {
   Module["_llvm_eh_typeid_for"] = _llvm_eh_typeid_for;
 
   function ___cxa_begin_catch(ptr) {
-      var info = exceptionInfos[ptr];
-      if (info && !info.caught) {
-        info.caught = true;
+      var catchInfo = new CatchInfo(ptr);
+      var info = catchInfo.get_exception_info();
+      if (!info.get_caught()) {
+        info.set_caught(true);
         __ZSt18uncaught_exceptionv.uncaught_exceptions--;
       }
-      if (info) info.rethrown = false;
-      exceptionCaught.push(ptr);
-      exception_addRef(exception_deAdjust(ptr));
-      return ptr;
+      info.set_rethrown(false);
+      exceptionCaught.push(catchInfo);
+      exception_addRef(info);
+      return catchInfo.get_exception_ptr();
     }
   Module["___cxa_begin_catch"] = ___cxa_begin_catch;
 
   function ___cxa_end_catch() {
       // Clear state flag.
       _setThrew(0);
+      assert(exceptionCaught.length > 0);
       // Call destructor if one is registered then clear it.
-      var ptr = exceptionCaught.pop();
-      if (ptr) {
-        exception_decRef(exception_deAdjust(ptr));
-        exceptionLast = 0; // XXX in decRef?
-      }
+      var catchInfo = exceptionCaught.pop();
+  
+      exception_decRef(catchInfo.get_exception_info());
+      catchInfo.free();
+      exceptionLast = 0; // XXX in decRef?
     }
   Module["___cxa_end_catch"] = ___cxa_end_catch;
 
   function ___cxa_get_exception_ptr(ptr) {
-      // TODO: use info.adjusted?
-      return ptr;
+      return new CatchInfo(ptr).get_exception_ptr();
     }
   Module["___cxa_get_exception_ptr"] = ___cxa_get_exception_ptr;
 
@@ -14115,8 +14213,11 @@ var ASM_CONSTS = {
 
 
   
-  function ___resumeException(ptr) {
+  function ___resumeException(catchInfoPtr) {
+      var catchInfo = new CatchInfo(catchInfoPtr);
+      var ptr = catchInfo.get_base_ptr();
       if (!exceptionLast) { exceptionLast = ptr; }
+      catchInfo.free();
       throw ptr + " - Exception catching is disabled, this exception cannot be caught. Compile with -s DISABLE_EXCEPTION_CATCHING=0 or DISABLE_EXCEPTION_CATCHING=2 to catch." + " (note: in dynamic linking, if a side module wants exceptions, the main module must be built with that support)";
     }
   Module["___resumeException"] = ___resumeException;function ___cxa_find_matching_catch() {
@@ -14125,35 +14226,38 @@ var ASM_CONSTS = {
         // just pass through the null ptr
         return ((setTempRet0(0),0)|0);
       }
-      var info = exceptionInfos[thrown];
-      var throwntype = info.type;
-      if (!throwntype) {
+      var info = new ExceptionInfo(thrown);
+      var thrownType = info.get_type();
+      var catchInfo = new CatchInfo();
+      catchInfo.set_base_ptr(thrown);
+      if (!thrownType) {
         // just pass through the thrown ptr
-        return ((setTempRet0(0),thrown)|0);
+        return ((setTempRet0(0),catchInfo.ptr)|0);
       }
       var typeArray = Array.prototype.slice.call(arguments);
   
-      var pointer = Module['___cxa_is_pointer_type'](throwntype);
       // can_catch receives a **, add indirection
-      var buffer = 0;
-      HEAP32[((buffer)>>2)]=thrown;
-      thrown = buffer;
+      var thrownBuf = 0;
+      HEAP32[((thrownBuf)>>2)]=thrown;
       // The different catch blocks are denoted by different types.
       // Due to inheritance, those types may not precisely match the
       // type of the thrown object. Find one which matches, and
       // return the type of the catch block which should be called.
       for (var i = 0; i < typeArray.length; i++) {
-        if (typeArray[i] && Module['___cxa_can_catch'](typeArray[i], throwntype, thrown)) {
-          thrown = HEAP32[((thrown)>>2)]; // undo indirection
-          info.adjusted.push(thrown);
-          return ((setTempRet0(typeArray[i]),thrown)|0);
+        var caughtType = typeArray[i];
+        if (caughtType === 0 || caughtType === thrownType) {
+          // Catch all clause matched or exactly the same type is caught
+          break;
+        }
+        if (Module['___cxa_can_catch'](caughtType, thrownType, thrownBuf)) {
+          var adjusted = HEAP32[((thrownBuf)>>2)];
+          if (thrown !== adjusted) {
+            catchInfo.set_adjusted_ptr(adjusted);
+          }
+          return ((setTempRet0(caughtType),catchInfo.ptr)|0);
         }
       }
-      // Shouldn't happen unless we have bogus data in typeArray
-      // or encounter a type for which emscripten doesn't have suitable
-      // typeinfo defined. Best-efforts match just in case.
-      thrown = HEAP32[((thrown)>>2)]; // undo indirection
-      return ((setTempRet0(throwntype),thrown)|0);
+      return ((setTempRet0(thrownType),catchInfo.ptr)|0);
     }
   Module["___cxa_find_matching_catch"] = ___cxa_find_matching_catch;
 
@@ -14348,6 +14452,8 @@ var ASM_CONSTS = {
             func();
           } catch (e) {
             if (e instanceof ExitStatus) {
+              return;
+            } else if (e == 'unwind') {
               return;
             } else {
               if (e && typeof e === 'object' && e.stack) err('exception thrown: ' + [e, e.stack]);
@@ -15320,6 +15426,33 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_force_exit"] = _emscripten_force_exit;
 
+  function _emscripten_get_window_title() {
+      var buflen = 256;
+  
+      if (!_emscripten_get_window_title.buffer) {
+        _emscripten_get_window_title.buffer = _malloc(buflen);
+      }
+  
+      writeAsciiToMemory(
+        document.title.slice(0, buflen - 1),
+        _emscripten_get_window_title.buffer
+      );
+  
+      return _emscripten_get_window_title.buffer;
+    }
+  Module["_emscripten_get_window_title"] = _emscripten_get_window_title;
+
+  function _emscripten_set_window_title(title) {
+      setWindowTitle(AsciiToString(title));
+    }
+  Module["_emscripten_set_window_title"] = _emscripten_set_window_title;
+
+  function _emscripten_get_screen_size(width, height) {
+      HEAP32[((width)>>2)]=screen.width;
+      HEAP32[((height)>>2)]=screen.height;
+    }
+  Module["_emscripten_get_screen_size"] = _emscripten_get_screen_size;
+
   function _emscripten_hide_mouse() {
       var styleSheet = document.styleSheets[0];
       var rules = styleSheet.cssRules;
@@ -15589,7 +15722,13 @@ var ASM_CONSTS = {
         return 1;
       }
     }
-  Module["__webgl_enable_WEBGL_draw_buffers"] = __webgl_enable_WEBGL_draw_buffers;var GL={counter:1,buffers:[],programs:[],framebuffers:[],renderbuffers:[],textures:[],uniforms:[],shaders:[],vaos:[],contexts:[],offscreenCanvases:{},timerQueriesEXT:[],programInfos:{},stringCache:{},unpackAlignment:4,recordError:function recordError(errorCode) {
+  Module["__webgl_enable_WEBGL_draw_buffers"] = __webgl_enable_WEBGL_draw_buffers;
+  
+  function __webgl_enable_WEBGL_multi_draw(ctx) {
+      // Closure is expected to be allowed to minify the '.multiDrawWebgl' property, so not accessing it quoted.
+      return !!(ctx.multiDrawWebgl = ctx.getExtension('WEBGL_multi_draw'));
+    }
+  Module["__webgl_enable_WEBGL_multi_draw"] = __webgl_enable_WEBGL_multi_draw;var GL={counter:1,buffers:[],programs:[],framebuffers:[],renderbuffers:[],textures:[],uniforms:[],shaders:[],vaos:[],contexts:[],offscreenCanvases:{},timerQueriesEXT:[],programInfos:{},stringCache:{},unpackAlignment:4,recordError:function recordError(errorCode) {
         if (!GL.lastError) {
           GL.lastError = errorCode;
         }
@@ -15677,6 +15816,7 @@ var ASM_CONSTS = {
         __webgl_enable_WEBGL_draw_buffers(GLctx);
   
         GLctx.disjointTimerQueryExt = GLctx.getExtension("EXT_disjoint_timer_query");
+        __webgl_enable_WEBGL_multi_draw(GLctx);
   
         // These are the 'safe' feature-enabling extensions that don't add any performance impact related to e.g. debugging, and
         // should be enabled by default so that client GLES2/GL code will not need to go through extra hoops to get its stuff working.
@@ -15813,6 +15953,12 @@ var ASM_CONSTS = {
       return __webgl_enable_WEBGL_draw_buffers(GL.contexts[ctx].GLctx);
     }
   Module["_emscripten_webgl_enable_WEBGL_draw_buffers"] = _emscripten_webgl_enable_WEBGL_draw_buffers;
+
+
+  function _emscripten_webgl_enable_WEBGL_multi_draw(ctx) {
+      return __webgl_enable_WEBGL_multi_draw(GL.contexts[ctx].GLctx);
+    }
+  Module["_emscripten_webgl_enable_WEBGL_multi_draw"] = _emscripten_webgl_enable_WEBGL_multi_draw;
 
 
   function _glPixelStorei(pname, param) {
@@ -17413,6 +17559,129 @@ var ASM_CONSTS = {
     }
   Module["_glSampleCoverage"] = _glSampleCoverage;
 
+  function _glMultiDrawArrays(mode, firsts, counts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawArrays"] = _glMultiDrawArrays;
+
+  function _glMultiDrawArraysANGLE(mode, firsts, counts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawArraysANGLE"] = _glMultiDrawArraysANGLE;
+
+  function _glMultiDrawArraysWEBGL(mode, firsts, counts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawArraysWEBGL"] = _glMultiDrawArraysWEBGL;
+
+  function _glMultiDrawArraysInstancedANGLE(mode, firsts, counts, instanceCounts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysInstancedWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        HEAP32,
+        instanceCounts >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawArraysInstancedANGLE"] = _glMultiDrawArraysInstancedANGLE;
+
+  function _glMultiDrawArraysInstancedWEBGL(mode, firsts, counts, instanceCounts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysInstancedWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        HEAP32,
+        instanceCounts >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawArraysInstancedWEBGL"] = _glMultiDrawArraysInstancedWEBGL;
+
+  function _glMultiDrawElements(mode, counts, type, offsets, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawElements"] = _glMultiDrawElements;
+
+  function _glMultiDrawElementsANGLE(mode, counts, type, offsets, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawElementsANGLE"] = _glMultiDrawElementsANGLE;
+
+  function _glMultiDrawElementsWEBGL(mode, counts, type, offsets, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawElementsWEBGL"] = _glMultiDrawElementsWEBGL;
+
+  function _glMultiDrawElementsInstancedANGLE(mode, counts, type, offsets, instanceCounts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsInstancedWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        HEAP32,
+        instanceCounts >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawElementsInstancedANGLE"] = _glMultiDrawElementsInstancedANGLE;
+
+  function _glMultiDrawElementsInstancedWEBGL(mode, counts, type, offsets, instanceCounts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsInstancedWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        HEAP32,
+        instanceCounts >> 2,
+        drawcount);
+    }
+  Module["_glMultiDrawElementsInstancedWEBGL"] = _glMultiDrawElementsInstancedWEBGL;
+
   function _glFinish() { GLctx['finish']() }
   Module["_glFinish"] = _glFinish;
 
@@ -18915,6 +19184,129 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_glSampleCoverage"] = _emscripten_glSampleCoverage;
 
+  function _emscripten_glMultiDrawArrays(mode, firsts, counts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawArrays"] = _emscripten_glMultiDrawArrays;
+
+  function _emscripten_glMultiDrawArraysANGLE(mode, firsts, counts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawArraysANGLE"] = _emscripten_glMultiDrawArraysANGLE;
+
+  function _emscripten_glMultiDrawArraysWEBGL(mode, firsts, counts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawArraysWEBGL"] = _emscripten_glMultiDrawArraysWEBGL;
+
+  function _emscripten_glMultiDrawArraysInstancedANGLE(mode, firsts, counts, instanceCounts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysInstancedWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        HEAP32,
+        instanceCounts >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawArraysInstancedANGLE"] = _emscripten_glMultiDrawArraysInstancedANGLE;
+
+  function _emscripten_glMultiDrawArraysInstancedWEBGL(mode, firsts, counts, instanceCounts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawArraysInstancedWEBGL'](
+        mode,
+        HEAP32,
+        firsts >> 2,
+        HEAP32,
+        counts >> 2,
+        HEAP32,
+        instanceCounts >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawArraysInstancedWEBGL"] = _emscripten_glMultiDrawArraysInstancedWEBGL;
+
+  function _emscripten_glMultiDrawElements(mode, counts, type, offsets, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawElements"] = _emscripten_glMultiDrawElements;
+
+  function _emscripten_glMultiDrawElementsANGLE(mode, counts, type, offsets, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawElementsANGLE"] = _emscripten_glMultiDrawElementsANGLE;
+
+  function _emscripten_glMultiDrawElementsWEBGL(mode, counts, type, offsets, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawElementsWEBGL"] = _emscripten_glMultiDrawElementsWEBGL;
+
+  function _emscripten_glMultiDrawElementsInstancedANGLE(mode, counts, type, offsets, instanceCounts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsInstancedWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        HEAP32,
+        instanceCounts >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawElementsInstancedANGLE"] = _emscripten_glMultiDrawElementsInstancedANGLE;
+
+  function _emscripten_glMultiDrawElementsInstancedWEBGL(mode, counts, type, offsets, instanceCounts, drawcount) {
+      GLctx.multiDrawWebgl['multiDrawElementsInstancedWEBGL'](
+        mode,
+        HEAP32,
+        counts >> 2,
+        type,
+        HEAP32,
+        offsets >> 2,
+        HEAP32,
+        instanceCounts >> 2,
+        drawcount);
+    }
+  Module["_emscripten_glMultiDrawElementsInstancedWEBGL"] = _emscripten_glMultiDrawElementsInstancedWEBGL;
+
   function _emscripten_glFinish() { GLctx['finish']() }
   Module["_emscripten_glFinish"] = _emscripten_glFinish;
 
@@ -19219,6 +19611,8 @@ var ASM_CONSTS = {
       if (extString == 'OES_vertex_array_object') __webgl_enable_OES_vertex_array_object(GLctx);
       if (extString == 'WEBGL_draw_buffers') __webgl_enable_WEBGL_draw_buffers(GLctx);
   
+  
+      if (extString == 'WEBGL_multi_draw') __webgl_enable_WEBGL_multi_draw(GLctx);
   
   
       var ext = context.GLctx.getExtension(extString);
@@ -34288,6 +34682,9 @@ var stackRestore = Module["stackRestore"] = createExportWrapper("stackRestore");
 var stackAlloc = Module["stackAlloc"] = createExportWrapper("stackAlloc");
 
 /** @type {function(...*):?} */
+var _emscripten_stack_init = Module["_emscripten_stack_init"] = createExportWrapper("emscripten_stack_init");
+
+/** @type {function(...*):?} */
 var _emscripten_stack_get_current = Module["_emscripten_stack_get_current"] = createExportWrapper("emscripten_stack_get_current");
 
 /** @type {function(...*):?} */
@@ -46960,12 +47357,6 @@ var _freeaddrinfo = Module["_freeaddrinfo"] = createExportWrapper("freeaddrinfo"
 var ___set_stack_limit = Module["___set_stack_limit"] = createExportWrapper("__set_stack_limit");
 
 /** @type {function(...*):?} */
-var __growWasmMemory = Module["__growWasmMemory"] = createExportWrapper("__growWasmMemory");
-
-/** @type {function(...*):?} */
-var ___assign_got_enties = Module["___assign_got_enties"] = createExportWrapper("__assign_got_enties");
-
-/** @type {function(...*):?} */
 var dynCall_vi = Module["dynCall_vi"] = createExportWrapper("dynCall_vi");
 
 /** @type {function(...*):?} */
@@ -48096,6 +48487,12 @@ var _orig$_emscripten_atomic_fetch_and_xor_u64 = Module["_orig$_emscripten_atomi
 /** @type {function(...*):?} */
 var _orig$fminl = Module["_orig$fminl"] = createExportWrapper("orig$fminl");
 
+/** @type {function(...*):?} */
+var __growWasmMemory = Module["__growWasmMemory"] = createExportWrapper("__growWasmMemory");
+
+/** @type {function(...*):?} */
+var ___assign_got_enties = Module["___assign_got_enties"] = createExportWrapper("__assign_got_enties");
+
 
 var NAMED_GLOBALS = {
   "__progname": 29868,
@@ -49033,8 +49430,9 @@ if (!Object.getOwnPropertyDescriptor(Module, "convertI32PairToI53")) Module["con
 if (!Object.getOwnPropertyDescriptor(Module, "convertU32PairToI53")) Module["convertU32PairToI53"] = function() { abort("'convertU32PairToI53' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionLast")) Module["exceptionLast"] = function() { abort("'exceptionLast' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionCaught")) Module["exceptionCaught"] = function() { abort("'exceptionCaught' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "exceptionInfos")) Module["exceptionInfos"] = function() { abort("'exceptionInfos' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "exception_deAdjust")) Module["exception_deAdjust"] = function() { abort("'exception_deAdjust' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "ExceptionInfoAttrs")) Module["ExceptionInfoAttrs"] = function() { abort("'ExceptionInfoAttrs' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "ExceptionInfo")) Module["ExceptionInfo"] = function() { abort("'ExceptionInfo' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "CatchInfo")) Module["CatchInfo"] = function() { abort("'CatchInfo' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exception_addRef")) Module["exception_addRef"] = function() { abort("'exception_addRef' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exception_decRef")) Module["exception_decRef"] = function() { abort("'exception_decRef' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "Browser")) Module["Browser"] = function() { abort("'Browser' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };

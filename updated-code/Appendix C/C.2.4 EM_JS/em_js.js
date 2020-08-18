@@ -2137,9 +2137,6 @@ var _malloc = Module["_malloc"] = createExportWrapper("malloc");
 var ___set_stack_limit = Module["___set_stack_limit"] = createExportWrapper("__set_stack_limit");
 
 /** @type {function(...*):?} */
-var __growWasmMemory = Module["__growWasmMemory"] = createExportWrapper("__growWasmMemory");
-
-/** @type {function(...*):?} */
 var dynCall_ii = Module["dynCall_ii"] = createExportWrapper("dynCall_ii");
 
 /** @type {function(...*):?} */
@@ -2153,6 +2150,9 @@ var dynCall_iidiiii = Module["dynCall_iidiiii"] = createExportWrapper("dynCall_i
 
 /** @type {function(...*):?} */
 var dynCall_vii = Module["dynCall_vii"] = createExportWrapper("dynCall_vii");
+
+/** @type {function(...*):?} */
+var __growWasmMemory = Module["__growWasmMemory"] = createExportWrapper("__growWasmMemory");
 
 
 
@@ -2266,8 +2266,9 @@ if (!Object.getOwnPropertyDescriptor(Module, "convertI32PairToI53")) Module["con
 if (!Object.getOwnPropertyDescriptor(Module, "convertU32PairToI53")) Module["convertU32PairToI53"] = function() { abort("'convertU32PairToI53' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionLast")) Module["exceptionLast"] = function() { abort("'exceptionLast' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionCaught")) Module["exceptionCaught"] = function() { abort("'exceptionCaught' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "exceptionInfos")) Module["exceptionInfos"] = function() { abort("'exceptionInfos' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "exception_deAdjust")) Module["exception_deAdjust"] = function() { abort("'exception_deAdjust' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "ExceptionInfoAttrs")) Module["ExceptionInfoAttrs"] = function() { abort("'ExceptionInfoAttrs' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "ExceptionInfo")) Module["ExceptionInfo"] = function() { abort("'ExceptionInfo' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "CatchInfo")) Module["CatchInfo"] = function() { abort("'CatchInfo' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exception_addRef")) Module["exception_addRef"] = function() { abort("'exception_addRef' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exception_decRef")) Module["exception_decRef"] = function() { abort("'exception_decRef' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "Browser")) Module["Browser"] = function() { abort("'Browser' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };

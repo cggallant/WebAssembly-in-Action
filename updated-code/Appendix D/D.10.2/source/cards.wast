@@ -142,7 +142,7 @@
     (local $count i32)
 
     ;; logging to track down the source of the issue with $tries not being reset
-    i32.const 1051
+    i32.const 5147
     get_global $tries
     call $Log
 
@@ -327,10 +327,9 @@
 
   (func $PlayLevel (param $level i32)
     ;; logging to track down the source of the issue with $tries not being reset
-    i32.const 1067
+    i32.const 5163
     get_global $tries
     call $Log
-
 
     get_local $level
     call $InitializeCards
@@ -421,7 +420,7 @@
       ;; Call the Pause function. This is a timeout to allow the UI to show the card 
       ;; that was selected before we either turn it face down or remove it. The UI
       ;; calls the function that we specify once the time is up.
-      i32.const 1024 ;; Location in memory of the string "SecondCardSelectedCallback"
+      i32.const 5120 ;; Location in memory of the string "SecondCardSelectedCallback"
       i32.const 600
       call $Pause
     end
@@ -453,10 +452,9 @@
     (local $is_last_level i32)
 
     ;; logging to track down the source of the issue with $tries not being reset
-    i32.const 1024
+    i32.const 5120
     get_global $tries
     call $Log
-
 
     ;; If the card values for the first and second cards clicked on are a match then...
     get_global $first_card_value
@@ -549,5 +547,5 @@
   ;;==========
   ;; Data
   ;;----------
-  (data (i32.const 1024) "SecondCardSelectedCallback\00InitializeCards\00PlayLevel")
+  (data (i32.const 5120) "SecondCardSelectedCallback\0InitializeCards\0PlayLevel")
 )

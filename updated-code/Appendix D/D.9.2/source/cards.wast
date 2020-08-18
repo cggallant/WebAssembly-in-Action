@@ -439,7 +439,7 @@
       ;; Call the Pause function. This is a timeout to allow the UI to show the card 
       ;; that was selected before we either turn it face down or remove it. The UI
       ;; calls the function that we specify once the time is up.
-      i32.const 1024 ;; Location in memory of the string "SecondCardSelectedCallback"
+      i32.const 5120 ;; Location in memory of the string "SecondCardSelectedCallback"
       i32.const 600
       call $Pause
     end
@@ -549,5 +549,5 @@
   ;;==========
   ;; Data
   ;;----------
-  (data (i32.const 1024) "SecondCardSelectedCallback")
+  (data (i32.const 5120) "SecondCardSelectedCallback")
 )

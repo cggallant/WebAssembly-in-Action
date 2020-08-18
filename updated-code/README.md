@@ -1,8 +1,6 @@
 # The updated companion code for the book "[WebAssembly in Action](https://www.manning.com/books/webassembly-in-action)"
 
-<img src="https://images.manning.com/180/240/resize/book/7/97eac5c-498e-4454-bdb2-677ec3406f29/Gallant-WA-HI.png" align="left" /> The code in this folder is being upgraded to work with version _1.40.1_ of the _Emscripten toolkit_.
-
-Rather than wait until all of the code has been updated, I'll update and upload one chapter at a time. I'll also commit the original code first and then make the changes so that you can view the changes between them if you wish.
+<img src="https://images.manning.com/180/240/resize/book/7/97eac5c-498e-4454-bdb2-677ec3406f29/Gallant-WA-HI.png" align="left" /> The code in this folder has been upgraded to work with version _2.0.0_ of the _Emscripten toolkit_.
 
 Each chapter's _README.md_ file lists the changes made to that chapter's code.
 

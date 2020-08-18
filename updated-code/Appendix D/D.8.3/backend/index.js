@@ -19,9 +19,11 @@ const Module = require('./validate_core.js');
 function initializePage() {
   const moduleName = (clientData.isProduct ? 'validate_product.wasm' : 'validate_order.wasm');
 
-  validationModule = new Module({
+  Module({
     dynamicLibraries: [moduleName],
-    onRuntimeInitialized: runtimeInitialized,
+  }).then((module) => {
+    validationModule = module;
+    runtimeInitialized();
   });
 }
 

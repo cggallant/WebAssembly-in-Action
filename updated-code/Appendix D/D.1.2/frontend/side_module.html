@@ -14,10 +14,10 @@
       };
 
       WebAssembly.instantiateStreaming(fetch("side_module.wasm"), importObject).then(result => {
-        let value = result.instance.exports._Increment(17);
+        let value = result.instance.exports.Increment(17);
         console.log(value.toString());
 
-        value = result.instance.exports._Decrement(4);
+        value = result.instance.exports.Decrement(4);
         console.log(value.toString());
       });
     </script>

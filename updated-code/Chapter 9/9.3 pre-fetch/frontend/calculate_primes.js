@@ -1777,27 +1777,85 @@ var ASM_CONSTS = {
       return demangleAll(js);
     }
 
-  function ___cxa_allocate_exception(size) {
-      return _malloc(size);
+  
+  var ExceptionInfoAttrs={DESTRUCTOR_OFFSET:0,REFCOUNT_OFFSET:4,TYPE_OFFSET:8,CAUGHT_OFFSET:12,RETHROWN_OFFSET:13,SIZE:16};function ___cxa_allocate_exception(size) {
+      // Thrown object is prepended by exception metadata block
+      return _malloc(size + ExceptionInfoAttrs.SIZE) + ExceptionInfoAttrs.SIZE;
     }
 
   
-  var exceptionInfos={};
+  function ExceptionInfo(excPtr) {
+      this.excPtr = excPtr;
+      this.ptr = excPtr - ExceptionInfoAttrs.SIZE;
+  
+      this.set_type = function(type) {
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.TYPE_OFFSET))>>2)]=type;
+      };
+  
+      this.get_type = function() {
+        return HEAP32[(((this.ptr)+(ExceptionInfoAttrs.TYPE_OFFSET))>>2)];
+      };
+  
+      this.set_destructor = function(destructor) {
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.DESTRUCTOR_OFFSET))>>2)]=destructor;
+      };
+  
+      this.get_destructor = function() {
+        return HEAP32[(((this.ptr)+(ExceptionInfoAttrs.DESTRUCTOR_OFFSET))>>2)];
+      };
+  
+      this.set_refcount = function(refcount) {
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)]=refcount;
+      };
+  
+      this.set_caught = function (caught) {
+        caught = caught ? 1 : 0;
+        HEAP8[(((this.ptr)+(ExceptionInfoAttrs.CAUGHT_OFFSET))>>0)]=caught;
+      };
+  
+      this.get_caught = function () {
+        return HEAP8[(((this.ptr)+(ExceptionInfoAttrs.CAUGHT_OFFSET))>>0)] != 0;
+      };
+  
+      this.set_rethrown = function (rethrown) {
+        rethrown = rethrown ? 1 : 0;
+        HEAP8[(((this.ptr)+(ExceptionInfoAttrs.RETHROWN_OFFSET))>>0)]=rethrown;
+      };
+  
+      this.get_rethrown = function () {
+        return HEAP8[(((this.ptr)+(ExceptionInfoAttrs.RETHROWN_OFFSET))>>0)] != 0;
+      };
+  
+      // Initialize native structure fields. Should be called once after allocated.
+      this.init = function(type, destructor) {
+        this.set_type(type);
+        this.set_destructor(destructor);
+        this.set_refcount(0);
+        this.set_caught(false);
+        this.set_rethrown(false);
+      }
+  
+      this.add_ref = function() {
+        var value = HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)];
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)]=value + 1;
+      };
+  
+      // Returns true if last reference released.
+      this.release_ref = function() {
+        var prev = HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)];
+        HEAP32[(((this.ptr)+(ExceptionInfoAttrs.REFCOUNT_OFFSET))>>2)]=prev - 1;
+        return prev === 1;
+      };
+    }
   
   var exceptionLast=0;
   
   function __ZSt18uncaught_exceptionv() { // std::uncaught_exception()
       return __ZSt18uncaught_exceptionv.uncaught_exceptions > 0;
     }function ___cxa_throw(ptr, type, destructor) {
-      exceptionInfos[ptr] = {
-        ptr: ptr,
-        adjusted: [ptr],
-        type: type,
-        destructor: destructor,
-        refcount: 0,
-        caught: false,
-        rethrown: false
-      };
+      var info = new ExceptionInfo(ptr);
+      // Initialize ExceptionInfo content after it was allocated in __cxa_allocate_exception.
+      info.init(type, destructor);
       exceptionLast = ptr;
       if (!("uncaught_exception" in __ZSt18uncaught_exceptionv)) {
         __ZSt18uncaught_exceptionv.uncaught_exceptions = 1;
@@ -2051,11 +2109,6 @@ var _free = Module["_free"] = function() {
 };
 
 /** @type {function(...*):?} */
-var __growWasmMemory = Module["__growWasmMemory"] = function() {
-  return (__growWasmMemory = Module["__growWasmMemory"] = Module["asm"]["__growWasmMemory"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
 var dynCall_ii = Module["dynCall_ii"] = function() {
   return (dynCall_ii = Module["dynCall_ii"] = Module["asm"]["dynCall_ii"]).apply(null, arguments);
 };
@@ -2095,11 +2148,17 @@ var dynCall_viiii = Module["dynCall_viiii"] = function() {
   return (dynCall_viiii = Module["dynCall_viiii"] = Module["asm"]["dynCall_viiii"]).apply(null, arguments);
 };
 
+/** @type {function(...*):?} */
+var __growWasmMemory = Module["__growWasmMemory"] = function() {
+  return (__growWasmMemory = Module["__growWasmMemory"] = Module["asm"]["__growWasmMemory"]).apply(null, arguments);
+};
+
 
 
 
 
 // === Auto-generated postamble setup entry stuff ===
+
 
 
 
