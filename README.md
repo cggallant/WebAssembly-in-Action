@@ -41,7 +41,7 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
   While there were a lot of exciting things being worked on with WASI at the time, unfortunately, it wasn’t until after the book went to production that an early preview of the Wasmtime runtime was announced for .NET Core.
   
-  I  wrote this article for the Uno Platform to show how your C# code can load and use a WebAssembly module via the Wasmtime runtime for .NET. The article also covers how to create custom model validation with ASP.NET Core MVC. [https://platform.uno/blog/using-webassembly-modules-in-c/](https://platform.uno/blog/using-webassembly-modules-in-c/)
+  I  wrote this article to show you how your C# code can load and use a WebAssembly module via the Wasmtime runtime for .NET. The article also covers how to create custom model validation with ASP.NET Core MVC.
   
   <img src="https://1.bp.blogspot.com/-tlOcF_PBsMs/X0P6KNf32JI/AAAAAAAALTI/Pp8hdU8X06kmgm94qUb0PF16Y35APvSUwCLcBGAsYHQ/s711/z_%2BWebAssembly%2Bin%2BC%2523_%2Bimage%2Bfor%2Bmy%2Bblog%2Bpost%2Band%2Bsocial%2Bmedia.png" width="350" align="center" />
 
