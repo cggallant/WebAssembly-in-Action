@@ -33,7 +33,7 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
   At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(August 2020)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
 
 
-  - "[Using WebAssembly modules in C#](https://platform.uno/blog/using-webassembly-modules-in-c/)"
+- "[Using WebAssembly modules in C#](https://platform.uno/blog/using-webassembly-modules-in-c/)"
   
   In my book I show you how to use an Emscripten-generated WebAssembly module in the browser and on the server in Node.js.
   
