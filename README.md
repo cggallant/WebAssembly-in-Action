@@ -26,9 +26,24 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
 - "[WebAssembly threads in Firefox](https://cggallant.blogspot.com/2020/07/webassembly-threads-in-firefox.html)" 
   
-  <img src="https://1.bp.blogspot.com/-20aC9uX8oPc/XyAh6PICkBI/AAAAAAAALOI/C4SMdZl69YA4pqkfTcaYRwvYfU0l_MA6ACLcBGAsYHQ/w400-h174/9%2B-%2BScreen%2Bshot%2Bof%2Bfinal%2Bproduct%2Bwith%2Bimages%2Bshown.png" width="350" align="right" /> In the book I show you how to use WebAssembly threads but, at the time of the book's writing, they were only available in Firefox behind a flag. It's no longer behind a flag but Firefox has added a requirement: To enable the SharedArrayBuffer, you need to include two response headers.
+  <img src="https://1.bp.blogspot.com/-20aC9uX8oPc/XyAh6PICkBI/AAAAAAAALOI/C4SMdZl69YA4pqkfTcaYRwvYfU0l_MA6ACLcBGAsYHQ/w400-h174/9%2B-%2BScreen%2Bshot%2Bof%2Bfinal%2Bproduct%2Bwith%2Bimages%2Bshown.png" width="350" align="right" /> In the book I show you how to use WebAssembly threads but, at the time of the book's writing, they were only available in Firefox behind a flag. They're no longer behind a flag but Firefox has added a requirement: To enable the SharedArrayBuffer, you need to include two response headers.
+
+  This article walks you through returning the response headers, including the crossorigin attribute, and using WebAssembly threads to convert a user-supplied image to greyscale.
   
   At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(August 2020)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
+
+
+  - "[Using WebAssembly modules in C#](https://platform.uno/blog/using-webassembly-modules-in-c/)"
+  
+  In my book I show you how to use an Emscripten-generated WebAssembly module in the browser and on the server in Node.js.
+  
+  I briefly talk about the [WebAssembly System Interface](https://hacks.mozilla.org/2019/03/standardizing-wasi-a-webassembly-system-interface/) (WASI) whose aim is to create a standard approach to running WebAssembly modules outside the browser in a safe way. 
+
+  While there were a lot of exciting things being worked on with WASI at the time, unfortunately, it wasn’t until after the book went to production that an early preview of the Wasmtime runtime was announced for .NET Core.
+  
+  I  wrote this article for the Uno Platform to show how your C# code can load and use a WebAssembly module via the Wasmtime runtime for .NET. The article also covers how to create custom model validation with ASP.NET Core MVC. [https://platform.uno/blog/using-webassembly-modules-in-c/](https://platform.uno/blog/using-webassembly-modules-in-c/)
+  
+  <img src="https://1.bp.blogspot.com/-tlOcF_PBsMs/X0P6KNf32JI/AAAAAAAALTI/Pp8hdU8X06kmgm94qUb0PF16Y35APvSUwCLcBGAsYHQ/s711/z_%2BWebAssembly%2Bin%2BC%2523_%2Bimage%2Bfor%2Bmy%2Bblog%2Bpost%2Band%2Bsocial%2Bmedia.png" width="350" align="center" />
 
 
 # Supporting this book
