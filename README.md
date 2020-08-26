@@ -30,14 +30,12 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
   This article walks you through returning the response headers, including the crossorigin attribute, and using WebAssembly threads to convert a user-supplied image to greyscale.
   
-  At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(August 2020)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
+  At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(November 2020)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
 
 
 - "[Using WebAssembly modules in C#](https://platform.uno/blog/using-webassembly-modules-in-c/)"
   
-  In my book I show you how to use an Emscripten-generated WebAssembly module in the browser and on the server in Node.js.
-  
-  I briefly talk about the [WebAssembly System Interface](https://hacks.mozilla.org/2019/03/standardizing-wasi-a-webassembly-system-interface/) (WASI) whose aim is to create a standard approach to running WebAssembly modules outside the browser in a safe way. 
+  In my book I show you how to use an Emscripten-generated WebAssembly module in the browser and on the server in Node.js. I also mention the [WebAssembly System Interface](https://hacks.mozilla.org/2019/03/standardizing-wasi-a-webassembly-system-interface/) (WASI) whose aim is to create a standard approach to running WebAssembly modules outside the browser in a safe way. 
 
   While there were a lot of exciting things being worked on with WASI at the time, unfortunately, it wasn’t until after the book went to production that an early preview of the Wasmtime runtime was announced for .NET Core.
   
