@@ -64,4 +64,6 @@ Don't yet have your own copy of the book? You can buy it from many book sellers 
 
 If you'd like to discuss the book's text, you can submit issues via the liveBook: [https://livebook.manning.com/book/webassembly-in-action/about-this-book/](https://livebook.manning.com/book/webassembly-in-action/about-this-book)
 
-I'm also on twitter: [@Gerard_Gallant](https://twitter.com/Gerard_Gallant)
+You can also find me here:
+- Twitter: [@Gerard_Gallant](https://twitter.com/Gerard_Gallant)
+- Facebook: [WebAssembly in Action](https://www.facebook.com/WebAssembly-in-Action-111681507332045/)
