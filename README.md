@@ -48,9 +48,7 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
   <img src="https://1.bp.blogspot.com/-8cXpMqDHpR8/X33BYgdJUwI/AAAAAAAALZ4/hrMYW0nxDVMPcwiQ_x4dmWntiUNq9Im1wCLcBGAsYHQ/w640-h408/1%2B-%2BScreenShotOfTheBlazorApp.png" width="450" align="right" />
 
-  Over the past few weeks, I've been digging into WebAssembly from a C# perspective for an article that I'm writing. Although I've been following a number of WebAssembly related C# technologies like mono, the Uno Platform, and Blazor, I felt that I'd get more out of my learning by building something.
-
-  Fortunately, Dovico recently gave me some spare time to research into anything that interested me, so I decided to use that time to dig into Blazor by rewriting a small Java application that I built in 2011.
+  Over the past few weeks, I've been digging into WebAssembly from a C# perspective for an article that I'm writing. To aid in that learning, I decided to use some research time that my company gave me to dig into Blazor by rewriting a small Java application that I built in 2011.
 
   This article walks you through creating the Dovico Time Entry Status app using Blazor WebAssembly.
 
