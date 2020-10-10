@@ -30,7 +30,7 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
   This article walks you through returning the response headers, including the crossorigin attribute, and using WebAssembly threads to convert a user-supplied image to greyscale.
   
-  At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(November 2020)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
+  At the moment, this is Firefox specific but will soon be a requirement for all browsers that support WebAssembly threads including Chrome for Android _(January 2021)_, Firefox for Android _(soon)_, and Chrome desktop _(March 2021)_.
 
 
 - "[Using WebAssembly modules in C#](https://platform.uno/blog/using-webassembly-modules-in-c/)"
@@ -46,11 +46,15 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
 - "[Blazor WebAssembly and the Dovico Time Entry Status app](https://cggallant.blogspot.com/2020/10/blazor-webassembly-and-dovico-time.html)"
 
-  <img src="https://1.bp.blogspot.com/-8cXpMqDHpR8/X33BYgdJUwI/AAAAAAAALZ4/hrMYW0nxDVMPcwiQ_x4dmWntiUNq9Im1wCLcBGAsYHQ/w640-h408/1%2B-%2BScreenShotOfTheBlazorApp.png" width="400" align="right" />
+  <img src="https://1.bp.blogspot.com/-8cXpMqDHpR8/X33BYgdJUwI/AAAAAAAALZ4/hrMYW0nxDVMPcwiQ_x4dmWntiUNq9Im1wCLcBGAsYHQ/w640-h408/1%2B-%2BScreenShotOfTheBlazorApp.png" width="350" align="right" />
 
   Over the past few weeks, I've been digging into WebAssembly from a C# perspective for an article that I'm writing. To aid in that learning, I decided to use some research time that my company gave me to dig into Blazor WebAssembly by rewriting a small Java application that I built in 2011.
 
   This article walks you through creating the Dovico Time Entry Status app using Blazor WebAssembly.
+
+
+<p>&nbsp;</p>
+<p>&nbsp;</p>
 
 
 # Supporting this book
