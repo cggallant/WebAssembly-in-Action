@@ -1,6 +1,8 @@
 ### The _6.1.2 EmFunctionPointers_ folder
 
-No changes were needed for this folder.
+- The Emscripten command line has been adjusted:
+  - As of Emscripten 2.0.4, _malloc_ and _free_ are no longer exported by default. They now need to be included via the _EXPORTED\_FUNCTIONS command line array if needed.
+
 
 <p>&nbsp;</p>
 
@@ -36,7 +38,7 @@ The changes I've made for this section's code are:
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.0_.
+To compile the code in the _updated-code_ folder requires _Emscripten 2.0.8_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 

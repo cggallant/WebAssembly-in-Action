@@ -1,2 +1,2 @@
 #!/bin/bash
-emcc em_js.c -s EXTRA_EXPORTED_RUNTIME_METHODS=['lengthBytesUTF8','stringToUTF8'] -o em_js.html
+emcc em_js.c -s EXTRA_EXPORTED_RUNTIME_METHODS=['lengthBytesUTF8','stringToUTF8'] -s EXPORTED_FUNCTIONS=['_main','_malloc','_free'] -o em_js.html

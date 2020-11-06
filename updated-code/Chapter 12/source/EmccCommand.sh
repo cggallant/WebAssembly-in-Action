@@ -1,2 +1,2 @@
 #!/bin/bash
-emcc main.cpp -o main.js
+emcc main.cpp -s EXPORTED_FUNCTIONS=['_malloc','_free'] -o main.js

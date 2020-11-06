@@ -16,11 +16,13 @@ Scroll to the very bottom of the _cards.wast_ file and change the value in the _
 Rebuild the _cards.wasm_ file by going to the _wat2wasm online tool_ (https://webassembly.github.io/wabt/demo/wat2wasm/), pasting the contents of the _cards.wast_ file into the top-left pane, and then click the _Download_ button. Name the file that you download to: _cards.wasm_  
 
 
+- The Emscripten command line has been adjusted:
+  - As of Emscripten 2.0.4, _malloc_ and _free_ are no longer exported by default. They now need to be included via the _EXPORTED\_FUNCTIONS command line array if needed.
 
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.0_.
+To compile the code in the _updated-code_ folder requires _Emscripten 2.0.8_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 

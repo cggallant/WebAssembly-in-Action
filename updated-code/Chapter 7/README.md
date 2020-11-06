@@ -17,10 +17,14 @@ A few changes were needed in the _frontend_ folder's _main.js_ file:
 - The underscore character in front of _LogPrime_ has been removed in the _env_ object of the _findPrimesImportObject_ object. The new line of code is: _LogPrime: logPrime,_
 - In the _then_ method, of the WebAssembly.instantiateStreaming call, the underscore has been removed from in front of the _FindPrimes_ function call.
 
+- The Emscripten command line has been adjusted:
+  - It no longer includes the _-s SIDE\_MODULE=2_ flag.
+  - The _--no-entry_ flag was included because there's no _main_ function defined. Including this flag prevents a compilation error.
+
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.0_.
+To compile the code in the _updated-code_ folder requires _Emscripten 2.0.8_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 
