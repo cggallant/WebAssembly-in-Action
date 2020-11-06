@@ -15,8 +15,6 @@
 // can continue to use Module afterwards as well.
 var Module = typeof Module !== 'undefined' ? Module : {};
 
-
-
 // --pre-jses are emitted after the Module integration code, so that they can
 // refer to Module (if they choose; they can also define Module)
 // {{PRE_JSES}}
@@ -58,8 +56,6 @@ if (Module['ENVIRONMENT']) {
   throw new Error('Module.ENVIRONMENT has been deprecated. To force the environment, use the ENVIRONMENT compile-time option (for example, -s ENVIRONMENT=web or -s ENVIRONMENT=node)');
 }
 
-
-
 // `/` should be present at the end if `scriptDirectory` is not empty
 var scriptDirectory = '';
 function locateFile(path) {
@@ -85,28 +81,26 @@ if (ENVIRONMENT_IS_NODE) {
     scriptDirectory = __dirname + '/';
   }
 
+// include: node_shell_read.js
 
 
+read_ = function shell_read(filename, binary) {
+  if (!nodeFS) nodeFS = require('fs');
+  if (!nodePath) nodePath = require('path');
+  filename = nodePath['normalize'](filename);
+  return nodeFS['readFileSync'](filename, binary ? null : 'utf8');
+};
 
-  read_ = function shell_read(filename, binary) {
-    if (!nodeFS) nodeFS = require('fs');
-    if (!nodePath) nodePath = require('path');
-    filename = nodePath['normalize'](filename);
-    return nodeFS['readFileSync'](filename, binary ? null : 'utf8');
-  };
+readBinary = function readBinary(filename) {
+  var ret = read_(filename, true);
+  if (!ret.buffer) {
+    ret = new Uint8Array(ret);
+  }
+  assert(ret.buffer);
+  return ret;
+};
 
-  readBinary = function readBinary(filename) {
-    var ret = read_(filename, true);
-    if (!ret.buffer) {
-      ret = new Uint8Array(ret);
-    }
-    assert(ret.buffer);
-    return ret;
-  };
-
-
-
-
+// end include: node_shell_read.js
   if (process['argv'].length > 1) {
     thisProgram = process['argv'][1].replace(/\\/g, '/');
   }
@@ -132,11 +126,8 @@ if (ENVIRONMENT_IS_NODE) {
 
   Module['inspect'] = function () { return '[Emscripten Module object]'; };
 
-
-
 } else
 if (ENVIRONMENT_IS_SHELL) {
-
 
   if (typeof read != 'undefined') {
     read_ = function shell_read(f) {
@@ -173,7 +164,6 @@ if (ENVIRONMENT_IS_SHELL) {
     console.warn = console.error = /** @type{!function(this:Console, ...*): undefined} */ (typeof printErr !== 'undefined' ? printErr : print);
   }
 
-
 } else
 
 // Note that this includes Node.js workers when relevant (pthreads is enabled).
@@ -182,7 +172,7 @@ if (ENVIRONMENT_IS_SHELL) {
 if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
   if (ENVIRONMENT_IS_WORKER) { // Check worker, not web, since window could be polyfilled
     scriptDirectory = self.location.href;
-  } else if (document.currentScript) { // web
+  } else if (typeof document !== 'undefined' && document.currentScript) { // web
     scriptDirectory = document.currentScript.src;
   }
   // blob urls look like blob:http://site.com/etc/etc and we cannot infer anything from them.
@@ -195,12 +185,11 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
     scriptDirectory = '';
   }
 
-
   // Differentiate the Web Worker from the Node Worker case, as reading must
   // be done differently.
   {
 
-
+// include: web_or_worker_shell_read.js
 
 
   read_ = function shell_read(url) {
@@ -235,9 +224,7 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
     xhr.send(null);
   };
 
-
-
-
+// end include: web_or_worker_shell_read.js
   }
 
   setWindowTitle = function(title) { document.title = title };
@@ -245,7 +232,6 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
 {
   throw new Error('environment detection error');
 }
-
 
 // Set up the out() and err() hooks, which are how we can print to stdout or
 // stderr, respectively.
@@ -293,20 +279,7 @@ var NODEFS = 'NODEFS is no longer included by default; build with -lnodefs.js';
 
 
 
-
-
-// {{PREAMBLE_ADDITIONS}}
-
 var STACK_ALIGN = 16;
-
-function dynamicAlloc(size) {
-  assert(DYNAMICTOP_PTR);
-  var ret = HEAP32[DYNAMICTOP_PTR>>2];
-  var end = (ret + size + 15) & -16;
-  assert(end <= HEAP8.length, 'failure to dynamicAlloc - memory growth etc. is not supported there, call malloc/sbrk directly');
-  HEAP32[DYNAMICTOP_PTR>>2] = end;
-  return ret;
-}
 
 function alignMemory(size, factor) {
   if (!factor) factor = STACK_ALIGN; // stack alignment (16-byte) by default
@@ -343,461 +316,7 @@ function warnOnce(text) {
   }
 }
 
-
-// dynamic linker/loader (a-la ld.so on ELF systems)
-var LDSO = {
-  // next free handle to use for a loaded dso.
-  // (handle=0 is avoided as it means "error" in dlopen)
-  nextHandle: 1,
-
-  loadedLibs: {         // handle -> dso [refcount, name, module, global]
-    // program itself
-    // XXX uglifyjs fails on "[-1]: {"
-    '-1': {
-      refcount: Infinity,   // = nodelete
-      name:     '__self__',
-      module:   Module,
-      global:   true
-    }
-  },
-
-  loadedLibNames: {     // name   -> handle
-    // program itself
-    '__self__': -1
-  },
-}
-
-// fetchBinary fetches binaray data @ url. (async)
-function fetchBinary(url) {
-  return fetch(url, { credentials: 'same-origin' }).then(function(response) {
-    if (!response['ok']) {
-      throw "failed to load binary file at '" + url + "'";
-    }
-    return response['arrayBuffer']();
-  }).then(function(buffer) {
-    return new Uint8Array(buffer);
-  });
-}
-
-function asmjsMangle(x) {
-  var unmangledSymbols = ['setTempRet0','getTempRet0','stackAlloc','stackSave','stackRestore','__growWasmMemory','__heap_base','__data_end'];
-  return x.indexOf('dynCall_') == 0 || unmangledSymbols.indexOf(x) != -1 ? x : '_' + x;
-}
-
-// loadDynamicLibrary loads dynamic library @ lib URL / path and returns handle for loaded DSO.
-//
-// Several flags affect the loading:
-//
-// - if flags.global=true, symbols from the loaded library are merged into global
-//   process namespace. Flags.global is thus similar to RTLD_GLOBAL in ELF.
-//
-// - if flags.nodelete=true, the library will be never unloaded. Flags.nodelete
-//   is thus similar to RTLD_NODELETE in ELF.
-//
-// - if flags.loadAsync=true, the loading is performed asynchronously and
-//   loadDynamicLibrary returns corresponding promise.
-//
-// - if flags.fs is provided, it is used as FS-like interface to load library data.
-//   By default, when flags.fs=undefined, native loading capabilities of the
-//   environment are used.
-//
-// If a library was already loaded, it is not loaded a second time. However
-// flags.global and flags.nodelete are handled every time a load request is made.
-// Once a library becomes "global" or "nodelete", it cannot be removed or unloaded.
-function loadDynamicLibrary(lib, flags) {
-  // when loadDynamicLibrary did not have flags, libraries were loaded globally & permanently
-  flags = flags || {global: true, nodelete: true}
-
-  var handle = LDSO.loadedLibNames[lib];
-  var dso;
-  if (handle) {
-    // the library is being loaded or has been loaded already.
-    //
-    // however it could be previously loaded only locally and if we get
-    // load request with global=true we have to make it globally visible now.
-    dso = LDSO.loadedLibs[handle];
-    if (flags.global && !dso.global) {
-      dso.global = true;
-      if (dso.module !== 'loading') {
-        // ^^^ if module is 'loading' - symbols merging will be eventually done by the loader.
-        mergeLibSymbols(dso.module)
-      }
-    }
-    // same for "nodelete"
-    if (flags.nodelete && dso.refcount !== Infinity) {
-      dso.refcount = Infinity;
-    }
-    dso.refcount++
-    return flags.loadAsync ? Promise.resolve(handle) : handle;
-  }
-
-  // allocate new DSO & handle
-  handle = LDSO.nextHandle++;
-  dso = {
-    refcount: flags.nodelete ? Infinity : 1,
-    name:     lib,
-    module:   'loading',
-    global:   flags.global,
-  };
-  LDSO.loadedLibNames[lib] = handle;
-  LDSO.loadedLibs[handle] = dso;
-
-  // libData <- libFile
-  function loadLibData(libFile) {
-    // for wasm, we can use fetch for async, but for fs mode we can only imitate it
-    if (flags.fs) {
-      var libData = flags.fs.readFile(libFile, {encoding: 'binary'});
-      if (!(libData instanceof Uint8Array)) {
-        libData = new Uint8Array(lib_data);
-      }
-      return flags.loadAsync ? Promise.resolve(libData) : libData;
-    }
-
-    if (flags.loadAsync) {
-      return fetchBinary(libFile);
-    }
-    // load the binary synchronously
-    return readBinary(libFile);
-  }
-
-  // libModule <- libData
-  function createLibModule(libData) {
-    return loadWebAssemblyModule(libData, flags)
-  }
-
-  // libModule <- lib
-  function getLibModule() {
-    // lookup preloaded cache first
-    if (Module['preloadedWasm'] !== undefined &&
-        Module['preloadedWasm'][lib] !== undefined) {
-      var libModule = Module['preloadedWasm'][lib];
-      return flags.loadAsync ? Promise.resolve(libModule) : libModule;
-    }
-
-    // module not preloaded - load lib data and create new module from it
-    if (flags.loadAsync) {
-      return loadLibData(lib).then(function(libData) {
-        return createLibModule(libData);
-      });
-    }
-
-    return createLibModule(loadLibData(lib));
-  }
-
-  // Module.symbols <- libModule.symbols (flags.global handler)
-  function mergeLibSymbols(libModule) {
-    // add symbols into global namespace TODO: weak linking etc.
-    for (var sym in libModule) {
-      if (!libModule.hasOwnProperty(sym)) {
-        continue;
-      }
-
-      // When RTLD_GLOBAL is enable, the symbols defined by this shared object will be made
-      // available for symbol resolution of subsequently loaded shared objects.
-      //
-      // We should copy the symbols (which include methods and variables) from SIDE_MODULE to MAIN_MODULE.
-
-      var module_sym = asmjsMangle(sym);
-
-      if (!Module.hasOwnProperty(module_sym)) {
-        Module[module_sym] = libModule[sym];
-      }
-    }
-  }
-
-  // module for lib is loaded - update the dso & global namespace
-  function moduleLoaded(libModule) {
-    if (dso.global) {
-      mergeLibSymbols(libModule);
-    }
-    dso.module = libModule;
-  }
-
-  if (flags.loadAsync) {
-    return getLibModule().then(function(libModule) {
-      moduleLoaded(libModule);
-      return handle;
-    })
-  }
-
-  moduleLoaded(getLibModule());
-  return handle;
-}
-
-// Applies relocations to exported things.
-function relocateExports(exports, memoryBase, tableBase, moduleLocal) {
-  var relocated = {};
-
-  for (var e in exports) {
-    var value = exports[e];
-    if (typeof value === 'object') {
-      // a breaking change in the wasm spec, globals are now objects
-      // https://github.com/WebAssembly/mutable-global/issues/1
-      value = value.value;
-    }
-    if (typeof value === 'number') {
-      // relocate it - modules export the absolute value, they can't relocate before they export
-        value += memoryBase;
-    }
-    relocated[e] = value;
-    if (moduleLocal) {
-      moduleLocal['_' + e] = value;
-    }
-  }
-  return relocated;
-}
-
-// Dynmamic version of shared.py:make_invoke.  This is needed for invokes
-// that originate from side modules since these are not known at JS
-// generation time.
-function createInvokeFunction(sig) {
-  return function() {
-    var sp = stackSave();
-    try {
-      return Module['dynCall_' + sig].apply(null, arguments);
-    } catch(e) {
-      stackRestore(sp);
-      if (e !== e+0 && e !== 'longjmp') throw e;
-      _setThrew(1, 0);
-    }
-  }
-}
-
-// Loads a side module from binary data
-function loadWebAssemblyModule(binary, flags) {
-  var int32View = new Uint32Array(new Uint8Array(binary.subarray(0, 24)).buffer);
-  assert(int32View[0] == 0x6d736100, 'need to see wasm magic number'); // \0asm
-  // we should see the dylink section right after the magic number and wasm version
-  assert(binary[8] === 0, 'need the dylink section to be first')
-  var next = 9;
-  function getLEB() {
-    var ret = 0;
-    var mul = 1;
-    while (1) {
-      var byte = binary[next++];
-      ret += ((byte & 0x7f) * mul);
-      mul *= 0x80;
-      if (!(byte & 0x80)) break;
-    }
-    return ret;
-  }
-  var sectionSize = getLEB();
-  assert(binary[next] === 6);                 next++; // size of "dylink" string
-  assert(binary[next] === 'd'.charCodeAt(0)); next++;
-  assert(binary[next] === 'y'.charCodeAt(0)); next++;
-  assert(binary[next] === 'l'.charCodeAt(0)); next++;
-  assert(binary[next] === 'i'.charCodeAt(0)); next++;
-  assert(binary[next] === 'n'.charCodeAt(0)); next++;
-  assert(binary[next] === 'k'.charCodeAt(0)); next++;
-  var memorySize = getLEB();
-  var memoryAlign = getLEB();
-  var tableSize = getLEB();
-  var tableAlign = getLEB();
-
-  // shared libraries this module needs. We need to load them first, so that
-  // current module could resolve its imports. (see tools/shared.py
-  // WebAssembly.make_shared_library() for "dylink" section extension format)
-  var neededDynlibsCount = getLEB();
-  var neededDynlibs = [];
-  for (var i = 0; i < neededDynlibsCount; ++i) {
-    var nameLen = getLEB();
-    var nameUTF8 = binary.subarray(next, next + nameLen);
-    next += nameLen;
-    var name = UTF8ArrayToString(nameUTF8, 0);
-    neededDynlibs.push(name);
-  }
-
-  // loadModule loads the wasm module after all its dependencies have been loaded.
-  // can be called both sync/async.
-  function loadModule() {
-    // alignments are powers of 2
-    memoryAlign = Math.pow(2, memoryAlign);
-    tableAlign = Math.pow(2, tableAlign);
-    // finalize alignments and verify them
-    memoryAlign = Math.max(memoryAlign, STACK_ALIGN); // we at least need stack alignment
-    assert(tableAlign === 1, 'invalid tableAlign ' + tableAlign);
-    // prepare memory
-    var memoryBase = alignMemory(getMemory(memorySize + memoryAlign), memoryAlign); // TODO: add to cleanups
-    // prepare env imports
-    var env = asmLibraryArg;
-    // TODO: use only __memory_base and __table_base, need to update asm.js backend
-    var table = wasmTable;
-    var tableBase = table.length;
-    var originalTable = table;
-    table.grow(tableSize);
-    assert(table === originalTable);
-    // zero-initialize memory and table
-    // The static area consists of explicitly initialized data, followed by zero-initialized data.
-    // The latter may need zeroing out if the MAIN_MODULE has already used this memory area before
-    // dlopen'ing the SIDE_MODULE.  Since we don't know the size of the explicitly initialized data
-    // here, we just zero the whole thing, which is suboptimal, but should at least resolve bugs
-    // from uninitialized memory.
-    for (var i = memoryBase; i < memoryBase + memorySize; i++) {
-      HEAP8[i] = 0;
-    }
-    for (var i = tableBase; i < tableBase + tableSize; i++) {
-      table.set(i, null);
-    }
-
-    // We resolve symbols against the global Module but failing that also
-    // against the local symbols exported a side module.  This is because
-    // a) Module sometime need to import their own symbols
-    // b) Symbols from loaded modules are not always added to the global Module.
-    var moduleLocal = {};
-
-    var resolveSymbol = function(sym, type, legalized) {
-      if (legalized) {
-        sym = 'orig$' + sym;
-      }
-
-      var resolved = Module["asm"][sym];
-      if (!resolved) {
-        var mangled = asmjsMangle(sym);
-        resolved = Module[mangled];
-        if (!resolved) {
-          resolved = moduleLocal[mangled];
-        }
-        if (!resolved && sym.startsWith('invoke_')) {
-          resolved = createInvokeFunction(sym.split('_')[1]);
-        }
-        assert(resolved, 'missing linked ' + type + ' `' + sym + '`. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment');
-      }
-      return resolved;
-    }
-
-    // copy currently exported symbols so the new module can import them
-    for (var x in Module) {
-      if (!(x in env)) {
-        env[x] = Module[x];
-      }
-    }
-
-    // TODO kill ↓↓↓ (except "symbols local to this module", it will likely be
-    // not needed if we require that if A wants symbols from B it has to link
-    // to B explicitly: similarly to -Wl,--no-undefined)
-    //
-    // wasm dynamic libraries are pure wasm, so they cannot assist in
-    // their own loading. When side module A wants to import something
-    // provided by a side module B that is loaded later, we need to
-    // add a layer of indirection, but worse, we can't even tell what
-    // to add the indirection for, without inspecting what A's imports
-    // are. To do that here, we use a JS proxy (another option would
-    // be to inspect the binary directly).
-    var proxyHandler = {
-      'get': function(obj, prop) {
-        // symbols that should be local to this module
-        switch (prop) {
-          case '__memory_base':
-          case 'gb':
-            return memoryBase;
-          case '__table_base':
-          case 'fb':
-            return tableBase;
-        }
-
-        if (prop in obj) {
-          return obj[prop]; // already present
-        }
-        if (prop.startsWith('g$')) {
-          // a global. the g$ function returns the global address.
-          var name = prop.substr(2); // without g$ prefix
-          return obj[prop] = function() {
-            return resolveSymbol(name, 'global');
-          };
-        }
-        if (prop.startsWith('fp$')) {
-          // the fp$ function returns the address (table index) of the function
-          var parts = prop.split('$');
-          assert(parts.length == 3)
-          var name = parts[1];
-          var sig = parts[2];
-          var legalized = sig.indexOf('j') >= 0; // check for i64s
-          var fp = 0;
-          return obj[prop] = function() {
-            if (!fp) {
-              var f = resolveSymbol(name, 'function', legalized);
-              fp = addFunction(f, sig);
-            }
-            return fp;
-          };
-        }
-        // otherwise this is regular function import - call it indirectly
-        return obj[prop] = function() {
-          return resolveSymbol(prop, 'function').apply(null, arguments);
-        };
-      }
-    };
-    var proxy = new Proxy(env, proxyHandler);
-    var info = {
-      global: {
-        'NaN': NaN,
-        'Infinity': Infinity,
-      },
-      'global.Math': Math,
-      env: proxy,
-      wasi_snapshot_preview1: proxy,
-    };
-    var oldTable = [];
-    for (var i = 0; i < tableBase; i++) {
-      oldTable.push(table.get(i));
-    }
-
-    function postInstantiation(instance, moduleLocal) {
-      // the table should be unchanged
-      assert(table === originalTable);
-      assert(table === wasmTable);
-      // the old part of the table should be unchanged
-      for (var i = 0; i < tableBase; i++) {
-        assert(table.get(i) === oldTable[i], 'old table entries must remain the same');
-      }
-      // verify that the new table region was filled in
-      for (var i = 0; i < tableSize; i++) {
-        assert(table.get(tableBase + i) !== undefined, 'table entry was not filled in');
-      }
-      var exports = relocateExports(instance.exports, memoryBase, tableBase, moduleLocal);
-      // initialize the module
-      var init = exports['__post_instantiate'];
-      if (init) {
-        if (runtimeInitialized) {
-          init();
-        } else {
-          // we aren't ready to run compiled code yet
-          __ATINIT__.push(init);
-        }
-      }
-      return exports;
-    }
-
-    if (flags.loadAsync) {
-      return WebAssembly.instantiate(binary, info).then(function(result) {
-        return postInstantiation(result.instance, moduleLocal);
-      });
-    } else {
-      var instance = new WebAssembly.Instance(new WebAssembly.Module(binary), info);
-      return postInstantiation(instance, moduleLocal);
-    }
-  }
-
-  // now load needed libraries and the module itself.
-  if (flags.loadAsync) {
-    return Promise.all(neededDynlibs.map(function(dynNeeded) {
-      return loadDynamicLibrary(dynNeeded, flags);
-    })).then(function() {
-      return loadModule();
-    });
-  }
-
-  neededDynlibs.forEach(function(dynNeeded) {
-    loadDynamicLibrary(dynNeeded, flags);
-  });
-  return loadModule();
-}
-Module['loadWebAssemblyModule'] = loadWebAssemblyModule;
-
-
-
-
-
+// include: runtime_functions.js
 
 
 // Wraps a JS function as a wasm function with a given signature.
@@ -889,16 +408,31 @@ var freeTableIndexes = [];
 // Weak map of functions in the table to their indexes, created on first use.
 var functionsInTableMap;
 
+function getEmptyTableSlot() {
+  // Reuse a free index if there is one, otherwise grow.
+  if (freeTableIndexes.length) {
+    return freeTableIndexes.pop();
+  }
+  // Grow the table
+  try {
+    wasmTable.grow(1);
+  } catch (err) {
+    if (!(err instanceof RangeError)) {
+      throw err;
+    }
+    throw 'Unable to grow wasm table. Set ALLOW_TABLE_GROWTH.';
+  }
+  return wasmTable.length - 1;
+}
+
 // Add a wasm function to the table.
 function addFunctionWasm(func, sig) {
-  var table = wasmTable;
-
   // Check if the function is already in the table, to ensure each function
   // gets a unique index. First, create the map if this is the first use.
   if (!functionsInTableMap) {
     functionsInTableMap = new WeakMap();
-    for (var i = 0; i < table.length; i++) {
-      var item = table.get(i);
+    for (var i = 0; i < wasmTable.length; i++) {
+      var item = wasmTable.get(i);
       // Ignore null values.
       if (item) {
         functionsInTableMap.set(item, i);
@@ -911,35 +445,19 @@ function addFunctionWasm(func, sig) {
 
   // It's not in the table, add it now.
 
-
-  var ret;
-  // Reuse a free index if there is one, otherwise grow.
-  if (freeTableIndexes.length) {
-    ret = freeTableIndexes.pop();
-  } else {
-    ret = table.length;
-    // Grow the table
-    try {
-      table.grow(1);
-    } catch (err) {
-      if (!(err instanceof RangeError)) {
-        throw err;
-      }
-      throw 'Unable to grow wasm table. Set ALLOW_TABLE_GROWTH.';
-    }
-  }
+  var ret = getEmptyTableSlot();
 
   // Set the new value.
   try {
     // Attempting to call this with JS function will cause of table.set() to fail
-    table.set(ret, func);
+    wasmTable.set(ret, func);
   } catch (err) {
     if (!(err instanceof TypeError)) {
       throw err;
     }
-    assert(typeof sig !== 'undefined', 'Missing signature argument to addFunction');
+    assert(typeof sig !== 'undefined', 'Missing signature argument to addFunction: ' + func);
     var wrapped = convertJsFunctionToWasm(func, sig);
-    table.set(ret, wrapped);
+    wasmTable.set(ret, wrapped);
   }
 
   functionsInTableMap.set(func, ret);
@@ -947,7 +465,7 @@ function addFunctionWasm(func, sig) {
   return ret;
 }
 
-function removeFunctionWasm(index) {
+function removeFunction(index) {
   functionsInTableMap.delete(wasmTable.get(index));
   freeTableIndexes.push(index);
 }
@@ -960,63 +478,13 @@ function addFunction(func, sig) {
   return addFunctionWasm(func, sig);
 }
 
-function removeFunction(index) {
-  removeFunctionWasm(index);
-}
+// end include: runtime_functions.js
+// include: runtime_debug.js
 
 
-
-var funcWrappers = {};
-
-function getFuncWrapper(func, sig) {
-  if (!func) return; // on null pointer, return undefined
-  assert(sig);
-  if (!funcWrappers[sig]) {
-    funcWrappers[sig] = {};
-  }
-  var sigCache = funcWrappers[sig];
-  if (!sigCache[func]) {
-    // optimize away arguments usage in common cases
-    if (sig.length === 1) {
-      sigCache[func] = function dynCall_wrapper() {
-        return dynCall(sig, func);
-      };
-    } else if (sig.length === 2) {
-      sigCache[func] = function dynCall_wrapper(arg) {
-        return dynCall(sig, func, [arg]);
-      };
-    } else {
-      // general case
-      sigCache[func] = function dynCall_wrapper() {
-        return dynCall(sig, func, Array.prototype.slice.call(arguments));
-      };
-    }
-  }
-  return sigCache[func];
-}
-
-
-
-
-
-
-
+// end include: runtime_debug.js
 function makeBigInt(low, high, unsigned) {
   return unsigned ? ((+((low>>>0)))+((+((high>>>0)))*4294967296.0)) : ((+((low>>>0)))+((+((high|0)))*4294967296.0));
-}
-
-/** @param {Array=} args */
-function dynCall(sig, ptr, args) {
-  if (args && args.length) {
-    // j (64-bit integer) must be passed in as two numbers [low 32, high 32].
-    assert(args.length === sig.substring(1).replace(/j/g, '--').length);
-    assert(('dynCall_' + sig) in Module, 'bad function pointer type - no table for sig \'' + sig + '\'');
-    return Module['dynCall_' + sig].apply(null, [ptr].concat(args));
-  } else {
-    assert(sig.length == 1);
-    assert(('dynCall_' + sig) in Module, 'bad function pointer type - no table for sig \'' + sig + '\'');
-    return Module['dynCall_' + sig].call(null, ptr);
-  }
 }
 
 var tempRet0 = 0;
@@ -1033,15 +501,6 @@ function getCompilerSetting(name) {
   throw 'You must build with -s RETAIN_COMPILER_SETTINGS=1 for getCompilerSetting or emscripten_get_compiler_setting to work';
 }
 
-// The address globals begin at. Very low in memory, for code size and optimization opportunities.
-// Above 0 is static memory, starting with globals.
-// Then the stack.
-// Then 'dynamic' memory for sbrk.
-var GLOBAL_BASE = 1024;
-
-GLOBAL_BASE = alignMemory(GLOBAL_BASE, 1);
-
-
 
 
 // === Preamble library stuff ===
@@ -1054,16 +513,14 @@ GLOBAL_BASE = alignMemory(GLOBAL_BASE, 1);
 // An online HTML version (which may be of a different version of Emscripten)
 //    is up at http://kripken.github.io/emscripten-site/docs/api_reference/preamble.js.html
 
-
 var wasmBinary;if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];if (!Object.getOwnPropertyDescriptor(Module, 'wasmBinary')) Object.defineProperty(Module, 'wasmBinary', { configurable: true, get: function() { abort('Module.wasmBinary has been replaced with plain wasmBinary (the initial value can be provided on Module, but after startup the value is only looked for on a local variable of that name)') } });
 var noExitRuntime;if (Module['noExitRuntime']) noExitRuntime = Module['noExitRuntime'];if (!Object.getOwnPropertyDescriptor(Module, 'noExitRuntime')) Object.defineProperty(Module, 'noExitRuntime', { configurable: true, get: function() { abort('Module.noExitRuntime has been replaced with plain noExitRuntime (the initial value can be provided on Module, but after startup the value is only looked for on a local variable of that name)') } });
-
 
 if (typeof WebAssembly !== 'object') {
   abort('no native wasm support detected');
 }
 
-
+// include: runtime_safe_heap.js
 
 
 // In MINIMAL_RUNTIME, setValue() and getValue() are only available when building with safe heap enabled, for heap safety checking.
@@ -1081,7 +538,7 @@ function setValue(ptr, value, type, noSafe) {
       case 'i8': HEAP8[((ptr)>>0)]=value; break;
       case 'i16': HEAP16[((ptr)>>1)]=value; break;
       case 'i32': HEAP32[((ptr)>>2)]=value; break;
-      case 'i64': (tempI64 = [value>>>0,(tempDouble=value,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[((ptr)>>2)]=tempI64[0],HEAP32[(((ptr)+(4))>>2)]=tempI64[1]); break;
+      case 'i64': (tempI64 = [value>>>0,(tempDouble=value,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[((ptr)>>2)]=tempI64[0],HEAP32[(((ptr)+(4))>>2)]=tempI64[1]); break;
       case 'float': HEAPF32[((ptr)>>2)]=value; break;
       case 'double': HEAPF64[((ptr)>>3)]=value; break;
       default: abort('invalid type for setValue: ' + type);
@@ -1107,26 +564,10 @@ function getValue(ptr, type, noSafe) {
   return null;
 }
 
-
-
-
-
-
+// end include: runtime_safe_heap.js
 // Wasm globals
 
 var wasmMemory;
-
-// In fastcomp asm.js, we don't need a wasm Table at all.
-// In the wasm backend, we polyfill the WebAssembly object,
-// so this creates a (non-native-wasm) table for us.
-
-var wasmTable = new WebAssembly.Table({
-  'initial': 969,
-  'element': 'anyfunc'
-});
-
-
-
 
 //========================================
 // Runtime essentials
@@ -1217,103 +658,40 @@ function cwrap(ident, returnType, argTypes, opts) {
   }
 }
 
+// We used to include malloc/free by default in the past. Show a helpful error in
+// builds with assertions.
+
 var ALLOC_NORMAL = 0; // Tries to use _malloc()
 var ALLOC_STACK = 1; // Lives for the duration of the current function call
-var ALLOC_DYNAMIC = 2; // Cannot be freed except through sbrk
-var ALLOC_NONE = 3; // Do not allocate
 
 // allocate(): This is for internal use. You can use it yourself as well, but the interface
 //             is a little tricky (see docs right below). The reason is that it is optimized
 //             for multiple syntaxes to save space in generated code. So you should
 //             normally not use allocate(), and instead allocate memory using _malloc(),
 //             initialize it with setValue(), and so forth.
-// @slab: An array of data, or a number. If a number, then the size of the block to allocate,
-//        in *bytes* (note that this is sometimes confusing: the next parameter does not
-//        affect this!)
-// @types: Either an array of types, one for each byte (or 0 if no type at that position),
-//         or a single type which is used for the entire block. This only matters if there
-//         is initial data - if @slab is a number, then this does not matter at all and is
-//         ignored.
+// @slab: An array of data.
 // @allocator: How to allocate memory, see ALLOC_*
-/** @type {function((TypedArray|Array<number>|number), string, number, number=)} */
-function allocate(slab, types, allocator, ptr) {
-  var zeroinit, size;
-  if (typeof slab === 'number') {
-    zeroinit = true;
-    size = slab;
-  } else {
-    zeroinit = false;
-    size = slab.length;
-  }
-
-  var singleType = typeof types === 'string' ? types : null;
-
+/** @type {function((Uint8Array|Array<number>), number)} */
+function allocate(slab, allocator) {
   var ret;
-  if (allocator == ALLOC_NONE) {
-    ret = ptr;
+  assert(typeof allocator === 'number', 'allocate no longer takes a type argument')
+  assert(typeof slab !== 'number', 'allocate no longer takes a number as arg0')
+
+  if (allocator == ALLOC_STACK) {
+    ret = stackAlloc(slab.length);
   } else {
-    ret = [_malloc,
-    stackAlloc,
-    dynamicAlloc][allocator](Math.max(size, singleType ? 1 : types.length));
+    ret = _malloc(slab.length);
   }
 
-  if (zeroinit) {
-    var stop;
-    ptr = ret;
-    assert((ret & 3) == 0);
-    stop = ret + (size & ~3);
-    for (; ptr < stop; ptr += 4) {
-      HEAP32[((ptr)>>2)]=0;
-    }
-    stop = ret + size;
-    while (ptr < stop) {
-      HEAP8[((ptr++)>>0)]=0;
-    }
-    return ret;
+  if (slab.subarray || slab.slice) {
+    HEAPU8.set(/** @type {!Uint8Array} */(slab), ret);
+  } else {
+    HEAPU8.set(new Uint8Array(slab), ret);
   }
-
-  if (singleType === 'i8') {
-    if (slab.subarray || slab.slice) {
-      HEAPU8.set(/** @type {!Uint8Array} */ (slab), ret);
-    } else {
-      HEAPU8.set(new Uint8Array(slab), ret);
-    }
-    return ret;
-  }
-
-  var i = 0, type, typeSize, previousType;
-  while (i < size) {
-    var curr = slab[i];
-
-    type = singleType || types[i];
-    if (type === 0) {
-      i++;
-      continue;
-    }
-    assert(type, 'Must know what type to store in allocate!');
-
-    if (type == 'i64') type = 'i32'; // special case: we have one i32 here, and one i32 later
-
-    setValue(ret+i, curr, type);
-
-    // no need to look up size unless type changes, so cache it
-    if (previousType !== type) {
-      typeSize = getNativeTypeSize(type);
-      previousType = type;
-    }
-    i += typeSize;
-  }
-
   return ret;
 }
 
-// Allocate memory during any stage of startup - static memory early on, dynamic memory later, malloc when ready
-function getMemory(size) {
-  if (!runtimeInitialized) return dynamicAlloc(size);
-  return _malloc(size);
-}
-
-
+// include: runtime_strings.js
 
 
 // runtime_strings.js: Strings related runtime functions that are part of both MINIMAL_RUNTIME and regular runtime.
@@ -1468,8 +846,8 @@ function lengthBytesUTF8(str) {
   return len;
 }
 
-
-
+// end include: runtime_strings.js
+// include: runtime_strings_extra.js
 
 
 // runtime_strings_extra.js: Strings related runtime functions that are available only in regular runtime.
@@ -1694,13 +1072,11 @@ function writeAsciiToMemory(str, buffer, dontAddNull) {
   if (!dontAddNull) HEAP8[((buffer)>>0)]=0;
 }
 
-
-
+// end include: runtime_strings_extra.js
 // Memory management
 
 var PAGE_SIZE = 16384;
 var WASM_PAGE_SIZE = 65536;
-var ASMJS_PAGE_SIZE = 16777216;
 
 function alignUp(x, multiple) {
   if (x % multiple > 0) {
@@ -1741,16 +1117,20 @@ function updateGlobalBufferAndViews(buf) {
   Module['HEAPF64'] = HEAPF64 = new Float64Array(buf);
 }
 
-var STATIC_BASE = 1024,
-    STACK_BASE = 5472560,
+var STACK_BASE = 5472480,
     STACKTOP = STACK_BASE,
-    STACK_MAX = 229680,
-    DYNAMIC_BASE = 5472560,
-    DYNAMICTOP_PTR = 229520;
+    STACK_MAX = 229600;
 
 assert(STACK_BASE % 16 === 0, 'stack must start aligned');
-assert(DYNAMIC_BASE % 16 === 0, 'heap must start aligned');
 
+var __stack_pointer = new WebAssembly.Global({value: 'i32', mutable: true}, STACK_BASE);
+
+// To support such allocations during startup, track them on __heap_base and
+// then when the main module is loaded it reads that value and uses it to
+// initialize sbrk (the main module is relocatable itself, and so it does not
+// have __heap_base hardcoded into it - it receives it from JS as an extern
+// global, basically).
+Module['___heap_base'] = 5472480;
 
 var TOTAL_STACK = 5242880;
 if (Module['TOTAL_STACK']) assert(TOTAL_STACK === Module['TOTAL_STACK'], 'the stack size can no longer be determined at runtime')
@@ -1763,15 +1143,8 @@ assert(INITIAL_INITIAL_MEMORY >= TOTAL_STACK, 'INITIAL_MEMORY should be larger t
 assert(typeof Int32Array !== 'undefined' && typeof Float64Array !== 'undefined' && Int32Array.prototype.subarray !== undefined && Int32Array.prototype.set !== undefined,
        'JS engine does not provide full typed array support');
 
-
-
-
-
-
-
-
 // In non-standalone/normal mode, we create the memory here.
-
+// include: runtime_init_memory.js
 
 
 // Create the main memory. (Note: this isn't used in STANDALONE_WASM mode since the wasm
@@ -1788,7 +1161,6 @@ assert(typeof Int32Array !== 'undefined' && typeof Float64Array !== 'undefined' 
     });
   }
 
-
 if (wasmMemory) {
   buffer = wasmMemory.buffer;
 }
@@ -1799,11 +1171,17 @@ INITIAL_INITIAL_MEMORY = buffer.byteLength;
 assert(INITIAL_INITIAL_MEMORY % WASM_PAGE_SIZE === 0);
 updateGlobalBufferAndViews(buffer);
 
-HEAP32[DYNAMICTOP_PTR>>2] = DYNAMIC_BASE;
+// end include: runtime_init_memory.js
 
+// include: runtime_init_table.js
+// In RELOCATABLE mode we create the table in JS.
+var wasmTable = new WebAssembly.Table({
+  'initial': 969,
+  'element': 'anyfunc'
+});
 
-
-
+// end include: runtime_init_table.js
+// include: runtime_stack_check.js
 
 
 // Initializes the stack cookie. Called at the startup of main and at the startup of each thread in pthreads mode.
@@ -1813,23 +1191,22 @@ function writeStackCookie() {
   HEAPU32[(STACK_MAX >> 2)+1] = 0x2135467;
   HEAPU32[(STACK_MAX >> 2)+2] = 0x89BACDFE;
   // Also test the global address 0 for integrity.
-  // We don't do this with ASan because ASan does its own checks for this.
   HEAP32[0] = 0x63736d65; /* 'emsc' */
 }
 
 function checkStackCookie() {
+  if (ABORT) return;
   var cookie1 = HEAPU32[(STACK_MAX >> 2)+1];
   var cookie2 = HEAPU32[(STACK_MAX >> 2)+2];
   if (cookie1 != 0x2135467 || cookie2 != 0x89BACDFE) {
     abort('Stack overflow! Stack cookie has been overwritten, expected hex dwords 0x89BACDFE and 0x2135467, but received 0x' + cookie2.toString(16) + ' ' + cookie1.toString(16));
   }
   // Also test the global address 0 for integrity.
-  // We don't do this with ASan because ASan does its own checks for this.
   if (HEAP32[0] !== 0x63736d65 /* 'emsc' */) abort('Runtime error: The application has corrupted its heap memory area (address zero)!');
 }
 
-
-
+// end include: runtime_stack_check.js
+// include: runtime_assertions.js
 
 
 // Endianness check (note: assumes compiler arch was little-endian)
@@ -1844,28 +1221,7 @@ function abortFnPtrError(ptr, sig) {
 	abort("Invalid function pointer " + ptr + " called with signature '" + sig + "'. Perhaps this is an invalid value (e.g. caused by calling a virtual method on a NULL pointer)? Or calling a function with an incorrect type, which will fail? (it is worth building your source files with -Werror (warnings are errors), as warnings can indicate undefined behavior which can cause this). Build with ASSERTIONS=2 for more info.");
 }
 
-
-
-function callRuntimeCallbacks(callbacks) {
-  while(callbacks.length > 0) {
-    var callback = callbacks.shift();
-    if (typeof callback == 'function') {
-      callback(Module); // Pass the module as the first argument.
-      continue;
-    }
-    var func = callback.func;
-    if (typeof func === 'number') {
-      if (callback.arg === undefined) {
-        Module['dynCall_v'](func);
-      } else {
-        Module['dynCall_vi'](func, callback.arg);
-      }
-    } else {
-      func(callback.arg === undefined ? null : callback.arg);
-    }
-  }
-}
-
+// end include: runtime_assertions.js
 var __ATPRERUN__  = []; // functions called before the runtime is initialized
 var __ATINIT__    = []; // functions called during startup
 var __ATMAIN__    = []; // functions called when main() is to be run
@@ -1874,7 +1230,6 @@ var __ATPOSTRUN__ = []; // functions called after the main() is called
 
 var runtimeInitialized = false;
 var runtimeExited = false;
-
 
 function preRun() {
 
@@ -1942,30 +1297,7 @@ function addOnPostRun(cb) {
   __ATPOSTRUN__.unshift(cb);
 }
 
-/** @param {number|boolean=} ignore */
-function unSign(value, bits, ignore) {
-  if (value >= 0) {
-    return value;
-  }
-  return bits <= 32 ? 2*Math.abs(1 << (bits-1)) + value // Need some trickery, since if bits == 32, we are right at the limit of the bits JS uses in bitshifts
-                    : Math.pow(2, bits)         + value;
-}
-/** @param {number|boolean=} ignore */
-function reSign(value, bits, ignore) {
-  if (value <= 0) {
-    return value;
-  }
-  var half = bits <= 32 ? Math.abs(1 << (bits-1)) // abs is needed if bits == 32
-                        : Math.pow(2, bits-1);
-  if (value >= half && (bits <= 32 || value > half)) { // for huge values, we can hit the precision limit and always get true here. so don't do that
-                                                       // but, in general there is no perfect solution here. With 64-bit ints, we get rounding and errors
-                                                       // TODO: In i64 mode 1, resign the two parts separately and safely
-    value = -2*half + value; // Cannot bitshift half, as it may be at the limit of the bits JS uses in bitshifts
-  }
-  return value;
-}
-
-
+// include: runtime_math.js
 
 
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/imul
@@ -1981,30 +1313,7 @@ assert(Math.fround, 'This browser does not support Math.fround(), build with LEG
 assert(Math.clz32, 'This browser does not support Math.clz32(), build with LEGACY_VM_SUPPORT or POLYFILL_OLD_MATH_FUNCTIONS to add in a polyfill');
 assert(Math.trunc, 'This browser does not support Math.trunc(), build with LEGACY_VM_SUPPORT or POLYFILL_OLD_MATH_FUNCTIONS to add in a polyfill');
 
-var Math_abs = Math.abs;
-var Math_cos = Math.cos;
-var Math_sin = Math.sin;
-var Math_tan = Math.tan;
-var Math_acos = Math.acos;
-var Math_asin = Math.asin;
-var Math_atan = Math.atan;
-var Math_atan2 = Math.atan2;
-var Math_exp = Math.exp;
-var Math_log = Math.log;
-var Math_sqrt = Math.sqrt;
-var Math_ceil = Math.ceil;
-var Math_floor = Math.floor;
-var Math_pow = Math.pow;
-var Math_imul = Math.imul;
-var Math_fround = Math.fround;
-var Math_round = Math.round;
-var Math_min = Math.min;
-var Math_max = Math.max;
-var Math_clz32 = Math.clz32;
-var Math_trunc = Math.trunc;
-
-
-
+// end include: runtime_math.js
 // A counter of dependencies for calling run(). If we need to
 // do asynchronous work before running, increment this and
 // decrement it. Incrementing must happen in a place like
@@ -2090,6 +1399,7 @@ function removeRunDependency(id) {
 Module["preloadedImages"] = {}; // maps url to image data
 Module["preloadedAudios"] = {}; // maps url to audio data
 Module["preloadedWasm"] = {}; // maps url to wasm instance exports
+addOnPreRun(preloadDylibs);
 
 /** @param {string|number=} what */
 function abort(what) {
@@ -2117,51 +1427,13 @@ function abort(what) {
   throw e;
 }
 
+// {{MEM_INITIALIZER}}
+
+// include: memoryprofiler.js
 
 
-addOnPreRun(function() {
-  function loadDynamicLibraries(libs) {
-    if (libs) {
-      libs.forEach(function(lib) {
-        // libraries linked to main never go away
-        loadDynamicLibrary(lib, {global: true, nodelete: true});
-      });
-    }
-  }
-  // if we can load dynamic libraries synchronously, do so, otherwise, preload
-  if (Module['dynamicLibraries'] && Module['dynamicLibraries'].length > 0 && !readBinary) {
-    // we can't read binary data synchronously, so preload
-    addRunDependency('preload_dynamicLibraries');
-    Promise.all(Module['dynamicLibraries'].map(function(lib) {
-      return loadDynamicLibrary(lib, {loadAsync: true, global: true, nodelete: true});
-    })).then(function() {
-      // we got them all, wonderful
-      removeRunDependency('preload_dynamicLibraries');
-    });
-    return;
-  }
-  loadDynamicLibraries(Module['dynamicLibraries']);
-});
-
-function lookupSymbol(ptr) { // for a pointer, print out all symbols that resolve to it
-  var ret = [];
-  for (var i in Module) {
-    if (Module[i] === ptr) ret.push(i);
-  }
-  print(ptr + ' is ' + ret);
-}
-
-var memoryInitializer = null;
-
-
-
-
-
-
-
-
-
-
+// end include: memoryprofiler.js
+// include: URIUtils.js
 
 
 function hasPrefix(str, prefix) {
@@ -2185,8 +1457,7 @@ function isFileURI(filename) {
   return hasPrefix(filename, fileURIPrefix);
 }
 
-
-
+// end include: URIUtils.js
 function createExportWrapper(name, fixedasm) {
   return function() {
     var displayName = name;
@@ -2242,12 +1513,8 @@ function getBinaryPromise() {
     });
   }
   // Otherwise, getBinary should be able to get it synchronously
-  return new Promise(function(resolve, reject) {
-    resolve(getBinary());
-  });
+  return Promise.resolve().then(getBinary);
 }
-
-
 
 // Create the wasm instance.
 // Receives the wasm imports, returns the exports.
@@ -2263,13 +1530,15 @@ function createWasm() {
   /** @param {WebAssembly.Module=} module*/
   function receiveInstance(instance, module) {
     var exports = instance.exports;
-    exports = relocateExports(exports, GLOBAL_BASE, 0);
+
+    exports = relocateExports(exports, 1024);
+
     Module['asm'] = exports;
+
     removeRunDependency('wasm-instantiate');
   }
   // we can't run yet (except in a pthread, where we have a custom sync instantiator)
   addRunDependency('wasm-instantiate');
-
 
   // Async compilation can be confusing when an error on the page overwrites Module
   // (for example, if the order of elements is wrong, and the one defining Module is
@@ -2285,13 +1554,11 @@ function createWasm() {
     receiveInstance(output['instance']);
   }
 
-
   function instantiateArrayBuffer(receiver) {
     return getBinaryPromise().then(function(binary) {
       return WebAssembly.instantiate(binary, info);
     }).then(receiver, function(reason) {
       err('failed to asynchronously prepare wasm: ' + reason);
-
 
       abort(reason);
     });
@@ -2305,7 +1572,7 @@ function createWasm() {
         // Don't use streaming for file:// delivered objects in a webview, fetch them synchronously.
         !isFileURI(wasmBinaryFile) &&
         typeof fetch === 'function') {
-      fetch(wasmBinaryFile, { credentials: 'same-origin' }).then(function (response) {
+      return fetch(wasmBinaryFile, { credentials: 'same-origin' }).then(function (response) {
         var result = WebAssembly.instantiateStreaming(response, info);
         return result.then(receiveInstantiatedSource, function(reason) {
             // We expect the most common failure cause to be a bad MIME type for the binary,
@@ -2336,7 +1603,6 @@ function createWasm() {
   return {}; // no exports yet; we'll fill them in later
 }
 
-
 // Globals used by JS i64 conversions
 var tempDouble;
 var tempI64;
@@ -2350,20 +1616,33 @@ var ASM_CONSTS = {
 
 
 
-// STATICTOP = STATIC_BASE + 228656;
-/* global initializers */  __ATINIT__.push({ func: function() { ___assign_got_enties() } }, { func: function() { ___wasm_call_ctors() } });
-
-
-
-
-/* no memory initializer */
-// {{PRE_LIBRARY}}
 
 
   function abortStackOverflow(allocSize) {
       abort('Stack overflow! Attempted to allocate ' + allocSize + ' bytes on the stack, but stack has only ' + (STACK_MAX - stackSave() + allocSize) + ' bytes available!');
     }
   Module["abortStackOverflow"] = abortStackOverflow;
+
+  function callRuntimeCallbacks(callbacks) {
+      while(callbacks.length > 0) {
+        var callback = callbacks.shift();
+        if (typeof callback == 'function') {
+          callback(Module); // Pass the module as the first argument.
+          continue;
+        }
+        var func = callback.func;
+        if (typeof func === 'number') {
+          if (callback.arg === undefined) {
+            wasmTable.get(func)();
+          } else {
+            wasmTable.get(func)(callback.arg);
+          }
+        } else {
+          func(callback.arg === undefined ? null : callback.arg);
+        }
+      }
+    }
+  Module["callRuntimeCallbacks"] = callRuntimeCallbacks;
 
   function demangle(func) {
       warnOnce('warning: build with  -s DEMANGLE_SUPPORT=1  to link in libcxxabi demangling');
@@ -2382,23 +1661,517 @@ var ASM_CONSTS = {
     }
   Module["demangleAll"] = demangleAll;
 
+  function dynCallLegacy(sig, ptr, args) {
+      assert(('dynCall_' + sig) in Module, 'bad function pointer type - no table for sig \'' + sig + '\'');
+      if (args && args.length) {
+        // j (64-bit integer) must be passed in as two numbers [low 32, high 32].
+        assert(args.length === sig.substring(1).replace(/j/g, '--').length);
+      } else {
+        assert(sig.length == 1);
+      }
+      if (args && args.length) {
+        return Module['dynCall_' + sig].apply(null, [ptr].concat(args));
+      }
+      return Module['dynCall_' + sig].call(null, ptr);
+    }
+  Module["dynCallLegacy"] = dynCallLegacy;
+  function dynCall(sig, ptr, args) {
+      // Without WASM_BIGINT support we cannot directly call function with i64 as
+      // part of thier signature, so we rely the dynCall functions generated by
+      // wasm-emscripten-finalize
+      if (sig.indexOf('j') != -1) {
+        return dynCallLegacy(sig, ptr, args);
+      }
+      assert(wasmTable.get(ptr), 'missing table entry in dynCall: ' + ptr);
+      return wasmTable.get(ptr).apply(null, args)
+    }
+  Module["dynCall"] = dynCall;
+
   function jsStackTrace() {
-      var err = new Error();
-      if (!err.stack) {
+      var error = new Error();
+      if (!error.stack) {
         // IE10+ special cases: It does have callstack info, but it is only populated if an Error object is thrown,
         // so try that as a special-case.
         try {
           throw new Error();
         } catch(e) {
-          err = e;
+          error = e;
         }
-        if (!err.stack) {
+        if (!error.stack) {
           return '(no stack trace available)';
         }
       }
-      return err.stack.toString();
+      return error.stack.toString();
     }
   Module["jsStackTrace"] = jsStackTrace;
+
+  var LDSO={nextHandle:1,loadedLibs:{},loadedLibNames:{}};
+  Module["LDSO"] = LDSO;
+  
+  function createInvokeFunction(sig) {
+      return function() {
+        var sp = stackSave();
+        try {
+          return dynCall(sig, arguments[0], Array.prototype.slice.call(arguments, 1));
+        } catch(e) {
+          stackRestore(sp);
+          if (e !== e+0 && e !== 'longjmp') throw e;
+          _setThrew(1, 0);
+        }
+      }
+    }
+  Module["createInvokeFunction"] = createInvokeFunction;
+  
+  function getMemory(size) {
+      // After the runtime is initialized, we must only use sbrk() normally.
+      if (runtimeInitialized)
+        return _malloc(size);
+      var ret = Module['___heap_base'];
+      var end = (ret + size + 15) & -16;
+      assert(end <= HEAP8.length, 'failure to getMemory - memory growth etc. is not supported there, call malloc/sbrk directly or increase INITIAL_MEMORY');
+      Module['___heap_base'] = end;
+      return ret;
+    }
+  Module["getMemory"] = getMemory;
+  
+  function relocateExports(exports, memoryBase) {
+      var relocated = {};
+  
+      for (var e in exports) {
+        var value = exports[e];
+        if (typeof value === 'object') {
+          // a breaking change in the wasm spec, globals are now objects
+          // https://github.com/WebAssembly/mutable-global/issues/1
+          value = value.value;
+        }
+        if (typeof value === 'number') {
+          value += memoryBase;
+        }
+        relocated[e] = value;
+      }
+      return relocated;
+    }
+  Module["relocateExports"] = relocateExports;
+  
+  function asmjsMangle(x) {
+      var unmangledSymbols = ['setTempRet0','getTempRet0','stackAlloc','stackSave','stackRestore'];
+      return x.indexOf('dynCall_') == 0 || unmangledSymbols.indexOf(x) != -1 ? x : '_' + x;
+    }
+  Module["asmjsMangle"] = asmjsMangle;
+  
+  function resolveGlobalSymbol(sym, legalized) {
+      // In case the function was legalized, look for the original export first.
+      // We always want to return the original wasm function here since this
+      // function is used in the internal linking only.
+      if (!legalized) {
+        var orig = Module['asm']['orig$' + sym];
+        if (orig) {
+          return orig;
+        }
+      }
+  
+      var resolved = Module['asm'][sym];
+      if (!resolved) {
+        if (!legalized) {
+          orig = Module['_orig$' + sym];
+          if (orig) {
+            return orig;
+          }
+       }
+        resolved = Module[asmjsMangle(sym)];
+      }
+  
+      if (!resolved && sym.startsWith('invoke_')) {
+        resolved = createInvokeFunction(sym.split('_')[1]);
+      }
+      return resolved;
+    }
+  Module["resolveGlobalSymbol"] = resolveGlobalSymbol;
+  function loadSideModule(binary, flags) {
+      var int32View = new Uint32Array(new Uint8Array(binary.subarray(0, 24)).buffer);
+      assert(int32View[0] == 0x6d736100, 'need to see wasm magic number'); // \0asm
+      // we should see the dylink section right after the magic number and wasm version
+      assert(binary[8] === 0, 'need the dylink section to be first')
+      var next = 9;
+      function getLEB() {
+        var ret = 0;
+        var mul = 1;
+        while (1) {
+          var byte = binary[next++];
+          ret += ((byte & 0x7f) * mul);
+          mul *= 0x80;
+          if (!(byte & 0x80)) break;
+        }
+        return ret;
+      }
+      var sectionSize = getLEB();
+      assert(binary[next] === 6);                 next++; // size of "dylink" string
+      assert(binary[next] === 'd'.charCodeAt(0)); next++;
+      assert(binary[next] === 'y'.charCodeAt(0)); next++;
+      assert(binary[next] === 'l'.charCodeAt(0)); next++;
+      assert(binary[next] === 'i'.charCodeAt(0)); next++;
+      assert(binary[next] === 'n'.charCodeAt(0)); next++;
+      assert(binary[next] === 'k'.charCodeAt(0)); next++;
+      var memorySize = getLEB();
+      var memoryAlign = getLEB();
+      var tableSize = getLEB();
+      var tableAlign = getLEB();
+  
+      // shared libraries this module needs. We need to load them first, so that
+      // current module could resolve its imports. (see tools/shared.py
+      // WebAssembly.make_shared_library() for "dylink" section extension format)
+      var neededDynlibsCount = getLEB();
+      var neededDynlibs = [];
+      for (var i = 0; i < neededDynlibsCount; ++i) {
+        var nameLen = getLEB();
+        var nameUTF8 = binary.subarray(next, next + nameLen);
+        next += nameLen;
+        var name = UTF8ArrayToString(nameUTF8, 0);
+        neededDynlibs.push(name);
+      }
+  
+      // loadModule loads the wasm module after all its dependencies have been loaded.
+      // can be called both sync/async.
+      function loadModule() {
+        // alignments are powers of 2
+        memoryAlign = Math.pow(2, memoryAlign);
+        tableAlign = Math.pow(2, tableAlign);
+        // finalize alignments and verify them
+        memoryAlign = Math.max(memoryAlign, STACK_ALIGN); // we at least need stack alignment
+        assert(tableAlign === 1, 'invalid tableAlign ' + tableAlign);
+        // prepare memory
+        var memoryBase = alignMemory(getMemory(memorySize + memoryAlign), memoryAlign); // TODO: add to cleanups
+        // prepare env imports
+        var env = asmLibraryArg;
+        // TODO: use only __memory_base and __table_base, need to update asm.js backend
+        var table = wasmTable;
+        var tableBase = table.length;
+        var originalTable = table;
+        table.grow(tableSize);
+        assert(table === originalTable);
+        // zero-initialize memory and table
+        // The static area consists of explicitly initialized data, followed by zero-initialized data.
+        // The latter may need zeroing out if the MAIN_MODULE has already used this memory area before
+        // dlopen'ing the SIDE_MODULE.  Since we don't know the size of the explicitly initialized data
+        // here, we just zero the whole thing, which is suboptimal, but should at least resolve bugs
+        // from uninitialized memory.
+        for (var i = memoryBase; i < memoryBase + memorySize; i++) {
+          HEAP8[i] = 0;
+        }
+        for (var i = tableBase; i < tableBase + tableSize; i++) {
+          table.set(i, null);
+        }
+  
+        // This is the export map that we ultimately return.  We declare it here
+        // so it can be used within resolveSymbol.  We resolve symbols against
+        // this local symbol map in the case there they are not present on the
+        // global Module object.  We need this fallback because:
+        // a) Modules sometime need to import their own symbols
+        // b) Symbols from side modules are not always added to the global namespace.
+        var moduleExports;
+  
+        function resolveSymbol(sym, type, legalized) {
+          var resolved = resolveGlobalSymbol(sym, legalized);
+          if (!resolved && !legalized) {
+            // In case the function was legalized, look for the original export first.
+            resolved = moduleExports['orig$' + sym];
+          }
+          if (!resolved) {
+            resolved = moduleExports[sym];
+          }
+          assert(resolved, 'missing linked ' + type + ' `' + sym + '`. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment');
+          return resolved;
+        }
+  
+        // copy currently exported symbols so the new module can import them
+        for (var x in Module) {
+          if (!(x in env)) {
+            env[x] = Module[x];
+          }
+        }
+  
+        // TODO kill ↓↓↓ (except "symbols local to this module", it will likely be
+        // not needed if we require that if A wants symbols from B it has to link
+        // to B explicitly: similarly to -Wl,--no-undefined)
+        //
+        // wasm dynamic libraries are pure wasm, so they cannot assist in
+        // their own loading. When side module A wants to import something
+        // provided by a side module B that is loaded later, we need to
+        // add a layer of indirection, but worse, we can't even tell what
+        // to add the indirection for, without inspecting what A's imports
+        // are. To do that here, we use a JS proxy (another option would
+        // be to inspect the binary directly).
+        var proxyHandler = {
+          'get': function(obj, prop) {
+            // symbols that should be local to this module
+            switch (prop) {
+              case '__memory_base':
+                return memoryBase;
+              case '__table_base':
+                return tableBase;
+            }
+  
+            if (prop in obj) {
+              return obj[prop]; // already present
+            }
+            if (prop.startsWith('g$')) {
+              // a global. the g$ function returns the global address.
+              var name = prop.substr(2); // without g$ prefix
+              return obj[prop] = function() {
+                return resolveSymbol(name, 'global');
+              };
+            }
+            if (prop.startsWith('fp$')) {
+              // the fp$ function returns the address (table index) of the function
+              var parts = prop.split('$');
+              assert(parts.length == 3)
+              var name = parts[1];
+              var sig = parts[2];
+              var fp = 0;
+              return obj[prop] = function() {
+                if (!fp) {
+                  var f = resolveSymbol(name, 'function');
+                  fp = addFunction(f, sig);
+                }
+                return fp;
+              };
+            }
+            // otherwise this is regular function import - call it indirectly
+            return obj[prop] = function() {
+              return resolveSymbol(prop, 'function', true).apply(null, arguments);
+            };
+          }
+        };
+        var proxy = new Proxy(env, proxyHandler);
+        var info = {
+          global: {
+            'NaN': NaN,
+            'Infinity': Infinity,
+          },
+          'global.Math': Math,
+          env: proxy,
+          wasi_snapshot_preview1: proxy,
+        };
+        var oldTable = [];
+        for (var i = 0; i < tableBase; i++) {
+          oldTable.push(table.get(i));
+        }
+  
+        function postInstantiation(instance) {
+          // the table should be unchanged
+          assert(table === originalTable);
+          assert(table === wasmTable);
+          // the old part of the table should be unchanged
+          for (var i = 0; i < tableBase; i++) {
+            assert(table.get(i) === oldTable[i], 'old table entries must remain the same');
+          }
+          // verify that the new table region was filled in
+          for (var i = 0; i < tableSize; i++) {
+            assert(table.get(tableBase + i) !== undefined, 'table entry was not filled in');
+          }
+          moduleExports = relocateExports(instance.exports, memoryBase);
+          // initialize the module
+          var init = moduleExports['__post_instantiate'];
+          if (init) {
+            if (runtimeInitialized) {
+              init();
+            } else {
+              // we aren't ready to run compiled code yet
+              __ATINIT__.push(init);
+            }
+          }
+          return moduleExports;
+        }
+  
+        if (flags.loadAsync) {
+          return WebAssembly.instantiate(binary, info).then(function(result) {
+            return postInstantiation(result.instance);
+          });
+        }
+  
+        var instance = new WebAssembly.Instance(new WebAssembly.Module(binary), info);
+        return postInstantiation(instance);
+      }
+  
+      // now load needed libraries and the module itself.
+      if (flags.loadAsync) {
+        return Promise.all(neededDynlibs.map(function(dynNeeded) {
+          return loadDynamicLibrary(dynNeeded, flags);
+        })).then(function() {
+          return loadModule();
+        });
+      }
+  
+      neededDynlibs.forEach(function(dynNeeded) {
+        loadDynamicLibrary(dynNeeded, flags);
+      });
+      return loadModule();
+    }
+  Module["loadSideModule"] = loadSideModule;
+  
+  function fetchBinary(url) {
+      return fetch(url, { credentials: 'same-origin' }).then(function(response) {
+        if (!response['ok']) {
+          throw "failed to load binary file at '" + url + "'";
+        }
+        return response['arrayBuffer']();
+      }).then(function(buffer) {
+        return new Uint8Array(buffer);
+      });
+    }
+  Module["fetchBinary"] = fetchBinary;
+  function loadDynamicLibrary(lib, flags) {
+      if (lib == '__main__' && !LDSO.loadedLibNames[lib]) {
+        LDSO.loadedLibs[-1] = {
+          refcount: Infinity,   // = nodelete
+          name:     '__main__',
+          module:   Module['asm'],
+          global:   true
+        };
+        LDSO.loadedLibNames['__main__'] = -1;
+      }
+  
+      // when loadDynamicLibrary did not have flags, libraries were loaded globally & permanently
+      flags = flags || {global: true, nodelete: true}
+  
+      var handle = LDSO.loadedLibNames[lib];
+      var dso;
+      if (handle) {
+        // the library is being loaded or has been loaded already.
+        //
+        // however it could be previously loaded only locally and if we get
+        // load request with global=true we have to make it globally visible now.
+        dso = LDSO.loadedLibs[handle];
+        if (flags.global && !dso.global) {
+          dso.global = true;
+          if (dso.module !== 'loading') {
+            // ^^^ if module is 'loading' - symbols merging will be eventually done by the loader.
+            mergeLibSymbols(dso.module)
+          }
+        }
+        // same for "nodelete"
+        if (flags.nodelete && dso.refcount !== Infinity) {
+          dso.refcount = Infinity;
+        }
+        dso.refcount++
+        return flags.loadAsync ? Promise.resolve(handle) : handle;
+      }
+  
+      // allocate new DSO & handle
+      handle = LDSO.nextHandle++;
+      dso = {
+        refcount: flags.nodelete ? Infinity : 1,
+        name:     lib,
+        module:   'loading',
+        global:   flags.global,
+      };
+      LDSO.loadedLibNames[lib] = handle;
+      LDSO.loadedLibs[handle] = dso;
+  
+      // libData <- libFile
+      function loadLibData(libFile) {
+        // for wasm, we can use fetch for async, but for fs mode we can only imitate it
+        if (flags.fs) {
+          var libData = flags.fs.readFile(libFile, {encoding: 'binary'});
+          if (!(libData instanceof Uint8Array)) {
+            libData = new Uint8Array(lib_data);
+          }
+          return flags.loadAsync ? Promise.resolve(libData) : libData;
+        }
+  
+        if (flags.loadAsync) {
+          return fetchBinary(libFile);
+        }
+        // load the binary synchronously
+        return readBinary(libFile);
+      }
+  
+      // libModule <- lib
+      function getLibModule() {
+        // lookup preloaded cache first
+        if (Module['preloadedWasm'] !== undefined &&
+            Module['preloadedWasm'][lib] !== undefined) {
+          var libModule = Module['preloadedWasm'][lib];
+          return flags.loadAsync ? Promise.resolve(libModule) : libModule;
+        }
+  
+        // module not preloaded - load lib data and create new module from it
+        if (flags.loadAsync) {
+          return loadLibData(lib).then(function(libData) {
+            return loadSideModule(libData, flags);
+          });
+        }
+  
+        return loadSideModule(loadLibData(lib), flags);
+      }
+  
+      // Module.symbols <- libModule.symbols (flags.global handler)
+      function mergeLibSymbols(libModule) {
+        // add symbols into global namespace TODO: weak linking etc.
+        for (var sym in libModule) {
+          if (!libModule.hasOwnProperty(sym)) {
+            continue;
+          }
+  
+          // When RTLD_GLOBAL is enable, the symbols defined by this shared object will be made
+          // available for symbol resolution of subsequently loaded shared objects.
+          //
+          // We should copy the symbols (which include methods and variables) from SIDE_MODULE to MAIN_MODULE.
+  
+          var module_sym = asmjsMangle(sym);
+  
+          if (!Module.hasOwnProperty(module_sym)) {
+            Module[module_sym] = libModule[sym];
+          }
+        }
+      }
+  
+      // module for lib is loaded - update the dso & global namespace
+      function moduleLoaded(libModule) {
+        if (dso.global) {
+          mergeLibSymbols(libModule);
+        }
+        dso.module = libModule;
+      }
+  
+      if (flags.loadAsync) {
+        return getLibModule().then(function(libModule) {
+          moduleLoaded(libModule);
+          return handle;
+        })
+      }
+  
+      moduleLoaded(getLibModule());
+      return handle;
+    }
+  Module["loadDynamicLibrary"] = loadDynamicLibrary;
+  function preloadDylibs() {
+      var libs = [];
+      if (Module['dynamicLibraries']) {
+        libs = libs.concat(Module['dynamicLibraries'])
+      }
+      if (!libs.length) {
+        return;
+      }
+      // if we can load dynamic libraries synchronously, do so, otherwise, preload
+      if (!readBinary) {
+        // we can't read binary data synchronously, so preload
+        addRunDependency('preloadDylibs');
+        Promise.all(libs.map(function(lib) {
+          return loadDynamicLibrary(lib, {loadAsync: true, global: true, nodelete: true});
+        })).then(function() {
+          // we got them all, wonderful
+          removeRunDependency('preloadDylibs');
+        });
+        return;
+      }
+      libs.forEach(function(lib) {
+        // libraries linked to main never go away
+        loadDynamicLibrary(lib, {global: true, nodelete: true});
+      });
+    }
+  Module["preloadDylibs"] = preloadDylibs;
+
 
   function stackTrace() {
       var js = jsStackTrace();
@@ -2437,8 +2210,119 @@ var ASM_CONSTS = {
   return Module['__Unwind_SetIP'].apply(null, arguments);
   }
 
+  function _tzset() {
+      // TODO: Use (malleable) environment variables instead of system settings.
+      if (_tzset.called) return;
+      _tzset.called = true;
   
+      var currentYear = new Date().getFullYear();
+      var winter = new Date(currentYear, 0, 1);
+      var summer = new Date(currentYear, 6, 1);
+      var winterOffset = winter.getTimezoneOffset();
+      var summerOffset = summer.getTimezoneOffset();
   
+      // Local standard timezone offset. Local standard time is not adjusted for daylight savings.
+      // This code uses the fact that getTimezoneOffset returns a greater value during Standard Time versus Daylight Saving Time (DST). 
+      // Thus it determines the expected output during Standard Time, and it compares whether the output of the given date the same (Standard) or less (DST).
+      var stdTimezoneOffset = Math.max(winterOffset, summerOffset);
+  
+      // timezone is specified as seconds west of UTC ("The external variable
+      // `timezone` shall be set to the difference, in seconds, between
+      // Coordinated Universal Time (UTC) and local standard time."), the same
+      // as returned by stdTimezoneOffset.
+      // See http://pubs.opengroup.org/onlinepubs/009695399/functions/tzset.html
+      HEAP32[((__get_timezone())>>2)]=stdTimezoneOffset * 60;
+  
+      HEAP32[((__get_daylight())>>2)]=Number(winterOffset != summerOffset);
+  
+      function extractZone(date) {
+        var match = date.toTimeString().match(/\(([A-Za-z ]+)\)$/);
+        return match ? match[1] : "GMT";
+      };
+      var winterName = extractZone(winter);
+      var summerName = extractZone(summer);
+      var winterNamePtr = allocateUTF8(winterName);
+      var summerNamePtr = allocateUTF8(summerName);
+      if (summerOffset < winterOffset) {
+        // Northern hemisphere
+        HEAP32[((__get_tzname())>>2)]=winterNamePtr;
+        HEAP32[(((__get_tzname())+(4))>>2)]=summerNamePtr;
+      } else {
+        HEAP32[((__get_tzname())>>2)]=summerNamePtr;
+        HEAP32[(((__get_tzname())+(4))>>2)]=winterNamePtr;
+      }
+    }
+  Module["_tzset"] = _tzset;
+  function _mktime(tmPtr) {
+      _tzset();
+      var date = new Date(HEAP32[(((tmPtr)+(20))>>2)] + 1900,
+                          HEAP32[(((tmPtr)+(16))>>2)],
+                          HEAP32[(((tmPtr)+(12))>>2)],
+                          HEAP32[(((tmPtr)+(8))>>2)],
+                          HEAP32[(((tmPtr)+(4))>>2)],
+                          HEAP32[((tmPtr)>>2)],
+                          0);
+  
+      // There's an ambiguous hour when the time goes back; the tm_isdst field is
+      // used to disambiguate it.  Date() basically guesses, so we fix it up if it
+      // guessed wrong, or fill in tm_isdst with the guess if it's -1.
+      var dst = HEAP32[(((tmPtr)+(32))>>2)];
+      var guessedOffset = date.getTimezoneOffset();
+      var start = new Date(date.getFullYear(), 0, 1);
+      var summerOffset = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
+      var winterOffset = start.getTimezoneOffset();
+      var dstOffset = Math.min(winterOffset, summerOffset); // DST is in December in South
+      if (dst < 0) {
+        // Attention: some regions don't have DST at all.
+        HEAP32[(((tmPtr)+(32))>>2)]=Number(summerOffset != winterOffset && dstOffset == guessedOffset);
+      } else if ((dst > 0) != (dstOffset == guessedOffset)) {
+        var nonDstOffset = Math.max(winterOffset, summerOffset);
+        var trueOffset = dst > 0 ? dstOffset : nonDstOffset;
+        // Don't try setMinutes(date.getMinutes() + ...) -- it's messed up.
+        date.setTime(date.getTime() + (trueOffset - guessedOffset)*60000);
+      }
+  
+      HEAP32[(((tmPtr)+(24))>>2)]=date.getDay();
+      var yday = ((date.getTime() - start.getTime()) / (1000 * 60 * 60 * 24))|0;
+      HEAP32[(((tmPtr)+(28))>>2)]=yday;
+  
+      return (date.getTime() / 1000)|0;
+    }
+  Module["_mktime"] = _mktime;
+  function _asctime_r(tmPtr, buf) {
+      var date = {
+        tm_sec: HEAP32[((tmPtr)>>2)],
+        tm_min: HEAP32[(((tmPtr)+(4))>>2)],
+        tm_hour: HEAP32[(((tmPtr)+(8))>>2)],
+        tm_mday: HEAP32[(((tmPtr)+(12))>>2)],
+        tm_mon: HEAP32[(((tmPtr)+(16))>>2)],
+        tm_year: HEAP32[(((tmPtr)+(20))>>2)],
+        tm_wday: HEAP32[(((tmPtr)+(24))>>2)]
+      };
+      var days = [ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" ];
+      var months = [ "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" ];
+      var s = days[date.tm_wday] + ' ' + months[date.tm_mon] +
+          (date.tm_mday < 10 ? '  ' : ' ') + date.tm_mday +
+          (date.tm_hour < 10 ? ' 0' : ' ') + date.tm_hour +
+          (date.tm_min < 10 ? ':0' : ':') + date.tm_min +
+          (date.tm_sec < 10 ? ':0' : ':') + date.tm_sec +
+          ' ' + (1900 + date.tm_year) + "\n";
+  
+      // asctime_r is specced to behave in an undefined manner if the algorithm would attempt
+      // to write out more than 26 bytes (including the null terminator).
+      // See http://pubs.opengroup.org/onlinepubs/9699919799/functions/asctime.html
+      // Our undefined behavior is to truncate the write to at most 26 bytes, including null terminator.
+      stringToUTF8(s, buf, 26);
+      return buf;
+    }
+  Module["_asctime_r"] = _asctime_r;
+  function ___asctime_r(a0,a1
+  ) {
+  return _asctime_r(a0,a1);
+  }
+  Module["___asctime_r"] = ___asctime_r;
+
   var _emscripten_get_now;if (ENVIRONMENT_IS_NODE) {
     _emscripten_get_now = function() {
       var t = process['hrtime']();
@@ -2457,7 +2341,8 @@ var ASM_CONSTS = {
       HEAP32[((___errno_location())>>2)]=value;
       return value;
     }
-  Module["setErrNo"] = setErrNo;function _clock_gettime(clk_id, tp) {
+  Module["setErrNo"] = setErrNo;
+  function _clock_gettime(clk_id, tp) {
       // int clock_gettime(clockid_t clk_id, struct timespec *tp);
       var now;
       if (clk_id === 0) {
@@ -2472,27 +2357,81 @@ var ASM_CONSTS = {
       HEAP32[(((tp)+(4))>>2)]=((now % 1000)*1000*1000)|0; // nanoseconds
       return 0;
     }
-  Module["_clock_gettime"] = _clock_gettime;function ___clock_gettime(a0,a1
+  Module["_clock_gettime"] = _clock_gettime;
+  function ___clock_gettime(a0,a1
   ) {
   return _clock_gettime(a0,a1);
   }
   Module["___clock_gettime"] = ___clock_gettime;
 
-  
   function _atexit(func, arg) {
-      warnOnce('atexit() called, but EXIT_RUNTIME is not set, so atexits() will not be called. set EXIT_RUNTIME to 1 (see the FAQ)');
-  
     }
-  Module["_atexit"] = _atexit;function ___cxa_atexit(a0,a1
+  Module["_atexit"] = _atexit;
+  function ___cxa_atexit(a0,a1
   ) {
   return _atexit(a0,a1);
   }
   Module["___cxa_atexit"] = ___cxa_atexit;
 
-  function ___handle_stack_overflow() {
-      abort('stack overflow')
+  function _gmtime_r(time, tmPtr) {
+      var date = new Date(HEAP32[((time)>>2)]*1000);
+      HEAP32[((tmPtr)>>2)]=date.getUTCSeconds();
+      HEAP32[(((tmPtr)+(4))>>2)]=date.getUTCMinutes();
+      HEAP32[(((tmPtr)+(8))>>2)]=date.getUTCHours();
+      HEAP32[(((tmPtr)+(12))>>2)]=date.getUTCDate();
+      HEAP32[(((tmPtr)+(16))>>2)]=date.getUTCMonth();
+      HEAP32[(((tmPtr)+(20))>>2)]=date.getUTCFullYear()-1900;
+      HEAP32[(((tmPtr)+(24))>>2)]=date.getUTCDay();
+      HEAP32[(((tmPtr)+(36))>>2)]=0;
+      HEAP32[(((tmPtr)+(32))>>2)]=0;
+      var start = Date.UTC(date.getUTCFullYear(), 0, 1, 0, 0, 0, 0);
+      var yday = ((date.getTime() - start) / (1000 * 60 * 60 * 24))|0;
+      HEAP32[(((tmPtr)+(28))>>2)]=yday;
+      // Allocate a string "GMT" for us to point to.
+      if (!_gmtime_r.GMTString) _gmtime_r.GMTString = allocateUTF8("GMT");
+      HEAP32[(((tmPtr)+(40))>>2)]=_gmtime_r.GMTString;
+      return tmPtr;
     }
-  Module["___handle_stack_overflow"] = ___handle_stack_overflow;
+  Module["_gmtime_r"] = _gmtime_r;
+  function ___gmtime_r(a0,a1
+  ) {
+  return _gmtime_r(a0,a1);
+  }
+  Module["___gmtime_r"] = ___gmtime_r;
+
+  function _localtime_r(time, tmPtr) {
+      _tzset();
+      var date = new Date(HEAP32[((time)>>2)]*1000);
+      HEAP32[((tmPtr)>>2)]=date.getSeconds();
+      HEAP32[(((tmPtr)+(4))>>2)]=date.getMinutes();
+      HEAP32[(((tmPtr)+(8))>>2)]=date.getHours();
+      HEAP32[(((tmPtr)+(12))>>2)]=date.getDate();
+      HEAP32[(((tmPtr)+(16))>>2)]=date.getMonth();
+      HEAP32[(((tmPtr)+(20))>>2)]=date.getFullYear()-1900;
+      HEAP32[(((tmPtr)+(24))>>2)]=date.getDay();
+  
+      var start = new Date(date.getFullYear(), 0, 1);
+      var yday = ((date.getTime() - start.getTime()) / (1000 * 60 * 60 * 24))|0;
+      HEAP32[(((tmPtr)+(28))>>2)]=yday;
+      HEAP32[(((tmPtr)+(36))>>2)]=-(date.getTimezoneOffset() * 60);
+  
+      // Attention: DST is in December in South, and some regions don't have DST at all.
+      var summerOffset = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
+      var winterOffset = start.getTimezoneOffset();
+      var dst = (summerOffset != winterOffset && date.getTimezoneOffset() == Math.min(winterOffset, summerOffset))|0;
+      HEAP32[(((tmPtr)+(32))>>2)]=dst;
+  
+      var zonePtr = HEAP32[(((__get_tzname())+(dst ? 4 : 0))>>2)];
+      HEAP32[(((tmPtr)+(40))>>2)]=zonePtr;
+  
+      return tmPtr;
+    }
+  Module["_localtime_r"] = _localtime_r;
+  function ___localtime_r(a0,a1
+  ) {
+  return _localtime_r(a0,a1);
+  }
+  Module["___localtime_r"] = ___localtime_r;
 
   function ___map_file(pathname, size) {
       setErrNo(63);
@@ -2506,8 +2445,6 @@ var ASM_CONSTS = {
   return Module['___posix_spawnx'].apply(null, arguments);
   }
 
-  
-  
   var PATH={splitPath:function(filename) {
         var splitPathRe = /^(\/?|)([\s\S]*?)((?:\.{1,2}|[^\/]+?|)(\.[^.\/]*|))(?:[\/]*)$/;
         return splitPathRe.exec(filename).slice(1);
@@ -2563,6 +2500,8 @@ var ASM_CONSTS = {
       },basename:function(path) {
         // EMSCRIPTEN return '/'' for '/', not an empty string
         if (path === '/') return '/';
+        path = PATH.normalize(path);
+        path = path.replace(/\/$/, "");
         var lastSlash = path.lastIndexOf('/');
         if (lastSlash === -1) return path;
         return path.substr(lastSlash+1);
@@ -2576,6 +2515,26 @@ var ASM_CONSTS = {
       }};
   Module["PATH"] = PATH;
   
+  function getRandomDevice() {
+      if (typeof crypto === 'object' && typeof crypto['getRandomValues'] === 'function') {
+        // for modern web browsers
+        var randomBuffer = new Uint8Array(1);
+        return function() { crypto.getRandomValues(randomBuffer); return randomBuffer[0]; };
+      } else
+      if (ENVIRONMENT_IS_NODE) {
+        // for nodejs with or without crypto support included
+        try {
+          var crypto_module = require('crypto');
+          // nodejs has crypto support
+          return function() { return crypto_module['randomBytes'](1)[0]; };
+        } catch (e) {
+          // nodejs doesn't have crypto support
+        }
+      }
+      // we couldn't find a proper implementation, as Math.random() is not suitable for /dev/random, see emscripten-core/emscripten/pull/7096
+      return function() { abort("no cryptographic support found for randomDevice. consider polyfilling it if you want to use something insecure like Math.random(), e.g. put this in a --pre-js: var crypto = { getRandomValues: function(array) { for (var i = 0; i < array.length; i++) array[i] = (Math.random()*256)|0 } };"); };
+    }
+  Module["getRandomDevice"] = getRandomDevice;
   
   var PATH_FS={resolve:function() {
         var resolvedPath = '',
@@ -2774,6 +2733,13 @@ var ASM_CONSTS = {
         }}};
   Module["TTY"] = TTY;
   
+  function mmapAlloc(size) {
+      var alignedSize = alignMemory(size, 16384);
+      var ptr = _malloc(alignedSize);
+      while (size < alignedSize) HEAP8[ptr + size++] = 0;
+      return ptr;
+    }
+  Module["mmapAlloc"] = mmapAlloc;
   var MEMFS={ops_table:null,mount:function(mount) {
         return MEMFS.createNode(null, '/', 16384 | 511 /* 0777 */, 0);
       },createNode:function(parent, name, mode, dev) {
@@ -3076,7 +3042,7 @@ var ASM_CONSTS = {
               }
             }
             allocated = true;
-            ptr = FS.mmapAlloc(length);
+            ptr = mmapAlloc(length);
             if (!ptr) {
               throw new FS.ErrnoError(48);
             }
@@ -3102,7 +3068,8 @@ var ASM_CONSTS = {
   Module["ERRNO_MESSAGES"] = ERRNO_MESSAGES;
   
   var ERRNO_CODES={EPERM:63,ENOENT:44,ESRCH:71,EINTR:27,EIO:29,ENXIO:60,E2BIG:1,ENOEXEC:45,EBADF:8,ECHILD:12,EAGAIN:6,EWOULDBLOCK:6,ENOMEM:48,EACCES:2,EFAULT:21,ENOTBLK:105,EBUSY:10,EEXIST:20,EXDEV:75,ENODEV:43,ENOTDIR:54,EISDIR:31,EINVAL:28,ENFILE:41,EMFILE:33,ENOTTY:59,ETXTBSY:74,EFBIG:22,ENOSPC:51,ESPIPE:70,EROFS:69,EMLINK:34,EPIPE:64,EDOM:18,ERANGE:68,ENOMSG:49,EIDRM:24,ECHRNG:106,EL2NSYNC:156,EL3HLT:107,EL3RST:108,ELNRNG:109,EUNATCH:110,ENOCSI:111,EL2HLT:112,EDEADLK:16,ENOLCK:46,EBADE:113,EBADR:114,EXFULL:115,ENOANO:104,EBADRQC:103,EBADSLT:102,EDEADLOCK:16,EBFONT:101,ENOSTR:100,ENODATA:116,ETIME:117,ENOSR:118,ENONET:119,ENOPKG:120,EREMOTE:121,ENOLINK:47,EADV:122,ESRMNT:123,ECOMM:124,EPROTO:65,EMULTIHOP:36,EDOTDOT:125,EBADMSG:9,ENOTUNIQ:126,EBADFD:127,EREMCHG:128,ELIBACC:129,ELIBBAD:130,ELIBSCN:131,ELIBMAX:132,ELIBEXEC:133,ENOSYS:52,ENOTEMPTY:55,ENAMETOOLONG:37,ELOOP:32,EOPNOTSUPP:138,EPFNOSUPPORT:139,ECONNRESET:15,ENOBUFS:42,EAFNOSUPPORT:5,EPROTOTYPE:67,ENOTSOCK:57,ENOPROTOOPT:50,ESHUTDOWN:140,ECONNREFUSED:14,EADDRINUSE:3,ECONNABORTED:13,ENETUNREACH:40,ENETDOWN:38,ETIMEDOUT:73,EHOSTDOWN:142,EHOSTUNREACH:23,EINPROGRESS:26,EALREADY:7,EDESTADDRREQ:17,EMSGSIZE:35,EPROTONOSUPPORT:66,ESOCKTNOSUPPORT:137,EADDRNOTAVAIL:4,ENETRESET:39,EISCONN:30,ENOTCONN:53,ETOOMANYREFS:141,EUSERS:136,EDQUOT:19,ESTALE:72,ENOTSUP:138,ENOMEDIUM:148,EILSEQ:25,EOVERFLOW:61,ECANCELED:11,ENOTRECOVERABLE:56,EOWNERDEAD:62,ESTRPIPE:135};
-  Module["ERRNO_CODES"] = ERRNO_CODES;var FS={root:null,mounts:[],devices:{},streams:[],nextInode:1,nameTable:null,currentPath:"/",initialized:false,ignorePermissions:true,trackingDelegate:{},tracking:{openFlags:{READ:1,WRITE:2}},ErrnoError:null,genericErrors:{},filesystems:null,syncFSRequests:0,handleFSError:function(e) {
+  Module["ERRNO_CODES"] = ERRNO_CODES;
+  var FS={root:null,mounts:[],devices:{},streams:[],nextInode:1,nameTable:null,currentPath:"/",initialized:false,ignorePermissions:true,trackingDelegate:{},tracking:{openFlags:{READ:1,WRITE:2}},ErrnoError:null,genericErrors:{},filesystems:null,syncFSRequests:0,handleFSError:function(e) {
         if (!(e instanceof FS.ErrnoError)) throw e + ' : ' + stackTrace();
         return setErrNo(e.errno);
       },lookupPath:function(path, opts) {
@@ -3183,7 +3150,6 @@ var ASM_CONSTS = {
         }
       },hashName:function(parentid, name) {
         var hash = 0;
-  
   
         for (var i = 0; i < name.length; i++) {
           hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
@@ -3593,14 +3559,13 @@ var ASM_CONSTS = {
         var new_name = PATH.basename(new_path);
         // parents must exist
         var lookup, old_dir, new_dir;
-        try {
-          lookup = FS.lookupPath(old_path, { parent: true });
-          old_dir = lookup.node;
-          lookup = FS.lookupPath(new_path, { parent: true });
-          new_dir = lookup.node;
-        } catch (e) {
-          throw new FS.ErrnoError(10);
-        }
+  
+        // let the errors from non existant directories percolate up
+        lookup = FS.lookupPath(old_path, { parent: true });
+        old_dir = lookup.node;
+        lookup = FS.lookupPath(new_path, { parent: true });
+        new_dir = lookup.node;
+  
         if (!old_dir || !new_dir) throw new FS.ErrnoError(44);
         // need to be part of the same mount
         if (old_dir.mount !== new_dir.mount) {
@@ -4170,27 +4135,7 @@ var ASM_CONSTS = {
         FS.mkdev('/dev/tty', FS.makedev(5, 0));
         FS.mkdev('/dev/tty1', FS.makedev(6, 0));
         // setup /dev/[u]random
-        var random_device;
-        if (typeof crypto === 'object' && typeof crypto['getRandomValues'] === 'function') {
-          // for modern web browsers
-          var randomBuffer = new Uint8Array(1);
-          random_device = function() { crypto.getRandomValues(randomBuffer); return randomBuffer[0]; };
-        } else
-        if (ENVIRONMENT_IS_NODE) {
-          // for nodejs with or without crypto support included
-          try {
-            var crypto_module = require('crypto');
-            // nodejs has crypto support
-            random_device = function() { return crypto_module['randomBytes'](1)[0]; };
-          } catch (e) {
-            // nodejs doesn't have crypto support
-          }
-        } else
-        {}
-        if (!random_device) {
-          // we couldn't find a proper implementation, as Math.random() is not suitable for /dev/random, see emscripten-core/emscripten/pull/7096
-          random_device = function() { abort("no cryptographic support found for random_device. consider polyfilling it if you want to use something insecure like Math.random(), e.g. put this in a --pre-js: var crypto = { getRandomValues: function(array) { for (var i = 0; i < array.length; i++) array[i] = (Math.random()*256)|0 } };"); };
-        }
+        var random_device = getRandomDevice();
         FS.createDevice('/dev', 'random', random_device);
         FS.createDevice('/dev', 'urandom', random_device);
         // we're not going to emulate the actual shm device,
@@ -4329,14 +4274,6 @@ var ASM_CONSTS = {
         if (canRead) mode |= 292 | 73;
         if (canWrite) mode |= 146;
         return mode;
-      },joinPath:function(parts, forceRelative) {
-        var path = PATH.join.apply(null, parts);
-        if (forceRelative && path[0] == '/') path = path.substr(1);
-        return path;
-      },absolutePath:function(relative, base) {
-        return PATH_FS.resolve(base, relative);
-      },standardizePath:function(path) {
-        return PATH.normalize(path);
       },findObject:function(path, dontResolveLastLink) {
         var ret = FS.analyzePath(path, dontResolveLastLink);
         if (ret.exists) {
@@ -4372,10 +4309,6 @@ var ASM_CONSTS = {
           ret.error = e.errno;
         };
         return ret;
-      },createFolder:function(parent, name, canRead, canWrite) {
-        var path = PATH.join2(typeof parent === 'string' ? parent : FS.getPath(parent), name);
-        var mode = FS.getMode(canRead, canWrite);
-        return FS.mkdir(path, mode);
       },createPath:function(parent, path, canRead, canWrite) {
         parent = typeof parent === 'string' ? parent : FS.getPath(parent);
         var parts = path.split('/').reverse();
@@ -4466,9 +4399,6 @@ var ASM_CONSTS = {
           }
         });
         return FS.mkdev(path, mode, dev);
-      },createLink:function(parent, name, target, canRead, canWrite) {
-        var path = PATH.join2(typeof parent === 'string' ? parent : FS.getPath(parent), name);
-        return FS.symlink(target, path);
       },forceLoadFile:function(obj) {
         if (obj.isDevice || obj.isFolder || obj.link || obj.contents) return true;
         var success = true;
@@ -4756,13 +4686,21 @@ var ASM_CONSTS = {
           transaction.onerror = onerror;
         };
         openRequest.onerror = onerror;
-      },mmapAlloc:function(size) {
-        var alignedSize = alignMemory(size, 16384);
-        var ptr = _malloc(alignedSize);
-        while (size < alignedSize) HEAP8[ptr + size++] = 0;
-        return ptr;
+      },absolutePath:function() {
+        abort('FS.absolutePath has been removed; use PATH_FS.resolve instead');
+      },createFolder:function() {
+        abort('FS.createFolder has been removed; use FS.mkdir instead');
+      },createLink:function() {
+        abort('FS.createLink has been removed; use FS.symlink instead');
+      },joinPath:function() {
+        abort('FS.joinPath has been removed; use PATH.join instead');
+      },mmapAlloc:function() {
+        abort('FS.mmapAlloc has been replaced by the top level function mmapAlloc');
+      },standardizePath:function() {
+        abort('FS.standardizePath has been removed; use PATH.normalize instead');
       }};
-  Module["FS"] = FS;var SYSCALLS={mappings:{},DEFAULT_POLLMASK:5,umask:511,calculateAt:function(dirfd, path) {
+  Module["FS"] = FS;
+  var SYSCALLS={mappings:{},DEFAULT_POLLMASK:5,umask:511,calculateAt:function(dirfd, path) {
         if (path[0] !== '/') {
           // relative path
           var dir;
@@ -4795,7 +4733,7 @@ var ASM_CONSTS = {
         HEAP32[(((buf)+(24))>>2)]=stat.gid;
         HEAP32[(((buf)+(28))>>2)]=stat.rdev;
         HEAP32[(((buf)+(32))>>2)]=0;
-        (tempI64 = [stat.size>>>0,(tempDouble=stat.size,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((buf)+(40))>>2)]=tempI64[0],HEAP32[(((buf)+(44))>>2)]=tempI64[1]);
+        (tempI64 = [stat.size>>>0,(tempDouble=stat.size,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((buf)+(40))>>2)]=tempI64[0],HEAP32[(((buf)+(44))>>2)]=tempI64[1]);
         HEAP32[(((buf)+(48))>>2)]=4096;
         HEAP32[(((buf)+(52))>>2)]=stat.blocks;
         HEAP32[(((buf)+(56))>>2)]=(stat.atime.getTime() / 1000)|0;
@@ -4804,7 +4742,7 @@ var ASM_CONSTS = {
         HEAP32[(((buf)+(68))>>2)]=0;
         HEAP32[(((buf)+(72))>>2)]=(stat.ctime.getTime() / 1000)|0;
         HEAP32[(((buf)+(76))>>2)]=0;
-        (tempI64 = [stat.ino>>>0,(tempDouble=stat.ino,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((buf)+(80))>>2)]=tempI64[0],HEAP32[(((buf)+(84))>>2)]=tempI64[1]);
+        (tempI64 = [stat.ino>>>0,(tempDouble=stat.ino,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((buf)+(80))>>2)]=tempI64[0],HEAP32[(((buf)+(84))>>2)]=tempI64[1]);
         return 0;
       },doMsync:function(addr, stream, len, flags, offset) {
         var buffer = HEAPU8.slice(addr, addr + len);
@@ -4902,7 +4840,8 @@ var ASM_CONSTS = {
         else assert(high === -1);
         return low;
       }};
-  Module["SYSCALLS"] = SYSCALLS;function ___sys__newselect(nfds, readfds, writefds, exceptfds, timeout) {try {
+  Module["SYSCALLS"] = SYSCALLS;
+  function ___sys__newselect(nfds, readfds, writefds, exceptfds, timeout) {try {
   
       // readfds are supported,
       // writefds checks socket open status
@@ -5083,8 +5022,6 @@ var ASM_CONSTS = {
 
   function ___sys_fallocate(fd, mode, off_low, off_high, len_low, len_high) {try {
   
-      
-      
       var stream = SYSCALLS.getStreamFromFD(fd)
       var offset = SYSCALLS.get64(off_low, off_high);
       var len = SYSCALLS.get64(len_low, len_high);
@@ -5322,8 +5259,8 @@ var ASM_CONSTS = {
                  FS.isLink(child.mode) ? 10 :   // DT_LNK, symbolic link.
                  8;                             // DT_REG, regular file.
         }
-        (tempI64 = [id>>>0,(tempDouble=id,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[((dirp + pos)>>2)]=tempI64[0],HEAP32[(((dirp + pos)+(4))>>2)]=tempI64[1]);
-        (tempI64 = [(idx + 1) * struct_size>>>0,(tempDouble=(idx + 1) * struct_size,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((dirp + pos)+(8))>>2)]=tempI64[0],HEAP32[(((dirp + pos)+(12))>>2)]=tempI64[1]);
+        (tempI64 = [id>>>0,(tempDouble=id,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[((dirp + pos)>>2)]=tempI64[0],HEAP32[(((dirp + pos)+(4))>>2)]=tempI64[1]);
+        (tempI64 = [(idx + 1) * struct_size>>>0,(tempDouble=(idx + 1) * struct_size,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((dirp + pos)+(8))>>2)]=tempI64[0],HEAP32[(((dirp + pos)+(12))>>2)]=tempI64[1]);
         HEAP16[(((dirp + pos)+(16))>>1)]=280;
         HEAP8[(((dirp + pos)+(18))>>0)]=type;
         stringToUTF8(name, dirp + pos + 19, 256);
@@ -5579,7 +5516,6 @@ var ASM_CONSTS = {
     }
   Module["___sys_mlockall"] = ___sys_mlockall;
 
-  
   function syscallMmap2(addr, len, prot, flags, fd, off) {
       off <<= 12; // undo pgoffset
       var ptr;
@@ -5608,7 +5544,8 @@ var ASM_CONSTS = {
       SYSCALLS.mappings[ptr] = { malloc: ptr, len: len, allocated: allocated, fd: fd, prot: prot, flags: flags, offset: off };
       return ptr;
     }
-  Module["syscallMmap2"] = syscallMmap2;function ___sys_mmap2(addr, len, prot, flags, fd, off) {try {
+  Module["syscallMmap2"] = syscallMmap2;
+  function ___sys_mmap2(addr, len, prot, flags, fd, off) {try {
   
       return syscallMmap2(addr, len, prot, flags, fd, off);
     } catch (e) {
@@ -5651,7 +5588,6 @@ var ASM_CONSTS = {
     }
   Module["___sys_munlockall"] = ___sys_munlockall;
 
-  
   function syscallMunmap(addr, len) {
       if ((addr | 0) === -1 || len === 0) {
         return -28;
@@ -5672,7 +5608,8 @@ var ASM_CONSTS = {
       }
       return 0;
     }
-  Module["syscallMunmap"] = syscallMunmap;function ___sys_munmap(addr, len) {try {
+  Module["syscallMunmap"] = syscallMunmap;
+  function ___sys_munmap(addr, len) {try {
   
       return syscallMunmap(addr, len);
     } catch (e) {
@@ -5720,7 +5657,6 @@ var ASM_CONSTS = {
     }
   Module["___sys_pause"] = ___sys_pause;
 
-  
   var PIPEFS={BUCKET_BUFFER_SIZE:8192,mount:function (mount) {
         // Do not pollute the real root directory or its child nodes with pipes
         // Looks like it is OK to create another pseudo-root node not linked to the FS.root hierarchy this way
@@ -5916,7 +5852,8 @@ var ASM_CONSTS = {
         }
         return 'pipe[' + (PIPEFS.nextname.current++) + ']';
       }};
-  Module["PIPEFS"] = PIPEFS;function ___sys_pipe(fdPtr) {try {
+  Module["PIPEFS"] = PIPEFS;
+  function ___sys_pipe(fdPtr) {try {
   
       if (fdPtr == 0) {
         throw new FS.ErrnoError(21);
@@ -6146,7 +6083,6 @@ var ASM_CONSTS = {
     }
   Module["___sys_setsid"] = ___sys_setsid;
 
-  
   var SOCKFS={mount:function(mount) {
         // If Module['websocket'] has already been defined (e.g. for configuring
         // the subprotocol/url) use that, if not initialise it to a new object.
@@ -6334,7 +6270,6 @@ var ASM_CONSTS = {
             }
           }
   
-  
           var peer = {
             addr: addr,
             port: port,
@@ -6398,7 +6333,6 @@ var ASM_CONSTS = {
                 data = new Uint8Array(data); // make a typed array view on the array buffer
               }
             }
-  
   
             // if this is the port message, override the peer's port with it
             var wasfirst = first;
@@ -6745,7 +6679,6 @@ var ASM_CONSTS = {
             port: queued.port
           };
   
-  
           // push back any unread data for TCP connections
           if (sock.type === 1 && bytesRead < queuedLength) {
             var bytesRemaining = queuedLength - bytesRead;
@@ -6756,7 +6689,6 @@ var ASM_CONSTS = {
           return res;
         }}};
   Module["SOCKFS"] = SOCKFS;
-  
   
   function __inet_pton4_raw(str) {
       var b = str.split('.');
@@ -6769,12 +6701,12 @@ var ASM_CONSTS = {
     }
   Module["__inet_pton4_raw"] = __inet_pton4_raw;
   
-  
   /** @suppress {checkTypes} */
   function jstoi_q(str) {
       return parseInt(str);
     }
-  Module["jstoi_q"] = jstoi_q;function __inet_pton6_raw(str) {
+  Module["jstoi_q"] = jstoi_q;
+  function __inet_pton6_raw(str) {
       var words;
       var w, offset, z, i;
       /* http://home.deds.nl/~aeron/regex/ */
@@ -6829,7 +6761,8 @@ var ASM_CONSTS = {
         (parts[7] << 16) | parts[6]
       ];
     }
-  Module["__inet_pton6_raw"] = __inet_pton6_raw;var DNS={address_map:{id:1,addrs:{},names:{}},lookup_name:function (name) {
+  Module["__inet_pton6_raw"] = __inet_pton6_raw;
+  var DNS={address_map:{id:1,addrs:{},names:{}},lookup_name:function (name) {
         // If the name is already a valid ipv4 / ipv6 address, don't generate a fake one.
         var res = __inet_pton4_raw(name);
         if (res !== null) {
@@ -6864,7 +6797,6 @@ var ASM_CONSTS = {
         return null;
       }};
   Module["DNS"] = DNS;
-  
   
   var Sockets={BUFFER_SIZE:10240,MAX_BUFFER_SIZE:10485760,nextFd:1,fds:{},nextport:1,maxport:65535,peer:null,connections:{},portmap:{},localAddr:4261412874,addrPool:[33554442,50331658,67108874,83886090,100663306,117440522,134217738,150994954,167772170,184549386,201326602,218103818,234881034]};
   Module["Sockets"] = Sockets;
@@ -6970,7 +6902,8 @@ var ASM_CONSTS = {
       }
       return str;
     }
-  Module["__inet_ntop6_raw"] = __inet_ntop6_raw;function __read_sockaddr(sa, salen) {
+  Module["__inet_ntop6_raw"] = __inet_ntop6_raw;
+  function __read_sockaddr(sa, salen) {
       // family / port offsets are common to both sockaddr_in and sockaddr_in6
       var family = HEAP16[((sa)>>1)];
       var port = _ntohs(HEAPU16[(((sa)+(2))>>1)]);
@@ -7029,7 +6962,8 @@ var ASM_CONSTS = {
       // kind of lame, but let's match _read_sockaddr's interface
       return {};
     }
-  Module["__write_sockaddr"] = __write_sockaddr;function ___sys_socketcall(call, socketvararg) {try {
+  Module["__write_sockaddr"] = __write_sockaddr;
+  function ___sys_socketcall(call, socketvararg) {try {
   
       // socketcalls pass the rest of the arguments in a struct
       SYSCALLS.varargs = socketvararg;
@@ -7420,13 +7354,13 @@ var ASM_CONSTS = {
   function ___wait() {}
   Module["___wait"] = ___wait;
 
-  
   function _exit(status) {
       // void _exit(int status);
       // http://pubs.opengroup.org/onlinepubs/000095399/functions/exit.html
       exit(status);
     }
-  Module["_exit"] = _exit;function __exit(a0
+  Module["_exit"] = _exit;
+  function __exit(a0
   ) {
   return _exit(a0);
   }
@@ -7438,37 +7372,33 @@ var ASM_CONSTS = {
   Module["_abort"] = _abort;
 
 
-  
   var DLFCN={error:null,errorMsg:null};
-  Module["DLFCN"] = DLFCN;function _dlclose(handle) {
+  Module["DLFCN"] = DLFCN;
+  function _dlclose(handle) {
       // int dlclose(void *handle);
       // http://pubs.opengroup.org/onlinepubs/009695399/functions/dlclose.html
-      if (!LDSO.loadedLibs[handle]) {
+      var lib = LDSO.loadedLibs[handle];
+      if (!lib) {
         DLFCN.errorMsg = 'Tried to dlclose() unopened handle: ' + handle;
         return 1;
-      } else {
-        var lib_record = LDSO.loadedLibs[handle];
-        if (--lib_record.refcount == 0) {
-          if (lib_record.module.cleanups) {
-            lib_record.module.cleanups.forEach(function(cleanup) { cleanup() });
-          }
-          delete LDSO.loadedLibNames[lib_record.name];
-          delete LDSO.loadedLibs[handle];
-        }
-        return 0;
       }
+      if (--lib.refcount == 0) {
+        delete LDSO.loadedLibNames[lib.name];
+        delete LDSO.loadedLibs[handle];
+      }
+      return 0;
     }
   Module["_dlclose"] = _dlclose;
 
-  
   var ENV={};
-  Module["ENV"] = ENV;function _dlopen(filenameAddr, flag) {
+  Module["ENV"] = ENV;
+  function _dlopen(filenameAddr, flag) {
       // void *dlopen(const char *file, int mode);
       // http://pubs.opengroup.org/onlinepubs/009695399/functions/dlopen.html
       var searchpaths = [];
       var filename;
       if (filenameAddr === 0) {
-        filename = '__self__';
+        filename = '__main__';
       } else {
         filename = UTF8ToString(filenameAddr);
   
@@ -7494,21 +7424,19 @@ var ASM_CONSTS = {
   
       // We don't care about RTLD_NOW and RTLD_LAZY.
       var flags = {
-        global:   Boolean(flag & 256),  // RTLD_GLOBAL
-        nodelete: Boolean(flag & 4096), // RTLD_NODELETE
+        global:   Boolean(flag & 256),
+        nodelete: Boolean(flag & 4096),
   
         fs: FS, // load libraries from provided filesystem
       }
   
       try {
-        var handle = loadDynamicLibrary(filename, flags)
+        return loadDynamicLibrary(filename, flags)
       } catch (e) {
         err('Error in loading dynamic library ' + filename + ": " + e);
         DLFCN.errorMsg = 'Could not load dynamic lib: ' + filename + '\n' + e;
         return 0;
       }
-  
-      return handle;
     }
   Module["_dlopen"] = _dlopen;
 
@@ -7516,39 +7444,32 @@ var ASM_CONSTS = {
       // void *dlsym(void *restrict handle, const char *restrict name);
       // http://pubs.opengroup.org/onlinepubs/009695399/functions/dlsym.html
       symbol = UTF8ToString(symbol);
+      var result;
   
-      if (!LDSO.loadedLibs[handle]) {
-        DLFCN.errorMsg = 'Tried to dlsym() from an unopened handle: ' + handle;
-        return 0;
-      }
-  
-      var lib = LDSO.loadedLibs[handle];
-      var isMainModule = lib.module == Module;
-  
-      var mangled = '_' + symbol;
-      var modSymbol = mangled;
-      if (!isMainModule) {
-        modSymbol = symbol;
-      }
-  
-      if (!lib.module.hasOwnProperty(modSymbol)) {
-        DLFCN.errorMsg = ('Tried to lookup unknown symbol "' + modSymbol +
-                               '" in dynamic lib: ' + lib.name);
-        return 0;
-      }
-  
-      var result = lib.module[modSymbol];
-      // Attempt to get the real "unwrapped" symbol so we have more chance of
-      // getting wasm function which can be added to a table.
-      if (isMainModule) {
-        var asmSymbol = symbol;
-        if (lib.module["asm"][asmSymbol]) {
-          result = lib.module["asm"][asmSymbol];
+      if (handle == 0) {
+        result = resolveGlobalSymbol(symbol)
+        if (!result) {
+          DLFCN.errorMsg = 'Tried to lookup unknown symbol "' + symbol + '" in dynamic lib: RTLD_DEFAULT'
+          return 0;
         }
+      } else {
+        var lib = LDSO.loadedLibs[handle];
+        if (!lib) {
+          DLFCN.errorMsg = 'Tried to dlsym() from an unopened handle: ' + handle;
+          return 0;
+        }
+        if (!lib.module.hasOwnProperty(symbol)) {
+          DLFCN.errorMsg = 'Tried to lookup unknown symbol "' + symbol + '" in dynamic lib: ' + lib.name;
+          return 0;
+        }
+        result = lib.module['orig$' + symbol];
+        if (!result)
+        result = lib.module[symbol];
       }
-      if (typeof result !== 'function')
-        return result;
   
+      if (typeof result !== 'function') {
+        return result;
+      }
   
       // Insert the function into the wasm table.  Since we know the function
       // comes directly from the loaded wasm module we can insert it directly
@@ -7557,9 +7478,6 @@ var ASM_CONSTS = {
     }
   Module["_dlsym"] = _dlsym;
 
-  
-  
-  
   function _emscripten_set_main_loop_timing(mode, value) {
       Browser.mainLoop.timingMode = mode;
       Browser.mainLoop.timingValue = value;
@@ -7610,25 +7528,14 @@ var ASM_CONSTS = {
       }
       return 0;
     }
-  Module["_emscripten_set_main_loop_timing"] = _emscripten_set_main_loop_timing;/** @param {number|boolean=} noSetTiming */
-  function _emscripten_set_main_loop(func, fps, simulateInfiniteLoop, arg, noSetTiming) {
+  Module["_emscripten_set_main_loop_timing"] = _emscripten_set_main_loop_timing;
+  function setMainLoop(browserIterationFunc, fps, simulateInfiniteLoop, arg, noSetTiming) {
       noExitRuntime = true;
   
       assert(!Browser.mainLoop.func, 'emscripten_set_main_loop: there can only be one main loop function at once: call emscripten_cancel_main_loop to cancel the previous one before setting a new one with different parameters.');
   
-      Browser.mainLoop.func = func;
+      Browser.mainLoop.func = browserIterationFunc;
       Browser.mainLoop.arg = arg;
-  
-      var browserIterationFunc;
-      if (typeof arg !== 'undefined') {
-        browserIterationFunc = function() {
-          Module['dynCall_vi'](func, arg);
-        };
-      } else {
-        browserIterationFunc = function() {
-          Module['dynCall_v'](func);
-        };
-      }
   
       var thisMainLoopId = Browser.mainLoop.currentlyRunningMainloop;
   
@@ -7675,8 +7582,6 @@ var ASM_CONSTS = {
         // Signal GL rendering layer that processing of a new frame is about to start. This helps it optimize
         // VBO double-buffering and reduce GPU stalls.
   
-  
-  
         if (Browser.mainLoop.method === 'timeout' && Module.ctx) {
           warnOnce('Looks like you are rendering without using requestAnimationFrame for the main loop. You should use 0 for the frame rate in emscripten_set_main_loop in order to use requestAnimationFrame, as that can greatly improve your frame rates!');
           Browser.mainLoop.method = ''; // just warn once per call to set main loop
@@ -7709,7 +7614,8 @@ var ASM_CONSTS = {
         throw 'unwind';
       }
     }
-  Module["_emscripten_set_main_loop"] = _emscripten_set_main_loop;var Browser={mainLoop:{scheduler:null,method:"",currentlyRunningMainloop:0,func:null,arg:0,timingMode:0,timingValue:0,currentFrameNumber:0,queue:[],pause:function() {
+  Module["setMainLoop"] = setMainLoop;
+  var Browser={mainLoop:{scheduler:null,method:"",currentlyRunningMainloop:0,func:null,arg:0,timingMode:0,timingValue:0,currentFrameNumber:0,queue:[],pause:function() {
           Browser.mainLoop.scheduler = null;
           Browser.mainLoop.currentlyRunningMainloop++; // Incrementing this signals the previous main loop that it's now become old, and it must return.
         },resume:function() {
@@ -7718,7 +7624,7 @@ var ASM_CONSTS = {
           var timingValue = Browser.mainLoop.timingValue;
           var func = Browser.mainLoop.func;
           Browser.mainLoop.func = null;
-          _emscripten_set_main_loop(func, 0, false, Browser.mainLoop.arg, true /* do not set timing and call scheduler, we will do it on the next lines */);
+          setMainLoop(func, 0, false, Browser.mainLoop.arg, true /* do not set timing and call scheduler, we will do it on the next lines */);
           _emscripten_set_main_loop_timing(timingMode, timingValue);
           Browser.mainLoop.scheduler();
         },updateStatus:function() {
@@ -7905,12 +7811,12 @@ var ASM_CONSTS = {
           return !Module.noWasmDecoding && name.endsWith('.so');
         };
         wasmPlugin['handle'] = function(byteArray, name, onload, onerror) {
-          // loadWebAssemblyModule can not load modules out-of-order, so rather
+          // loadSideModule can not load modules out-of-order, so rather
           // than just running the promises in parallel, this makes a chain of
           // promises to run in series.
           this['asyncWasmLoadPromise'] = this['asyncWasmLoadPromise'].then(
             function() {
-              return loadWebAssemblyModule(byteArray, {loadAsync: true, nodelete: true});
+              return loadSideModule(byteArray, {loadAsync: true, nodelete: true});
             }).then(
               function(module) {
                 Module['preloadedWasm'][name] = module;
@@ -8371,7 +8277,8 @@ var ASM_CONSTS = {
         Browser.nextWgetRequestHandle++;
         return handle;
       }};
-  Module["Browser"] = Browser;function _emscripten_async_wget(url, file, onload, onerror) {
+  Module["Browser"] = Browser;
+  function _emscripten_async_wget(url, file, onload, onerror) {
       noExitRuntime = true;
   
       var _url = UTF8ToString(url);
@@ -8380,7 +8287,7 @@ var ASM_CONSTS = {
       function doCallback(callback) {
         if (callback) {
           var stack = stackSave();
-          dynCall_vi(callback, allocate(intArrayFromString(_file), 'i8', ALLOC_STACK));
+          wasmTable.get(callback)(allocate(intArrayFromString(_file), ALLOC_STACK));
           stackRestore(stack);
         }
       }
@@ -8409,17 +8316,11 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_async_wget"] = _emscripten_async_wget;
 
-  function _emscripten_get_sbrk_ptr() {
-      return 229520;
-    }
-  Module["_emscripten_get_sbrk_ptr"] = _emscripten_get_sbrk_ptr;
-
   function _emscripten_memcpy_big(dest, src, num) {
       HEAPU8.copyWithin(dest, src, src + num);
     }
   Module["_emscripten_memcpy_big"] = _emscripten_memcpy_big;
 
-  
   function _emscripten_get_heap_size() {
       return HEAPU8.length;
     }
@@ -8428,7 +8329,8 @@ var ASM_CONSTS = {
   function abortOnCannotGrowMemory(requestedSize) {
       abort('Cannot enlarge memory arrays to size ' + requestedSize + ' bytes (OOM). Either (1) compile with  -s INITIAL_MEMORY=X  with X higher than the current value ' + HEAP8.length + ', (2) compile with  -s ALLOW_MEMORY_GROWTH=1  which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with  -s ABORTING_MALLOC=0 ');
     }
-  Module["abortOnCannotGrowMemory"] = abortOnCannotGrowMemory;function _emscripten_resize_heap(requestedSize) {
+  Module["abortOnCannotGrowMemory"] = abortOnCannotGrowMemory;
+  function _emscripten_resize_heap(requestedSize) {
       requestedSize = requestedSize >>> 0;
       abortOnCannotGrowMemory(requestedSize);
     }
@@ -8440,12 +8342,11 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_stack_get_end"] = _emscripten_stack_get_end;
 
-  
-  
   function getExecutableName() {
       return thisProgram || './this.program';
     }
-  Module["getExecutableName"] = getExecutableName;function getEnvStrings() {
+  Module["getExecutableName"] = getExecutableName;
+  function getEnvStrings() {
       if (!getEnvStrings.strings) {
         // Default values.
         // Browser language detection #8751
@@ -8471,7 +8372,8 @@ var ASM_CONSTS = {
       }
       return getEnvStrings.strings;
     }
-  Module["getEnvStrings"] = getEnvStrings;function _environ_get(__environ, environ_buf) {
+  Module["getEnvStrings"] = getEnvStrings;
+  function _environ_get(__environ, environ_buf) {
       var bufSize = 0;
       getEnvStrings().forEach(function(string, i) {
         var ptr = environ_buf + bufSize;
@@ -8529,8 +8431,8 @@ var ASM_CONSTS = {
                  4;
       HEAP8[((pbuf)>>0)]=type;
       // TODO HEAP16[(((pbuf)+(2))>>1)]=?;
-      // TODO (tempI64 = [?>>>0,(tempDouble=?,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((pbuf)+(8))>>2)]=tempI64[0],HEAP32[(((pbuf)+(12))>>2)]=tempI64[1]);
-      // TODO (tempI64 = [?>>>0,(tempDouble=?,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((pbuf)+(16))>>2)]=tempI64[0],HEAP32[(((pbuf)+(20))>>2)]=tempI64[1]);
+      // TODO (tempI64 = [?>>>0,(tempDouble=?,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((pbuf)+(8))>>2)]=tempI64[0],HEAP32[(((pbuf)+(12))>>2)]=tempI64[1]);
+      // TODO (tempI64 = [?>>>0,(tempDouble=?,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((pbuf)+(16))>>2)]=tempI64[0],HEAP32[(((pbuf)+(20))>>2)]=tempI64[1]);
       return 0;
     } catch (e) {
     if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
@@ -8567,7 +8469,7 @@ var ASM_CONSTS = {
       }
   
       FS.llseek(stream, offset, whence);
-      (tempI64 = [stream.position>>>0,(tempDouble=stream.position,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[((newOffset)>>2)]=tempI64[0],HEAP32[(((newOffset)+(4))>>2)]=tempI64[1]);
+      (tempI64 = [stream.position>>>0,(tempDouble=stream.position,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[((newOffset)>>2)]=tempI64[0],HEAP32[(((newOffset)+(4))>>2)]=tempI64[1]);
       if (stream.getdents && offset === 0 && whence === 0) stream.getdents = null; // reset readdir state
       return 0;
     } catch (e) {
@@ -8613,6 +8515,23 @@ var ASM_CONSTS = {
     }
   Module["_fork"] = _fork;
 
+  function _g$__heap_base(
+  ) {
+  if (!Module['___heap_base']) abort("external global '__heap_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  return Module['___heap_base'];
+  }
+
+  function _getentropy(buffer, size) {
+      if (!_getentropy.randomDevice) {
+        _getentropy.randomDevice = getRandomDevice();
+      }
+      for (var i = 0; i < size; i++) {
+        HEAP8[(((buffer)+(i))>>0)]=_getentropy.randomDevice()
+      }
+      return 0;
+    }
+  Module["_getentropy"] = _getentropy;
+
   function _getnameinfo(sa, salen, node, nodelen, serv, servlen, flags) {
       var info = __read_sockaddr(sa, salen);
       if (info.errno) {
@@ -8657,27 +8576,6 @@ var ASM_CONSTS = {
     }
   Module["_getnameinfo"] = _getnameinfo;
 
-  
-  var ___tm_timezone=(stringToUTF8("GMT", 229584, 4), 229584);
-  Module["___tm_timezone"] = ___tm_timezone;function _gmtime_r(time, tmPtr) {
-      var date = new Date(HEAP32[((time)>>2)]*1000);
-      HEAP32[((tmPtr)>>2)]=date.getUTCSeconds();
-      HEAP32[(((tmPtr)+(4))>>2)]=date.getUTCMinutes();
-      HEAP32[(((tmPtr)+(8))>>2)]=date.getUTCHours();
-      HEAP32[(((tmPtr)+(12))>>2)]=date.getUTCDate();
-      HEAP32[(((tmPtr)+(16))>>2)]=date.getUTCMonth();
-      HEAP32[(((tmPtr)+(20))>>2)]=date.getUTCFullYear()-1900;
-      HEAP32[(((tmPtr)+(24))>>2)]=date.getUTCDay();
-      HEAP32[(((tmPtr)+(36))>>2)]=0;
-      HEAP32[(((tmPtr)+(32))>>2)]=0;
-      var start = Date.UTC(date.getUTCFullYear(), 0, 1, 0, 0, 0, 0);
-      var yday = ((date.getTime() - start) / (1000 * 60 * 60 * 24))|0;
-      HEAP32[(((tmPtr)+(28))>>2)]=yday;
-      HEAP32[(((tmPtr)+(40))>>2)]=___tm_timezone;
-  
-      return tmPtr;
-    }
-  Module["_gmtime_r"] = _gmtime_r;
 
   function _inet_addr(ptr) {
       var addr = __inet_pton4_raw(UTF8ToString(ptr));
@@ -8688,7 +8586,6 @@ var ASM_CONSTS = {
     }
   Module["_inet_addr"] = _inet_addr;
 
-  
   function _usleep(useconds) {
       // int usleep(useconds_t useconds);
       // http://pubs.opengroup.org/onlinepubs/000095399/functions/usleep.html
@@ -8698,7 +8595,8 @@ var ASM_CONSTS = {
         // Do nothing.
       }
     }
-  Module["_usleep"] = _usleep;function _nanosleep(rqtp, rmtp) {
+  Module["_usleep"] = _usleep;
+  function _nanosleep(rqtp, rmtp) {
       // int nanosleep(const struct timespec  *rqtp, struct timespec *rmtp);
       if (rqtp === 0) {
         setErrNo(28);
@@ -8718,7 +8616,6 @@ var ASM_CONSTS = {
     }
   Module["_nanosleep"] = _nanosleep;
 
-  
   function _fpathconf(fildes, name) {
       // long fpathconf(int fildes, int name);
       // http://pubs.opengroup.org/onlinepubs/000095399/functions/encrypt.html
@@ -8757,21 +8654,25 @@ var ASM_CONSTS = {
       setErrNo(28);
       return -1;
     }
-  Module["_fpathconf"] = _fpathconf;function _pathconf(a0,a1
+  Module["_fpathconf"] = _fpathconf;
+  function _pathconf(a0,a1
   ) {
   return _fpathconf(a0,a1);
   }
   Module["_pathconf"] = _pathconf;
 
-  function _pthread_cleanup_pop() {
+  function _pthread_cleanup_pop(execute) {
       assert(_pthread_cleanup_push.level == __ATEXIT__.length, 'cannot pop if something else added meanwhile!');
-      __ATEXIT__.pop();
+      callback = __ATEXIT__.pop();
+      if (execute) {
+        wasmTable.get(callback.func)(callback.arg)
+      }
       _pthread_cleanup_push.level = __ATEXIT__.length;
     }
   Module["_pthread_cleanup_pop"] = _pthread_cleanup_pop;
 
   function _pthread_cleanup_push(routine, arg) {
-      __ATEXIT__.push(function() { dynCall_vi(routine, arg) })
+      __ATEXIT__.push({ func: routine, arg: arg });
       _pthread_cleanup_push.level = __ATEXIT__.length;
     }
   Module["_pthread_cleanup_push"] = _pthread_cleanup_push;
@@ -8800,19 +8701,6 @@ var ASM_CONSTS = {
     }
   Module["_pthread_sigmask"] = _pthread_sigmask;
 
-  
-  function _round(d) {
-      d = +d;
-      return d >= +0 ? +Math_floor(d + +0.5) : +Math_ceil(d - +0.5);
-    }
-  Module["_round"] = _round;
-
-  function _roundf(d) {
-      d = +d;
-      return d >= +0 ? +Math_floor(d + +0.5) : +Math_ceil(d - +0.5);
-    }
-  Module["_roundf"] = _roundf;
-
   function _setTempRet0($i) {
       setTempRet0(($i) | 0);
     }
@@ -8829,7 +8717,6 @@ var ASM_CONSTS = {
     }
   Module["_sigfillset"] = _sigfillset;
 
-  
   function __isLeapYear(year) {
         return year%4 === 0 && (year%100 !== 0 || year%400 === 0);
     }
@@ -8844,12 +8731,12 @@ var ASM_CONSTS = {
     }
   Module["__arraySum"] = __arraySum;
   
-  
   var __MONTH_DAYS_LEAP=[31,29,31,30,31,30,31,31,30,31,30,31];
   Module["__MONTH_DAYS_LEAP"] = __MONTH_DAYS_LEAP;
   
   var __MONTH_DAYS_REGULAR=[31,28,31,30,31,30,31,31,30,31,30,31];
-  Module["__MONTH_DAYS_REGULAR"] = __MONTH_DAYS_REGULAR;function __addDays(date, days) {
+  Module["__MONTH_DAYS_REGULAR"] = __MONTH_DAYS_REGULAR;
+  function __addDays(date, days) {
       var newDate = new Date(date.getTime());
       while(days > 0) {
         var leap = __isLeapYear(newDate.getFullYear());
@@ -8875,7 +8762,8 @@ var ASM_CONSTS = {
   
       return newDate;
     }
-  Module["__addDays"] = __addDays;function _strftime(s, maxsize, format, tm) {
+  Module["__addDays"] = __addDays;
+  function _strftime(s, maxsize, format, tm) {
       // size_t strftime(char *restrict s, size_t maxsize, const char *restrict format, const struct tm *restrict timeptr);
       // http://pubs.opengroup.org/onlinepubs/009695399/functions/strftime.html
   
@@ -9542,7 +9430,6 @@ var ASM_CONSTS = {
 
 
 
-
   function emscripten_realloc_buffer(size) {
       try {
         // round size grow request up to wasm page size (fixed 64KB per spec)
@@ -9552,6 +9439,8 @@ var ASM_CONSTS = {
       } catch(e) {
         console.error('emscripten_realloc_buffer: Attempted to grow heap from ' + buffer.byteLength  + ' bytes to ' + size + ' bytes, but got error: ' + e);
       }
+      // implicit 0 return to save code size (caller will cast "undefined" into 0
+      // anyhow)
     }
   Module["emscripten_realloc_buffer"] = emscripten_realloc_buffer;
 
@@ -9606,10 +9495,6 @@ var ASM_CONSTS = {
     }
   Module["_system"] = _system;
 
-  var _abs=Math_abs;
-  Module["_abs"] = _abs;
-
-
 
 
 
@@ -9640,169 +9525,8 @@ var ASM_CONSTS = {
   Module["_getloadavg"] = _getloadavg;
 
 
-  function _llvm_memcpy_i32(a0,a1,a2
-  ) {
-  return _memcpy(a0,a1,a2);
-  }
-  Module["_llvm_memcpy_i32"] = _llvm_memcpy_i32;
-
-  function _llvm_memcpy_i64(a0,a1,a2
-  ) {
-  return _memcpy(a0,a1,a2);
-  }
-  Module["_llvm_memcpy_i64"] = _llvm_memcpy_i64;
-
-  function _llvm_memcpy_p0i8_p0i8_i32(a0,a1,a2
-  ) {
-  return _memcpy(a0,a1,a2);
-  }
-  Module["_llvm_memcpy_p0i8_p0i8_i32"] = _llvm_memcpy_p0i8_p0i8_i32;
-
-  function _llvm_memcpy_p0i8_p0i8_i64(a0,a1,a2
-  ) {
-  return _memcpy(a0,a1,a2);
-  }
-  Module["_llvm_memcpy_p0i8_p0i8_i64"] = _llvm_memcpy_p0i8_p0i8_i64;
-
-  function _llvm_memmove_i32(a0,a1,a2
-  ) {
-  return _memmove(a0,a1,a2);
-  }
-  Module["_llvm_memmove_i32"] = _llvm_memmove_i32;
-
-  function _llvm_memmove_i64(a0,a1,a2
-  ) {
-  return _memmove(a0,a1,a2);
-  }
-  Module["_llvm_memmove_i64"] = _llvm_memmove_i64;
-
-  function _llvm_memmove_p0i8_p0i8_i32(a0,a1,a2
-  ) {
-  return _memmove(a0,a1,a2);
-  }
-  Module["_llvm_memmove_p0i8_p0i8_i32"] = _llvm_memmove_p0i8_p0i8_i32;
-
-  function _llvm_memmove_p0i8_p0i8_i64(a0,a1,a2
-  ) {
-  return _memmove(a0,a1,a2);
-  }
-  Module["_llvm_memmove_p0i8_p0i8_i64"] = _llvm_memmove_p0i8_p0i8_i64;
-
-  function _llvm_memset_i32(a0,a1,a2
-  ) {
-  return _memset(a0,a1,a2);
-  }
-  Module["_llvm_memset_i32"] = _llvm_memset_i32;
-
-  function _llvm_memset_p0i8_i32(a0,a1,a2
-  ) {
-  return _memset(a0,a1,a2);
-  }
-  Module["_llvm_memset_p0i8_i32"] = _llvm_memset_p0i8_i32;
-
-  function _llvm_memset_p0i8_i64(a0,a1,a2
-  ) {
-  return _memset(a0,a1,a2);
-  }
-  Module["_llvm_memset_p0i8_i64"] = _llvm_memset_p0i8_i64;
-
   function ___builtin_prefetch(){}
   Module["___builtin_prefetch"] = ___builtin_prefetch;
-
-  function _llvm_va_end() {}
-  Module["_llvm_va_end"] = _llvm_va_end;
-
-  function _llvm_va_copy(ppdest, ppsrc) {
-      // copy the list start
-      HEAP8[((ppdest)>>0)]=HEAP8[((ppsrc)>>0)];HEAP8[(((ppdest)+(1))>>0)]=HEAP8[(((ppsrc)+(1))>>0)];HEAP8[(((ppdest)+(2))>>0)]=HEAP8[(((ppsrc)+(2))>>0)];HEAP8[(((ppdest)+(3))>>0)]=HEAP8[(((ppsrc)+(3))>>0)];
-  
-      // copy the list's current offset (will be advanced with each call to va_arg)
-      HEAP8[((ppdest+4)>>0)]=HEAP8[((ppsrc+4)>>0)];HEAP8[(((ppdest+4)+(1))>>0)]=HEAP8[(((ppsrc+4)+(1))>>0)];HEAP8[(((ppdest+4)+(2))>>0)]=HEAP8[(((ppsrc+4)+(2))>>0)];HEAP8[(((ppdest+4)+(3))>>0)]=HEAP8[(((ppsrc+4)+(3))>>0)];
-    }
-  Module["_llvm_va_copy"] = _llvm_va_copy;
-
-  function _llvm_bswap_i16(x) {
-      x = x|0;
-      return (((x&0xff)<<8) | ((x>>8)&0xff))|0;
-    }
-  Module["_llvm_bswap_i16"] = _llvm_bswap_i16;
-
-  function _llvm_bswap_i32(x) {
-      x = x|0;
-      return (((x&0xff)<<24) | (((x>>8)&0xff)<<16) | (((x>>16)&0xff)<<8) | (x>>>24))|0;
-    }
-  Module["_llvm_bswap_i32"] = _llvm_bswap_i32;
-
-  function _llvm_bswap_i64(l, h) {
-      var retl = _llvm_bswap_i32(h)>>>0;
-      var reth = _llvm_bswap_i32(l)>>>0;
-      return ((setTempRet0(reth),retl)|0);
-    }
-  Module["_llvm_bswap_i64"] = _llvm_bswap_i64;
-
-  function _llvm_ctlz_i8(x, isZeroUndef) {
-      x = x | 0;
-      isZeroUndef = isZeroUndef | 0;
-      return (Math_clz32(x & 0xff) | 0) - 24 | 0;
-    }
-  Module["_llvm_ctlz_i8"] = _llvm_ctlz_i8;
-
-  function _llvm_ctlz_i16(x, isZeroUndef) {
-      x = x | 0;
-      isZeroUndef = isZeroUndef | 0;
-      return (Math_clz32(x & 0xffff) | 0) - 16 | 0
-    }
-  Module["_llvm_ctlz_i16"] = _llvm_ctlz_i16;
-
-  function _llvm_ctlz_i64(l, h, isZeroUndef) {
-      l = l | 0;
-      h = h | 0;
-      isZeroUndef = isZeroUndef | 0;
-      var ret = 0;
-      ret = Math_clz32(h) | 0;
-      if ((ret | 0) == 32) ret = ret + (Math_clz32(l) | 0) | 0;
-      setTempRet0((0) | 0);
-      return ret | 0;
-    }
-  Module["_llvm_ctlz_i64"] = _llvm_ctlz_i64;
-
-  function _llvm_cttz_i32(x) { // Note: Currently doesn't take isZeroUndef()
-      x = x | 0;
-      return (x ? (31 - (Math_clz32((x ^ (x - 1))) | 0) | 0) : 32) | 0;
-    }
-  Module["_llvm_cttz_i32"] = _llvm_cttz_i32;
-
-  function _llvm_cttz_i64(l, h) {
-      var ret = _llvm_cttz_i32(l);
-      if (ret == 32) ret += _llvm_cttz_i32(h);
-      return ((setTempRet0(0),ret)|0);
-    }
-  Module["_llvm_cttz_i64"] = _llvm_cttz_i64;
-
-  function _llvm_ctpop_i32(x) {
-      // http://graphics.stanford.edu/~seander/bithacks.html#CountBitsSetParallel
-      // http://bits.stephan-brumme.com/countBits.html
-      x = x | 0;
-      x = x - ((x >>> 1) & 0x55555555) | 0;
-      x = (x & 0x33333333) + ((x >>> 2) & 0x33333333) | 0;
-      return (Math_imul((x + (x >>> 4) & 252645135 /* 0xF0F0F0F, but hits uglify parse bug? */), 0x1010101) >>> 24) | 0;
-    }
-  Module["_llvm_ctpop_i32"] = _llvm_ctpop_i32;
-
-  function _llvm_ctpop_i64(l, h) {
-      l = l | 0;
-      h = h | 0;
-      return (_llvm_ctpop_i32(l) | 0) + (_llvm_ctpop_i32(h) | 0) | 0;
-    }
-  Module["_llvm_ctpop_i64"] = _llvm_ctpop_i64;
-
-  function _llvm_trap() {
-      abort('trap!');
-    }
-  Module["_llvm_trap"] = _llvm_trap;
-
-  function _llvm_prefetch(){}
-  Module["_llvm_prefetch"] = _llvm_prefetch;
 
   function ___assert_fail(condition, filename, line, func) {
       abort('Assertion failed: ' + UTF8ToString(condition) + ', at: ' + [filename ? UTF8ToString(filename) : 'unknown filename', line, func ? UTF8ToString(func) : 'unknown function']);
@@ -9814,13 +9538,13 @@ var ASM_CONSTS = {
     }
   Module["___assert_func"] = ___assert_func;
 
-  
   function ___cxa_call_unexpected(exception) {
       err('Unexpected exception thrown, this is not properly supported - aborting');
       ABORT = true;
       throw exception;
     }
-  Module["___cxa_call_unexpected"] = ___cxa_call_unexpected;function _terminate(a0
+  Module["___cxa_call_unexpected"] = ___cxa_call_unexpected;
+  function _terminate(a0
   ) {
   return ___cxa_call_unexpected(a0);
   }
@@ -9830,327 +9554,6 @@ var ASM_CONSTS = {
     }
   Module["___gxx_personality_v0"] = ___gxx_personality_v0;
 
-
-  function _llvm_stacksave() {
-      var self = _llvm_stacksave;
-      if (!self.LLVM_SAVEDSTACKS) {
-        self.LLVM_SAVEDSTACKS = [];
-      }
-      self.LLVM_SAVEDSTACKS.push(stackSave());
-      return self.LLVM_SAVEDSTACKS.length-1;
-    }
-  Module["_llvm_stacksave"] = _llvm_stacksave;
-
-  function _llvm_stackrestore(p) {
-      var self = _llvm_stacksave;
-      var ret = self.LLVM_SAVEDSTACKS[p];
-      self.LLVM_SAVEDSTACKS.splice(p, 1);
-      stackRestore(ret);
-    }
-  Module["_llvm_stackrestore"] = _llvm_stackrestore;
-
-  function _llvm_flt_rounds() {
-      return -1; // 'indeterminable' for FLT_ROUNDS
-    }
-  Module["_llvm_flt_rounds"] = _llvm_flt_rounds;
-
-  function _llvm_objectsize_i32() { return -1 }
-  Module["_llvm_objectsize_i32"] = _llvm_objectsize_i32;
-
-  function _llvm_bitreverse_i32(x) {
-      x = x|0;
-      x = ((x & 0xaaaaaaaa) >>> 1) | ((x & 0x55555555) << 1);
-      x = ((x & 0xcccccccc) >>> 2) | ((x & 0x33333333) << 2);
-      x = ((x & 0xf0f0f0f0) >>> 4) | ((x & 0x0f0f0f0f) << 4);
-      x = ((x & 0xff00ff00) >>> 8) | ((x & 0x00ff00ff) << 8);
-      return (x >>> 16) | (x << 16);
-    }
-  Module["_llvm_bitreverse_i32"] = _llvm_bitreverse_i32;
-
-  function _llvm_mono_load_i8_p0i8(ptr) {
-      return HEAP8[((ptr)>>0)];
-    }
-  Module["_llvm_mono_load_i8_p0i8"] = _llvm_mono_load_i8_p0i8;
-
-  function _llvm_mono_store_i8_p0i8(value, ptr) {
-      HEAP8[((ptr)>>0)]=value;
-    }
-  Module["_llvm_mono_store_i8_p0i8"] = _llvm_mono_store_i8_p0i8;
-
-  function _llvm_mono_load_i16_p0i16(ptr) {
-      return HEAP16[((ptr)>>1)];
-    }
-  Module["_llvm_mono_load_i16_p0i16"] = _llvm_mono_load_i16_p0i16;
-
-  function _llvm_mono_store_i16_p0i16(value, ptr) {
-      HEAP16[((ptr)>>1)]=value;
-    }
-  Module["_llvm_mono_store_i16_p0i16"] = _llvm_mono_store_i16_p0i16;
-
-  function _llvm_mono_load_i32_p0i32(ptr) {
-      return HEAP32[((ptr)>>2)];
-    }
-  Module["_llvm_mono_load_i32_p0i32"] = _llvm_mono_load_i32_p0i32;
-
-  function _llvm_mono_store_i32_p0i32(value, ptr) {
-      HEAP32[((ptr)>>2)]=value;
-    }
-  Module["_llvm_mono_store_i32_p0i32"] = _llvm_mono_store_i32_p0i32;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  var _llvm_fabs_f32=Math_abs;
-  Module["_llvm_fabs_f32"] = _llvm_fabs_f32;
-
-  var _llvm_fabs_f64=Math_abs;
-  Module["_llvm_fabs_f64"] = _llvm_fabs_f64;
-
-
-
-
-
-
-
-
-
-
-  var _llvm_sqrt_f32=Math_sqrt;
-  Module["_llvm_sqrt_f32"] = _llvm_sqrt_f32;
-
-  var _llvm_sqrt_f64=Math_sqrt;
-  Module["_llvm_sqrt_f64"] = _llvm_sqrt_f64;
-
-  var _llvm_pow_f32=Math_pow;
-  Module["_llvm_pow_f32"] = _llvm_pow_f32;
-
-  var _llvm_pow_f64=Math_pow;
-  Module["_llvm_pow_f64"] = _llvm_pow_f64;
-
-  var _llvm_powi_f32=Math_pow;
-  Module["_llvm_powi_f32"] = _llvm_powi_f32;
-
-  var _llvm_powi_f64=Math_pow;
-  Module["_llvm_powi_f64"] = _llvm_powi_f64;
-
-  var _llvm_log_f32=Math_log;
-  Module["_llvm_log_f32"] = _llvm_log_f32;
-
-  var _llvm_log_f64=Math_log;
-  Module["_llvm_log_f64"] = _llvm_log_f64;
-
-  var _llvm_exp_f32=Math_exp;
-  Module["_llvm_exp_f32"] = _llvm_exp_f32;
-
-  var _llvm_exp_f64=Math_exp;
-  Module["_llvm_exp_f64"] = _llvm_exp_f64;
-
-  var _llvm_cos_f32=Math_cos;
-  Module["_llvm_cos_f32"] = _llvm_cos_f32;
-
-  var _llvm_cos_f64=Math_cos;
-  Module["_llvm_cos_f64"] = _llvm_cos_f64;
-
-  var _llvm_sin_f32=Math_sin;
-  Module["_llvm_sin_f32"] = _llvm_sin_f32;
-
-  var _llvm_sin_f64=Math_sin;
-  Module["_llvm_sin_f64"] = _llvm_sin_f64;
-
-  var _llvm_trunc_f32=Math_trunc;
-  Module["_llvm_trunc_f32"] = _llvm_trunc_f32;
-
-  var _llvm_trunc_f64=Math_trunc;
-  Module["_llvm_trunc_f64"] = _llvm_trunc_f64;
-
-  var _llvm_ceil_f32=Math_ceil;
-  Module["_llvm_ceil_f32"] = _llvm_ceil_f32;
-
-  var _llvm_ceil_f64=Math_ceil;
-  Module["_llvm_ceil_f64"] = _llvm_ceil_f64;
-
-  var _llvm_floor_f32=Math_floor;
-  Module["_llvm_floor_f32"] = _llvm_floor_f32;
-
-  var _llvm_floor_f64=Math_floor;
-  Module["_llvm_floor_f64"] = _llvm_floor_f64;
-
-  function _llvm_exp2_f32(x) {
-      return Math.pow(2, x);
-    }
-  Module["_llvm_exp2_f32"] = _llvm_exp2_f32;
-
-  function _llvm_exp2_f64(a0
-  ) {
-  return _llvm_exp2_f32(a0);
-  }
-  Module["_llvm_exp2_f64"] = _llvm_exp2_f64;
-
-  function _llvm_log2_f32(x) {
-      return Math.log(x) / Math.LN2; // TODO: Math.log2, when browser support is there
-    }
-  Module["_llvm_log2_f32"] = _llvm_log2_f32;
-
-  function _llvm_log2_f64(a0
-  ) {
-  return _llvm_log2_f32(a0);
-  }
-  Module["_llvm_log2_f64"] = _llvm_log2_f64;
-
-  function _llvm_log10_f32(x) {
-      return Math.log(x) / Math.LN10; // TODO: Math.log10, when browser support is there
-    }
-  Module["_llvm_log10_f32"] = _llvm_log10_f32;
-
-  function _llvm_log10_f64(a0
-  ) {
-  return _llvm_log10_f32(a0);
-  }
-  Module["_llvm_log10_f64"] = _llvm_log10_f64;
-
-  function _llvm_copysign_f32(x, y) {
-      return y < 0 || (y === 0 && 1/y < 0) ? -Math_abs(x) : Math_abs(x);
-    }
-  Module["_llvm_copysign_f32"] = _llvm_copysign_f32;
-
-  function _llvm_copysign_f64(x, y) {
-      return y < 0 || (y === 0 && 1/y < 0) ? -Math_abs(x) : Math_abs(x);
-    }
-  Module["_llvm_copysign_f64"] = _llvm_copysign_f64;
-
-
-
-  function _llvm_round_f64(d) {
-      d = +d;
-      return d >= +0 ? +Math_floor(d + +0.5) : +Math_ceil(d - +0.5);
-    }
-  Module["_llvm_round_f64"] = _llvm_round_f64;
-
-  function _llvm_round_f32(f) {
-      f = +f;
-      return f >= +0 ? +Math_floor(f + +0.5) : +Math_ceil(f - +0.5); // TODO: use fround?
-    }
-  Module["_llvm_round_f32"] = _llvm_round_f32;
-
-
-  function _llvm_rint_f32(f) {
-      f = +f;
-      return (f - +Math_floor(f) != .5) ? +_roundf(f) : +_roundf(f / +2) * +2;
-    }
-  Module["_llvm_rint_f32"] = _llvm_rint_f32;
-
-  function _llvm_rint_f64(f) {
-      f = +f;
-      return (f - +Math_floor(f) != .5) ? +_round(f) : +_round(f / +2) * +2;
-    }
-  Module["_llvm_rint_f64"] = _llvm_rint_f64;
-
-  function _llvm_nearbyint_f32(f) {
-      f = +f;
-      return (f - +Math_floor(f) != .5) ? +_roundf(f) : +_roundf(f / +2) * +2;
-    }
-  Module["_llvm_nearbyint_f32"] = _llvm_nearbyint_f32;
-
-  function _llvm_nearbyint_f64(f) {
-      f = +f;
-      return (f - +Math_floor(f) != .5) ? +_round(f) : +_round(f / +2) * +2;
-    }
-  Module["_llvm_nearbyint_f64"] = _llvm_nearbyint_f64;
-
-  function _llvm_minnum_f32(x, y) {
-      x = +x;
-      y = +y;
-      if (x != x) return +y;
-      if (y != y) return +x;
-      return +Math_min(+x, +y);
-    }
-  Module["_llvm_minnum_f32"] = _llvm_minnum_f32;
-
-  function _llvm_minnum_f64(x, y) {
-      x = +x;
-      y = +y;
-      if (x != x) return +y;
-      if (y != y) return +x;
-      return +Math_min(+x, +y);
-    }
-  Module["_llvm_minnum_f64"] = _llvm_minnum_f64;
-
-  function _llvm_maxnum_f32(x, y) {
-      x = +x;
-      y = +y;
-      if (x != x) return +y;
-      if (y != y) return +x;
-      return +Math_max(+x, +y);
-    }
-  Module["_llvm_maxnum_f32"] = _llvm_maxnum_f32;
-
-  function _llvm_maxnum_f64(x, y) {
-      x = +x;
-      y = +y;
-      if (x != x) return +y;
-      if (y != y) return +x;
-      return +Math_max(+x, +y);
-    }
-  Module["_llvm_maxnum_f64"] = _llvm_maxnum_f64;
-
-
-
-
-
-  function _dlerror() {
-      // char *dlerror(void);
-      // http://pubs.opengroup.org/onlinepubs/009695399/functions/dlerror.html
-      if (DLFCN.errorMsg === null) {
-        return 0;
-      } else {
-        if (DLFCN.error) _free(DLFCN.error);
-        DLFCN.error = stringToNewUTF8(DLFCN.errorMsg);
-        DLFCN.errorMsg = null;
-        return DLFCN.error;
-      }
-    }
-  Module["_dlerror"] = _dlerror;
-
-  function _dladdr(addr, info) {
-      // report all function pointers as coming from this program itself XXX not really correct in any way
-      var fname = stringToNewUTF8(getExecutableName()); // XXX leak
-      HEAP32[((info)>>2)]=fname;
-      HEAP32[(((info)+(4))>>2)]=0;
-      HEAP32[(((info)+(8))>>2)]=0;
-      HEAP32[(((info)+(12))>>2)]=0;
-      return 1;
-    }
-  Module["_dladdr"] = _dladdr;
 
   function _getpwuid() { throw 'getpwuid: TODO' }
   Module["_getpwuid"] = _getpwuid;
@@ -10167,84 +9570,6 @@ var ASM_CONSTS = {
     }
   Module["_difftime"] = _difftime;
 
-  var ___tm_current=229536;
-  Module["___tm_current"] = ___tm_current;
-
-
-  var ___tm_formatted=229600;
-  Module["___tm_formatted"] = ___tm_formatted;
-
-  
-  function _tzset() {
-      // TODO: Use (malleable) environment variables instead of system settings.
-      if (_tzset.called) return;
-      _tzset.called = true;
-  
-      // timezone is specified as seconds west of UTC ("The external variable
-      // `timezone` shall be set to the difference, in seconds, between
-      // Coordinated Universal Time (UTC) and local standard time."), the same
-      // as returned by getTimezoneOffset().
-      // See http://pubs.opengroup.org/onlinepubs/009695399/functions/tzset.html
-      HEAP32[((__get_timezone())>>2)]=(new Date()).getTimezoneOffset() * 60;
-  
-      var currentYear = new Date().getFullYear();
-      var winter = new Date(currentYear, 0, 1);
-      var summer = new Date(currentYear, 6, 1);
-      HEAP32[((__get_daylight())>>2)]=Number(winter.getTimezoneOffset() != summer.getTimezoneOffset());
-  
-      function extractZone(date) {
-        var match = date.toTimeString().match(/\(([A-Za-z ]+)\)$/);
-        return match ? match[1] : "GMT";
-      };
-      var winterName = extractZone(winter);
-      var summerName = extractZone(summer);
-      var winterNamePtr = allocateUTF8(winterName);
-      var summerNamePtr = allocateUTF8(summerName);
-      if (summer.getTimezoneOffset() < winter.getTimezoneOffset()) {
-        // Northern hemisphere
-        HEAP32[((__get_tzname())>>2)]=winterNamePtr;
-        HEAP32[(((__get_tzname())+(4))>>2)]=summerNamePtr;
-      } else {
-        HEAP32[((__get_tzname())>>2)]=summerNamePtr;
-        HEAP32[(((__get_tzname())+(4))>>2)]=winterNamePtr;
-      }
-    }
-  Module["_tzset"] = _tzset;function _mktime(tmPtr) {
-      _tzset();
-      var date = new Date(HEAP32[(((tmPtr)+(20))>>2)] + 1900,
-                          HEAP32[(((tmPtr)+(16))>>2)],
-                          HEAP32[(((tmPtr)+(12))>>2)],
-                          HEAP32[(((tmPtr)+(8))>>2)],
-                          HEAP32[(((tmPtr)+(4))>>2)],
-                          HEAP32[((tmPtr)>>2)],
-                          0);
-  
-      // There's an ambiguous hour when the time goes back; the tm_isdst field is
-      // used to disambiguate it.  Date() basically guesses, so we fix it up if it
-      // guessed wrong, or fill in tm_isdst with the guess if it's -1.
-      var dst = HEAP32[(((tmPtr)+(32))>>2)];
-      var guessedOffset = date.getTimezoneOffset();
-      var start = new Date(date.getFullYear(), 0, 1);
-      var summerOffset = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
-      var winterOffset = start.getTimezoneOffset();
-      var dstOffset = Math.min(winterOffset, summerOffset); // DST is in December in South
-      if (dst < 0) {
-        // Attention: some regions don't have DST at all.
-        HEAP32[(((tmPtr)+(32))>>2)]=Number(summerOffset != winterOffset && dstOffset == guessedOffset);
-      } else if ((dst > 0) != (dstOffset == guessedOffset)) {
-        var nonDstOffset = Math.max(winterOffset, summerOffset);
-        var trueOffset = dst > 0 ? dstOffset : nonDstOffset;
-        // Don't try setMinutes(date.getMinutes() + ...) -- it's messed up.
-        date.setTime(date.getTime() + (trueOffset - guessedOffset)*60000);
-      }
-  
-      HEAP32[(((tmPtr)+(24))>>2)]=date.getDay();
-      var yday = ((date.getTime() - start.getTime()) / (1000 * 60 * 60 * 24))|0;
-      HEAP32[(((tmPtr)+(28))>>2)]=yday;
-  
-      return (date.getTime() / 1000)|0;
-    }
-  Module["_mktime"] = _mktime;
 
   function _timelocal(a0
   ) {
@@ -10252,10 +9577,6 @@ var ASM_CONSTS = {
   }
   Module["_timelocal"] = _timelocal;
 
-  function _gmtime(time) {
-      return _gmtime_r(time, ___tm_current);
-    }
-  Module["_gmtime"] = _gmtime;
 
 
   function _timegm(tmPtr) {
@@ -10278,86 +9599,23 @@ var ASM_CONSTS = {
     }
   Module["_timegm"] = _timegm;
 
-  
-  function _localtime_r(time, tmPtr) {
-      _tzset();
-      var date = new Date(HEAP32[((time)>>2)]*1000);
-      HEAP32[((tmPtr)>>2)]=date.getSeconds();
-      HEAP32[(((tmPtr)+(4))>>2)]=date.getMinutes();
-      HEAP32[(((tmPtr)+(8))>>2)]=date.getHours();
-      HEAP32[(((tmPtr)+(12))>>2)]=date.getDate();
-      HEAP32[(((tmPtr)+(16))>>2)]=date.getMonth();
-      HEAP32[(((tmPtr)+(20))>>2)]=date.getFullYear()-1900;
-      HEAP32[(((tmPtr)+(24))>>2)]=date.getDay();
-  
-      var start = new Date(date.getFullYear(), 0, 1);
-      var yday = ((date.getTime() - start.getTime()) / (1000 * 60 * 60 * 24))|0;
-      HEAP32[(((tmPtr)+(28))>>2)]=yday;
-      HEAP32[(((tmPtr)+(36))>>2)]=-(date.getTimezoneOffset() * 60);
-  
-      // Attention: DST is in December in South, and some regions don't have DST at all.
-      var summerOffset = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
-      var winterOffset = start.getTimezoneOffset();
-      var dst = (summerOffset != winterOffset && date.getTimezoneOffset() == Math.min(winterOffset, summerOffset))|0;
-      HEAP32[(((tmPtr)+(32))>>2)]=dst;
-  
-      var zonePtr = HEAP32[(((__get_tzname())+(dst ? 4 : 0))>>2)];
-      HEAP32[(((tmPtr)+(40))>>2)]=zonePtr;
-  
-      return tmPtr;
-    }
-  Module["_localtime_r"] = _localtime_r;function _localtime(time) {
-      return _localtime_r(time, ___tm_current);
-    }
-  Module["_localtime"] = _localtime;
 
 
-  
-  function _asctime_r(tmPtr, buf) {
-      var date = {
-        tm_sec: HEAP32[((tmPtr)>>2)],
-        tm_min: HEAP32[(((tmPtr)+(4))>>2)],
-        tm_hour: HEAP32[(((tmPtr)+(8))>>2)],
-        tm_mday: HEAP32[(((tmPtr)+(12))>>2)],
-        tm_mon: HEAP32[(((tmPtr)+(16))>>2)],
-        tm_year: HEAP32[(((tmPtr)+(20))>>2)],
-        tm_wday: HEAP32[(((tmPtr)+(24))>>2)]
-      };
-      var days = [ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" ];
-      var months = [ "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" ];
-      var s = days[date.tm_wday] + ' ' + months[date.tm_mon] +
-          (date.tm_mday < 10 ? '  ' : ' ') + date.tm_mday +
-          (date.tm_hour < 10 ? ' 0' : ' ') + date.tm_hour +
-          (date.tm_min < 10 ? ':0' : ':') + date.tm_min +
-          (date.tm_sec < 10 ? ':0' : ':') + date.tm_sec +
-          ' ' + (1900 + date.tm_year) + "\n";
-  
-      // asctime_r is specced to behave in an undefined manner if the algorithm would attempt
-      // to write out more than 26 bytes (including the null terminator).
-      // See http://pubs.opengroup.org/onlinepubs/9699919799/functions/asctime.html
-      // Our undefined behavior is to truncate the write to at most 26 bytes, including null terminator.
-      stringToUTF8(s, buf, 26);
-      return buf;
-    }
-  Module["_asctime_r"] = _asctime_r;function _asctime(tmPtr) {
-      return _asctime_r(tmPtr, ___tm_formatted);
-    }
-  Module["_asctime"] = _asctime;
 
 
-  
   function _ctime_r(time, buf) {
       var stack = stackSave();
       var rv = _asctime_r(_localtime_r(time, stackAlloc(44)), buf);
       stackRestore(stack);
       return rv;
     }
-  Module["_ctime_r"] = _ctime_r;function _ctime(timer) {
-      return _ctime_r(timer, ___tm_current);
-    }
-  Module["_ctime"] = _ctime;
+  Module["_ctime_r"] = _ctime_r;
 
+  function ___ctime_r(a0,a1
+  ) {
+  return _ctime_r(a0,a1);
+  }
+  Module["___ctime_r"] = ___ctime_r;
 
   function _dysize(year) {
       var leap = ((year % 4 == 0) && ((year % 100 != 0) || (year % 400 == 0)));
@@ -10649,7 +9907,6 @@ var ASM_CONSTS = {
 
 
 
-  
   function _emscripten_get_now_res() { // return resolution of get_now, in nanoseconds
       if (ENVIRONMENT_IS_NODE) {
         return 1; // nanoseconds
@@ -10660,7 +9917,8 @@ var ASM_CONSTS = {
       // Modern environment where performance.now() is supported:
       return 1000; // microseconds (1/1000 of a millisecond)
     }
-  Module["_emscripten_get_now_res"] = _emscripten_get_now_res;function _clock_getres(clk_id, res) {
+  Module["_emscripten_get_now_res"] = _emscripten_get_now_res;
+  function _clock_getres(clk_id, res) {
       // int clock_getres(clockid_t clk_id, struct timespec *res);
       var nsec;
       if (clk_id === 0) {
@@ -10753,9 +10011,10 @@ var ASM_CONSTS = {
     }
   Module["_longjmp"] = _longjmp;
 
-  function _emscripten_longjmp(env, value) {
-      _longjmp(env, value);
-    }
+  function _emscripten_longjmp(a0,a1
+  ) {
+  return _longjmp(a0,a1);
+  }
   Module["_emscripten_longjmp"] = _emscripten_longjmp;
 
 
@@ -10782,12 +10041,6 @@ var ASM_CONSTS = {
 
 
 
-  var _in6addr_any=229648;
-  Module["_in6addr_any"] = _in6addr_any;
-
-  var _in6addr_loopback=229664;
-  Module["_in6addr_loopback"] = _in6addr_loopback;
-
 
 
 
@@ -10807,10 +10060,7 @@ var ASM_CONSTS = {
 
 
 
-  
-  function _gethostbyname(name) {
-      name = UTF8ToString(name);
-  
+  function getHostByName(name) {
       // generate hostent
       var ret = _malloc(20); // XXX possibly leaked, as are others here
       var nameBuf = _malloc(name.length+1);
@@ -10829,7 +10079,8 @@ var ASM_CONSTS = {
       HEAP32[(((ret)+(16))>>2)]=addrListBuf;
       return ret;
     }
-  Module["_gethostbyname"] = _gethostbyname;function _gethostbyaddr(addr, addrlen, type) {
+  Module["getHostByName"] = getHostByName;
+  function _gethostbyaddr(addr, addrlen, type) {
       if (type !== 2) {
         setErrNo(5);
         // TODO: set h_errno
@@ -10841,10 +10092,14 @@ var ASM_CONSTS = {
       if (lookup) {
         host = lookup;
       }
-      var hostp = allocate(intArrayFromString(host), 'i8', ALLOC_STACK);
-      return _gethostbyname(hostp);
+      return getHostByName(host);
     }
   Module["_gethostbyaddr"] = _gethostbyaddr;
+
+  function _gethostbyname(name) {
+      return getHostByName(UTF8ToString(name));
+    }
+  Module["_gethostbyname"] = _gethostbyname;
 
 
   function _gethostbyname_r(name, ret, buf, buflen, out, err) {
@@ -11191,6 +10446,8 @@ var ASM_CONSTS = {
   function _setgrent() { throw 'setgrent: TODO' }
   Module["_setgrent"] = _setgrent;
 
+
+
   function _emscripten_run_script(ptr) {
       eval(UTF8ToString(ptr));
     }
@@ -11268,6 +10525,10 @@ var ASM_CONSTS = {
       var iNextLine = callstack.indexOf('\n', Math.max(iThisFunc, iThisFunc2))+1;
       callstack = callstack.slice(iNextLine);
   
+      if (flags & 32/*EM_LOG_DEMANGLE*/) {
+        warnOnce('EM_LOG_DEMANGLE is deprecated; ignoring');
+      }
+  
       // If user requested to see the original source stack, but no source map information is available, just fall back to showing the JS stack.
       if (flags & 8/*EM_LOG_C_STACK*/ && typeof emscripten_source_map === 'undefined') {
         warnOnce('Source map information is not available, emscripten_log with EM_LOG_C_STACK will be ignored. Build with "--pre-js $EMSCRIPTEN/src/emscripten-source-map.min.js" linker flag to add source map loading to code.');
@@ -11293,14 +10554,14 @@ var ASM_CONSTS = {
       for (var l in lines) {
         var line = lines[l];
   
-        var jsSymbolName = '';
+        var symbolName = '';
         var file = '';
         var lineno = 0;
         var column = 0;
   
         var parts = chromeRe.exec(line);
         if (parts && parts.length == 5) {
-          jsSymbolName = parts[1];
+          symbolName = parts[1];
           file = parts[2];
           lineno = parts[3];
           column = parts[4];
@@ -11308,7 +10569,7 @@ var ASM_CONSTS = {
           parts = newFirefoxRe.exec(line);
           if (!parts) parts = firefoxRe.exec(line);
           if (parts && parts.length >= 4) {
-            jsSymbolName = parts[1];
+            symbolName = parts[1];
             file = parts[2];
             lineno = parts[3];
             column = parts[4]|0; // Old Firefox doesn't carry column information, but in new FF30, it is present. See https://bugzilla.mozilla.org/show_bug.cgi?id=762556
@@ -11317,12 +10578,6 @@ var ASM_CONSTS = {
             callstack += line + '\n';
             continue;
           }
-        }
-  
-        // Try to demangle the symbol, but fall back to showing the original JS symbol name if not available.
-        var cSymbolName = (flags & 32/*EM_LOG_DEMANGLE*/) ? demangle(jsSymbolName) : jsSymbolName;
-        if (!cSymbolName) {
-          cSymbolName = jsSymbolName;
         }
   
         var haveSourceMap = false;
@@ -11334,19 +10589,19 @@ var ASM_CONSTS = {
             if (flags & 64/*EM_LOG_NO_PATHS*/) {
               orig.source = orig.source.substring(orig.source.replace(/\\/g, "/").lastIndexOf('/')+1);
             }
-            callstack += '    at ' + cSymbolName + ' (' + orig.source + ':' + orig.line + ':' + orig.column + ')\n';
+            callstack += '    at ' + symbolName + ' (' + orig.source + ':' + orig.line + ':' + orig.column + ')\n';
           }
         }
         if ((flags & 16/*EM_LOG_JS_STACK*/) || !haveSourceMap) {
           if (flags & 64/*EM_LOG_NO_PATHS*/) {
             file = file.substring(file.replace(/\\/g, "/").lastIndexOf('/')+1);
           }
-          callstack += (haveSourceMap ? ('     = '+jsSymbolName) : ('    at '+cSymbolName)) + ' (' + file + ':' + lineno + ':' + column + ')\n';
+          callstack += (haveSourceMap ? ('     = ' + symbolName) : ('    at '+ symbolName)) + ' (' + file + ':' + lineno + ':' + column + ')\n';
         }
   
         // If we are still keeping track with the callstack by traversing via 'arguments.callee', print the function parameters as well.
         if (flags & 128 /*EM_LOG_FUNC_PARAMS*/ && stack_args[0]) {
-          if (stack_args[1] == jsSymbolName && stack_args[2].length > 0) {
+          if (stack_args[1] == symbolName && stack_args[2].length > 0) {
             callstack = callstack.replace(/\s+$/, '');
             callstack += ' with values: ' + stack_args[1] + stack_args[2] + '\n';
           }
@@ -11399,8 +10654,6 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_log_js"] = _emscripten_log_js;
 
-  
-  
   function reallyNegative(x) {
       return x < 0 || (x === 0 && (1/x) === -Infinity);
     }
@@ -11418,7 +10671,38 @@ var ASM_CONSTS = {
   function convertU32PairToI53(lo, hi) {
       return (lo >>> 0) + (hi >>> 0) * 4294967296;
     }
-  Module["convertU32PairToI53"] = convertU32PairToI53;function formatString(format, varargs) {
+  Module["convertU32PairToI53"] = convertU32PairToI53;
+  
+  function reSign(value, bits) {
+      if (value <= 0) {
+        return value;
+      }
+      var half = bits <= 32 ? Math.abs(1 << (bits-1)) // abs is needed if bits == 32
+                            : Math.pow(2, bits-1);
+      // for huge values, we can hit the precision limit and always get true here.
+      // so don't do that but, in general there is no perfect solution here. With
+      // 64-bit ints, we get rounding and errors
+      // TODO: In i64 mode 1, resign the two parts separately and safely
+      if (value >= half && (bits <= 32 || value > half)) {
+        // Cannot bitshift half, as it may be at the limit of the bits JS uses in
+        // bitshifts
+        value = -2*half + value;
+      }
+      return value;
+    }
+  Module["reSign"] = reSign;
+  
+  function unSign(value, bits) {
+      if (value >= 0) {
+        return value;
+      }
+      // Need some trickery, since if bits == 32, we are right at the limit of the
+      // bits JS uses in bitshifts
+      return bits <= 32 ? 2*Math.abs(1 << (bits-1)) + value
+                        : Math.pow(2, bits)         + value;
+    }
+  Module["unSign"] = unSign;
+  function formatString(format, varargs) {
       assert((varargs & 3) === 0);
       var textIndex = format;
       var argIndex = varargs;
@@ -11825,7 +11109,8 @@ var ASM_CONSTS = {
       }
       return ret;
     }
-  Module["formatString"] = formatString;function _emscripten_log(flags, format, varargs) {
+  Module["formatString"] = formatString;
+  function _emscripten_log(flags, format, varargs) {
       var result = formatString(format, varargs);
       var str = UTF8ArrayToString(result, 0);
       _emscripten_log_js(flags, str);
@@ -11843,7 +11128,7 @@ var ASM_CONSTS = {
       var fullname = name + '__str';
       var fullret = cache[fullname];
       if (fullret) return fullret;
-      return cache[fullname] = allocate(intArrayFromString(ret + ''), 'i8', ALLOC_NORMAL);
+      return cache[fullname] = allocate(intArrayFromString(ret + ''), ALLOC_NORMAL);
     }
   Module["_emscripten_get_compiler_setting"] = _emscripten_get_compiler_setting;
 
@@ -11901,7 +11186,6 @@ var ASM_CONSTS = {
   var UNWIND_CACHE={};
   Module["UNWIND_CACHE"] = UNWIND_CACHE;
 
-  
   function __emscripten_save_in_unwind_cache(callstack) {
       callstack.forEach(function (frame) {
         var pc = _emscripten_generate_pc(frame);
@@ -11910,7 +11194,8 @@ var ASM_CONSTS = {
         }
       });
     }
-  Module["__emscripten_save_in_unwind_cache"] = __emscripten_save_in_unwind_cache;function _emscripten_stack_snapshot() {
+  Module["__emscripten_save_in_unwind_cache"] = __emscripten_save_in_unwind_cache;
+  function _emscripten_stack_snapshot() {
       var callstack = new Error().stack.split('\n');
       if (callstack[0] == 'Error') {
         callstack.shift();
@@ -11949,7 +11234,6 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_stack_unwind_buffer"] = _emscripten_stack_unwind_buffer;
 
-  
   /** @suppress{checkTypes} */
   function withBuiltinMalloc(func) {
       var prev_malloc = typeof _malloc !== 'undefined' ? _malloc : undefined;
@@ -11966,7 +11250,8 @@ var ASM_CONSTS = {
         _free = prev_free;
       }
     }
-  Module["withBuiltinMalloc"] = withBuiltinMalloc;function _emscripten_pc_get_function(pc) {
+  Module["withBuiltinMalloc"] = withBuiltinMalloc;
+  function _emscripten_pc_get_function(pc) {
       abort('Cannot use emscripten_pc_get_function without -s USE_OFFSET_CONVERTER');
       var name;
       if (pc & 0x80000000) {
@@ -12086,80 +11371,53 @@ var ASM_CONSTS = {
     }
   Module["readAsmConstArgs"] = readAsmConstArgs;
 
+  function _emscripten_asm_const_int(code, sigPtr, argbuf) {
+      code -= 1024;
+      var args = readAsmConstArgs(sigPtr, argbuf);
+      return ASM_CONSTS[code].apply(null, args);
+    }
+  Module["_emscripten_asm_const_int"] = _emscripten_asm_const_int;
+
+  function _emscripten_asm_const_double(a0,a1,a2
+  ) {
+  return _emscripten_asm_const_int(a0,a1,a2);
+  }
+  Module["_emscripten_asm_const_double"] = _emscripten_asm_const_double;
+
+  function mainThreadEM_ASM(code, sigPtr, argbuf, sync) {
+      code -= 1024;
+      var args = readAsmConstArgs(sigPtr, argbuf);
+      return ASM_CONSTS[code].apply(null, args);
+    }
+  Module["mainThreadEM_ASM"] = mainThreadEM_ASM;
+
+  function _emscripten_asm_const_int_sync_on_main_thread(code, sigPtr, argbuf) {
+      return mainThreadEM_ASM(code, sigPtr, argbuf, 1);
+    }
+  Module["_emscripten_asm_const_int_sync_on_main_thread"] = _emscripten_asm_const_int_sync_on_main_thread;
+
+  function _emscripten_asm_const_double_sync_on_main_thread(a0,a1,a2
+  ) {
+  return _emscripten_asm_const_int_sync_on_main_thread(a0,a1,a2);
+  }
+  Module["_emscripten_asm_const_double_sync_on_main_thread"] = _emscripten_asm_const_double_sync_on_main_thread;
+
+  function _emscripten_asm_const_async_on_main_thread(code, sigPtr, argbuf) {
+      return mainThreadEM_ASM(code, sigPtr, argbuf, 0);
+    }
+  Module["_emscripten_asm_const_async_on_main_thread"] = _emscripten_asm_const_async_on_main_thread;
+
 
   function jstoi_s(str) {
       return Number(str);
     }
   Module["jstoi_s"] = jstoi_s;
 
-  function _i64Add(a, b, c, d) {
-      /*
-        x = a + b*2^32
-        y = c + d*2^32
-        result = l + h*2^32
-      */
-      a = a|0; b = b|0; c = c|0; d = d|0;
-      var l = 0, h = 0;
-      l = (a + c)>>>0;
-      h = (b + d + (((l>>>0) < (a>>>0))|0))>>>0; // Add carry from low word to high word on overflow.
-      return ((setTempRet0((h) | 0),l|0)|0);
-    }
-  Module["_i64Add"] = _i64Add;
-
-  function _i64Subtract(a, b, c, d) {
-      a = a|0; b = b|0; c = c|0; d = d|0;
-      var l = 0, h = 0;
-      l = (a - c)>>>0;
-      h = (b - d)>>>0;
-      h = (b - d - (((c>>>0) > (a>>>0))|0))>>>0; // Borrow one from high word to low word on underflow.
-      return ((setTempRet0((h) | 0),l|0)|0);
-    }
-  Module["_i64Subtract"] = _i64Subtract;
-
-  function _bitshift64Shl(low, high, bits) {
-      low = low|0; high = high|0; bits = bits|0;
-      var ander = 0;
-      if ((bits|0) < 32) {
-        ander = ((1 << bits) - 1)|0;
-        setTempRet0(((high << bits) | ((low&(ander << (32 - bits))) >>> (32 - bits))) | 0);
-        return low << bits;
-      }
-      setTempRet0((low << (bits - 32)) | 0);
-      return 0;
-    }
-  Module["_bitshift64Shl"] = _bitshift64Shl;
-
-  function _bitshift64Ashr(low, high, bits) {
-      low = low|0; high = high|0; bits = bits|0;
-      var ander = 0;
-      if ((bits|0) < 32) {
-        ander = ((1 << bits) - 1)|0;
-        setTempRet0((high >> bits) | 0);
-        return (low >>> bits) | ((high&ander) << (32 - bits));
-      }
-      setTempRet0(((high|0) < 0 ? -1 : 0) | 0);
-      return (high >> (bits - 32))|0;
-    }
-  Module["_bitshift64Ashr"] = _bitshift64Ashr;
-
-  function _bitshift64Lshr(low, high, bits) {
-      low = low|0; high = high|0; bits = bits|0;
-      var ander = 0;
-      if ((bits|0) < 32) {
-        ander = ((1 << bits) - 1)|0;
-        setTempRet0((high >>> bits) | 0);
-        return (low >>> bits) | ((high&ander) << (32 - bits));
-      }
-      setTempRet0((0) | 0);
-      return (high >>> (bits - 32))|0;
-    }
-  Module["_bitshift64Lshr"] = _bitshift64Lshr;
-
   function __Unwind_Backtrace(func, arg) {
       var trace = _emscripten_get_callstack_js();
       var parts = trace.split('\n');
       for (var i = 0; i < parts.length; i++) {
-        var ret = dynCall_iii(func, 0, arg);
+        var ret = wasmTable.get(func)(0, arg);
         if (ret !== 0) return;
       }
     }
@@ -12175,11 +11433,9 @@ var ASM_CONSTS = {
     }
   Module["__Unwind_FindEnclosingFunction"] = __Unwind_FindEnclosingFunction;
 
-  
-  
-  
   var ExceptionInfoAttrs={DESTRUCTOR_OFFSET:0,REFCOUNT_OFFSET:4,TYPE_OFFSET:8,CAUGHT_OFFSET:12,RETHROWN_OFFSET:13,SIZE:16};
-  Module["ExceptionInfoAttrs"] = ExceptionInfoAttrs;function ExceptionInfo(excPtr) {
+  Module["ExceptionInfoAttrs"] = ExceptionInfoAttrs;
+  function ExceptionInfo(excPtr) {
       this.excPtr = excPtr;
       this.ptr = excPtr - ExceptionInfoAttrs.SIZE;
   
@@ -12246,7 +11502,8 @@ var ASM_CONSTS = {
   Module["ExceptionInfo"] = ExceptionInfo;
   
   var exceptionLast=0;
-  Module["exceptionLast"] = exceptionLast;function ___cxa_throw(ptr, type, destructor) {
+  Module["exceptionLast"] = exceptionLast;
+  function ___cxa_throw(ptr, type, destructor) {
       var info = new ExceptionInfo(ptr);
       // Initialize ExceptionInfo content after it was allocated in __cxa_allocate_exception.
       info.init(type, destructor);
@@ -12258,7 +11515,8 @@ var ASM_CONSTS = {
       }
       throw ptr + " - Exception catching is disabled, this exception cannot be caught. Compile with -s DISABLE_EXCEPTION_CATCHING=0 or DISABLE_EXCEPTION_CATCHING=2 to catch." + " (note: in dynamic linking, if a side module wants exceptions, the main module must be built with that support)";
     }
-  Module["___cxa_throw"] = ___cxa_throw;function __Unwind_RaiseException(ex) {
+  Module["___cxa_throw"] = ___cxa_throw;
+  function __Unwind_RaiseException(ex) {
       err('Warning: _Unwind_RaiseException is not correctly implemented');
       return ___cxa_throw(ex, 0, 0);
     }
@@ -12302,103 +11560,14 @@ var ASM_CONSTS = {
   function _emscripten_scan_stack(func) {
       var base = STACK_BASE; // TODO verify this is right on pthreads
       var end = stackSave();
-      dynCall_vii(func, Math.min(base, end), Math.max(base, end));
+      wasmTable.get(func)(Math.min(base, end), Math.max(base, end));
     }
   Module["_emscripten_scan_stack"] = _emscripten_scan_stack;
 
-  function _emscripten_prep_setjmp() {}
-  Module["_emscripten_prep_setjmp"] = _emscripten_prep_setjmp;
-
-  function _emscripten_cleanup_setjmp() {}
-  Module["_emscripten_cleanup_setjmp"] = _emscripten_cleanup_setjmp;
-
-  function _emscripten_check_longjmp() {}
-  Module["_emscripten_check_longjmp"] = _emscripten_check_longjmp;
-
-  function _emscripten_get_longjmp_result() {}
-  Module["_emscripten_get_longjmp_result"] = _emscripten_get_longjmp_result;
-
-  function _emscripten_setjmp() {}
-  Module["_emscripten_setjmp"] = _emscripten_setjmp;
-
-  function _emscripten_preinvoke() {}
-  Module["_emscripten_preinvoke"] = _emscripten_preinvoke;
-
-  function _emscripten_postinvoke() {}
-  Module["_emscripten_postinvoke"] = _emscripten_postinvoke;
-
-  function _emscripten_resume() {}
-  Module["_emscripten_resume"] = _emscripten_resume;
-
-  function _emscripten_landingpad() {}
-  Module["_emscripten_landingpad"] = _emscripten_landingpad;
-
-  function _getHigh32() {}
-  Module["_getHigh32"] = _getHigh32;
-
-  function _setHigh32() {}
-  Module["_setHigh32"] = _setHigh32;
-
-  function _FtoILow() {}
-  Module["_FtoILow"] = _FtoILow;
-
-  function _FtoIHigh() {}
-  Module["_FtoIHigh"] = _FtoIHigh;
-
-  function _DtoILow() {}
-  Module["_DtoILow"] = _DtoILow;
-
-  function _DtoIHigh() {}
-  Module["_DtoIHigh"] = _DtoIHigh;
-
-  function _BDtoILow() {}
-  Module["_BDtoILow"] = _BDtoILow;
-
-  function _BDtoIHigh() {}
-  Module["_BDtoIHigh"] = _BDtoIHigh;
-
-  function _SItoF() {}
-  Module["_SItoF"] = _SItoF;
-
-  function _UItoF() {}
-  Module["_UItoF"] = _UItoF;
-
-  function _SItoD() {}
-  Module["_SItoD"] = _SItoD;
-
-  function _UItoD() {}
-  Module["_UItoD"] = _UItoD;
-
-  function _BItoD() {}
-  Module["_BItoD"] = _BItoD;
-
-  function _llvm_dbg_value() {}
-  Module["_llvm_dbg_value"] = _llvm_dbg_value;
-
-  function _llvm_debugtrap() {}
-  Module["_llvm_debugtrap"] = _llvm_debugtrap;
-
-  function _llvm_ctlz_i32() {}
-  Module["_llvm_ctlz_i32"] = _llvm_ctlz_i32;
-
-  function _emscripten_asm_const() {}
-  Module["_emscripten_asm_const"] = _emscripten_asm_const;
-
-  function _emscripten_asm_const_int() {}
-  Module["_emscripten_asm_const_int"] = _emscripten_asm_const_int;
-
-  function _emscripten_asm_const_double() {}
-  Module["_emscripten_asm_const_double"] = _emscripten_asm_const_double;
-
-  function _emscripten_asm_const_int_sync_on_main_thread() {}
-  Module["_emscripten_asm_const_int_sync_on_main_thread"] = _emscripten_asm_const_int_sync_on_main_thread;
-
-  function _emscripten_asm_const_double_sync_on_main_thread() {}
-  Module["_emscripten_asm_const_double_sync_on_main_thread"] = _emscripten_asm_const_double_sync_on_main_thread;
-
-  function _emscripten_asm_const_async_on_main_thread() {}
-  Module["_emscripten_asm_const_async_on_main_thread"] = _emscripten_asm_const_async_on_main_thread;
-
+  function ___handle_stack_overflow() {
+      abort('stack overflow')
+    }
+  Module["___handle_stack_overflow"] = ___handle_stack_overflow;
 
 
   function listenOnce(object, event, func) {
@@ -12422,10 +11591,28 @@ var ASM_CONSTS = {
     }
   Module["autoResumeAudioContext"] = autoResumeAudioContext;
 
+
+  function getDynCaller(sig, ptr) {
+      assert(sig.indexOf('j') >= 0, 'getDynCaller should only be called with i64 sigs')
+      var argCache = [];
+      return function() {
+        argCache.length = arguments.length;
+        for (var i = 0; i < arguments.length; i++) {
+          argCache[i] = arguments[i];
+        }
+        return dynCall(sig, ptr, argCache);
+      };
+    }
+  Module["getDynCaller"] = getDynCaller;
+
+
+
   function _emscripten_stack_get_base() {
       return STACK_BASE;
     }
   Module["_emscripten_stack_get_base"] = _emscripten_stack_get_base;
+
+
 
 
 
@@ -12571,7 +11758,7 @@ var ASM_CONSTS = {
   Module["__sigalrm_handler"] = __sigalrm_handler;
 
   function _signal(sig, func) {
-      if (sig == 14 /*SIGALRM*/) {
+      if (sig == 14) {
         __sigalrm_handler = func;
       } else {
         err('Calling stub instead of signal()');
@@ -12668,7 +11855,7 @@ var ASM_CONSTS = {
 
   function _alarm(seconds) {
       setTimeout(function() {
-        if (__sigalrm_handler) dynCall_vi(__sigalrm_handler, 0);
+        if (__sigalrm_handler) wasmTable.get(__sigalrm_handler)(0);
       }, seconds*1000);
     }
   Module["_alarm"] = _alarm;
@@ -12803,24 +11990,24 @@ var ASM_CONSTS = {
 
 
 
-  
   function ___sys_setregid32(ruid, euid) {
       if (uid !== 0) return -63;
       return 0;
     }
-  Module["___sys_setregid32"] = ___sys_setregid32;function ___sys_setreuid32(a0,a1
+  Module["___sys_setregid32"] = ___sys_setregid32;
+  function ___sys_setreuid32(a0,a1
   ) {
   return ___sys_setregid32(a0,a1);
   }
   Module["___sys_setreuid32"] = ___sys_setreuid32;
 
 
-  
   function ___sys_setgid32(uid) {
       if (uid !== 0) return -63;
       return 0;
     }
-  Module["___sys_setgid32"] = ___sys_setgid32;function ___sys_setuid32(a0
+  Module["___sys_setgid32"] = ___sys_setgid32;
+  function ___sys_setuid32(a0
   ) {
   return ___sys_setgid32(a0);
   }
@@ -12828,12 +12015,12 @@ var ASM_CONSTS = {
 
 
 
-  
   function ___sys_setresgid32(ruid, euid, suid) {
       if (euid !== 0) return -63;
       return 0;
     }
-  Module["___sys_setresgid32"] = ___sys_setresgid32;function ___sys_setresuid32(a0,a1,a2
+  Module["___sys_setresgid32"] = ___sys_setresgid32;
+  function ___sys_setresuid32(a0,a1,a2
   ) {
   return ___sys_setresgid32(a0,a1,a2);
   }
@@ -13006,8 +12193,6 @@ var ASM_CONSTS = {
       }};
   Module["JSEvents"] = JSEvents;
 
-  
-  
   function maybeCStringToJsString(cString) {
       // "cString > 2" checks if the input is a number, and isn't of the special
       // values we accept here, EMSCRIPTEN_EVENT_TARGET_* (which map to 0, 1, 2).
@@ -13018,12 +12203,14 @@ var ASM_CONSTS = {
   Module["maybeCStringToJsString"] = maybeCStringToJsString;
   
   var specialHTMLTargets=[0, typeof document !== 'undefined' ? document : 0, typeof window !== 'undefined' ? window : 0];
-  Module["specialHTMLTargets"] = specialHTMLTargets;function findEventTarget(target) {
+  Module["specialHTMLTargets"] = specialHTMLTargets;
+  function findEventTarget(target) {
       target = maybeCStringToJsString(target);
       var domElement = specialHTMLTargets[target] || (typeof document !== 'undefined' ? document.querySelector(target) : undefined);
       return domElement;
     }
-  Module["findEventTarget"] = findEventTarget;function __registerKeyEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
+  Module["findEventTarget"] = findEventTarget;
+  function __registerKeyEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
       if (!JSEvents.keyEvent) JSEvents.keyEvent = _malloc( 164 );
   
       var keyEventHandlerFunc = function(e) {
@@ -13046,7 +12233,7 @@ var ASM_CONSTS = {
         stringToUTF8(e.char || '', keyEventData + 100, 32);
         stringToUTF8(e.locale || '', keyEventData + 132, 32);
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, keyEventData, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, keyEventData, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -13127,7 +12314,7 @@ var ASM_CONSTS = {
         // TODO: Make this access thread safe, or this could update live while app is reading it.
         __fillMouseEventData(JSEvents.mouseEvent, e, target);
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, JSEvents.mouseEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, JSEvents.mouseEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -13218,7 +12405,7 @@ var ASM_CONSTS = {
         HEAPF64[(((wheelEvent)+(72))>>3)]=e["deltaY"];
         HEAPF64[(((wheelEvent)+(80))>>3)]=e["deltaZ"];
         HEAP32[(((wheelEvent)+(88))>>2)]=e["deltaMode"];
-        if (dynCall_iiii(callbackfunc, eventTypeId, wheelEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, wheelEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -13258,8 +12445,12 @@ var ASM_CONSTS = {
           // causing a new scroll, etc..
           return;
         }
-        var uiEvent = JSEvents.uiEvent;
         var b = document.body; // Take document.body to a variable, Closure compiler does not outline access to it on its own.
+        if (!b) {
+          // During a page unload 'body' can be null, with "Cannot read property 'clientWidth' of null" being thrown
+          return;
+        }
+        var uiEvent = JSEvents.uiEvent;
         HEAP32[((uiEvent)>>2)]=e.detail;
         HEAP32[(((uiEvent)+(4))>>2)]=b.clientWidth;
         HEAP32[(((uiEvent)+(8))>>2)]=b.clientHeight;
@@ -13269,7 +12460,7 @@ var ASM_CONSTS = {
         HEAP32[(((uiEvent)+(24))>>2)]=outerHeight;
         HEAP32[(((uiEvent)+(28))>>2)]=pageXOffset;
         HEAP32[(((uiEvent)+(32))>>2)]=pageYOffset;
-        if (dynCall_iiii(callbackfunc, eventTypeId, uiEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, uiEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -13308,7 +12499,7 @@ var ASM_CONSTS = {
         stringToUTF8(nodeName, focusEvent + 0, 128);
         stringToUTF8(id, focusEvent + 128, 128);
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, focusEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, focusEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -13362,7 +12553,7 @@ var ASM_CONSTS = {
   
         __fillDeviceOrientationEventData(JSEvents.deviceOrientationEvent, e, target); // TODO: Thread-safety with respect to emscripten_get_deviceorientation_status()
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, JSEvents.deviceOrientationEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, JSEvents.deviceOrientationEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -13423,7 +12614,7 @@ var ASM_CONSTS = {
   
         __fillDeviceMotionEventData(JSEvents.deviceMotionEvent, e, target); // TODO: Thread-safety with respect to emscripten_get_devicemotion_status()
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, JSEvents.deviceMotionEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, JSEvents.deviceMotionEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -13484,7 +12675,7 @@ var ASM_CONSTS = {
   
         __fillOrientationChangeEventData(orientationChangeEvent);
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, orientationChangeEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, orientationChangeEvent, userData)) e.preventDefault();
       };
   
       if (eventTypeString == "orientationchange" && screen.mozOrientation !== undefined) {
@@ -13591,7 +12782,7 @@ var ASM_CONSTS = {
   
         __fillFullscreenChangeEventData(fullscreenChangeEvent);
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, fullscreenChangeEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, fullscreenChangeEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -13611,7 +12802,6 @@ var ASM_CONSTS = {
       if (!target) return -4;
       __registerFullscreenChangeEventCallback(target, userData, useCapture, callbackfunc, 19, "fullscreenchange", targetThread);
   
-  
       // Unprefixed Fullscreen API shipped in Chromium 71 (https://bugs.chromium.org/p/chromium/issues/detail?id=383813)
       // As of Safari 13.0.3 on macOS Catalina 10.15.1 still ships with prefixed webkitfullscreenchange. TODO: revisit this check once Safari ships unprefixed version.
       __registerFullscreenChangeEventCallback(target, userData, useCapture, callbackfunc, 19, "webkitfullscreenchange", targetThread);
@@ -13627,17 +12817,14 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_get_fullscreen_status"] = _emscripten_get_fullscreen_status;
 
-  
-  
-  
-  
   function _emscripten_get_canvas_element_size(target, width, height) {
       var canvas = findCanvasEventTarget(target);
       if (!canvas) return -4;
       HEAP32[((width)>>2)]=canvas.width;
       HEAP32[((height)>>2)]=canvas.height;
     }
-  Module["_emscripten_get_canvas_element_size"] = _emscripten_get_canvas_element_size;function __get_canvas_element_size(target) {
+  Module["_emscripten_get_canvas_element_size"] = _emscripten_get_canvas_element_size;
+  function __get_canvas_element_size(target) {
       var stackTop = stackSave();
       var w = stackAlloc(8);
       var h = w + 4;
@@ -13651,7 +12838,6 @@ var ASM_CONSTS = {
     }
   Module["__get_canvas_element_size"] = __get_canvas_element_size;
   
-  
   function _emscripten_set_canvas_element_size(target, width, height) {
       var canvas = findCanvasEventTarget(target);
       if (!canvas) return -4;
@@ -13659,7 +12845,8 @@ var ASM_CONSTS = {
       canvas.height = height;
       return 0;
     }
-  Module["_emscripten_set_canvas_element_size"] = _emscripten_set_canvas_element_size;function __set_canvas_element_size(target, width, height) {
+  Module["_emscripten_set_canvas_element_size"] = _emscripten_set_canvas_element_size;
+  function __set_canvas_element_size(target, width, height) {
       if (!target.controlTransferredOffscreen) {
         target.width = width;
         target.height = height;
@@ -13673,7 +12860,8 @@ var ASM_CONSTS = {
         stackRestore(stackTop);
       }
     }
-  Module["__set_canvas_element_size"] = __set_canvas_element_size;function __registerRestoreOldStyle(canvas) {
+  Module["__set_canvas_element_size"] = __set_canvas_element_size;
+  function __registerRestoreOldStyle(canvas) {
       var canvasSize = __get_canvas_element_size(canvas);
       var oldWidth = canvasSize[0];
       var oldHeight = canvasSize[1];
@@ -13703,11 +12891,9 @@ var ASM_CONSTS = {
         if (!fullscreenElement) {
           document.removeEventListener('fullscreenchange', restoreOldStyle);
   
-  
           // Unprefixed Fullscreen API shipped in Chromium 71 (https://bugs.chromium.org/p/chromium/issues/detail?id=383813)
           // As of Safari 13.0.3 on macOS Catalina 10.15.1 still ships with prefixed webkitfullscreenchange. TODO: revisit this check once Safari ships unprefixed version.
           document.removeEventListener('webkitfullscreenchange', restoreOldStyle);
-  
   
           __set_canvas_element_size(canvas, oldWidth, oldHeight);
   
@@ -13734,7 +12920,7 @@ var ASM_CONSTS = {
           if (canvas.GLctxObject) canvas.GLctxObject.GLctx.viewport(0, 0, oldWidth, oldHeight);
   
           if (__currentFullscreenStrategy.canvasResizedCallback) {
-            dynCall_iiii(__currentFullscreenStrategy.canvasResizedCallback, 37, 0, __currentFullscreenStrategy.canvasResizedCallbackUserData);
+            wasmTable.get(__currentFullscreenStrategy.canvasResizedCallback)(37, 0, __currentFullscreenStrategy.canvasResizedCallbackUserData);
           }
         }
       }
@@ -13751,7 +12937,8 @@ var ASM_CONSTS = {
         element.style.paddingLeft = element.style.paddingRight = leftRight + 'px';
         element.style.paddingTop = element.style.paddingBottom = topBottom + 'px';
     }
-  Module["__setLetterbox"] = __setLetterbox;function _JSEvents_resizeCanvasForFullscreen(target, strategy) {
+  Module["__setLetterbox"] = __setLetterbox;
+  function _JSEvents_resizeCanvasForFullscreen(target, strategy) {
       var restoreOldStyle = __registerRestoreOldStyle(target);
       var cssWidth = strategy.softFullscreen ? innerWidth : screen.width;
       var cssHeight = strategy.softFullscreen ? innerHeight : screen.height;
@@ -13807,7 +12994,8 @@ var ASM_CONSTS = {
       }
       return restoreOldStyle;
     }
-  Module["_JSEvents_resizeCanvasForFullscreen"] = _JSEvents_resizeCanvasForFullscreen;function _JSEvents_requestFullscreen(target, strategy) {
+  Module["_JSEvents_resizeCanvasForFullscreen"] = _JSEvents_resizeCanvasForFullscreen;
+  function _JSEvents_requestFullscreen(target, strategy) {
       // EMSCRIPTEN_FULLSCREEN_SCALE_DEFAULT + EMSCRIPTEN_FULLSCREEN_CANVAS_SCALE_NONE is a mode where no extra logic is performed to the DOM elements.
       if (strategy.scaleMode != 0 || strategy.canvasResolutionScaleMode != 0) {
         _JSEvents_resizeCanvasForFullscreen(target, strategy);
@@ -13824,7 +13012,7 @@ var ASM_CONSTS = {
       __currentFullscreenStrategy = strategy;
   
       if (strategy.canvasResizedCallback) {
-        dynCall_iiii(strategy.canvasResizedCallback, 37, 0, strategy.canvasResizedCallbackUserData);
+        wasmTable.get(strategy.canvasResizedCallback)(37, 0, strategy.canvasResizedCallbackUserData);
       }
   
       return 0;
@@ -13916,7 +13104,7 @@ var ASM_CONSTS = {
       }
   
       if (!inCenteredWithoutScalingFullscreenMode && __currentFullscreenStrategy.canvasResizedCallback) {
-        dynCall_iiii(__currentFullscreenStrategy.canvasResizedCallback, 37, 0, __currentFullscreenStrategy.canvasResizedCallbackUserData);
+        wasmTable.get(__currentFullscreenStrategy.canvasResizedCallback)(37, 0, __currentFullscreenStrategy.canvasResizedCallbackUserData);
       }
     }
   Module["__softFullscreenResizeWebGLRenderTarget"] = __softFullscreenResizeWebGLRenderTarget;
@@ -14002,7 +13190,7 @@ var ASM_CONSTS = {
         __restoreHiddenElements(hiddenElements);
         removeEventListener('resize', __softFullscreenResizeWebGLRenderTarget);
         if (strategy.canvasResizedCallback) {
-          dynCall_iiii(strategy.canvasResizedCallback, 37, 0, strategy.canvasResizedCallbackUserData);
+          wasmTable.get(strategy.canvasResizedCallback)(37, 0, strategy.canvasResizedCallbackUserData);
         }
         __currentFullscreenStrategy = 0;
       }
@@ -14012,7 +13200,7 @@ var ASM_CONSTS = {
   
       // Inform the caller that the canvas size has changed.
       if (strategy.canvasResizedCallback) {
-        dynCall_iiii(strategy.canvasResizedCallback, 37, 0, strategy.canvasResizedCallbackUserData);
+        wasmTable.get(strategy.canvasResizedCallback)(37, 0, strategy.canvasResizedCallbackUserData);
       }
   
       return 0;
@@ -14066,7 +13254,7 @@ var ASM_CONSTS = {
         var pointerlockChangeEvent = JSEvents.pointerlockChangeEvent;
         __fillPointerlockChangeEventData(pointerlockChangeEvent);
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, pointerlockChangeEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, pointerlockChangeEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -14102,7 +13290,7 @@ var ASM_CONSTS = {
       var pointerlockErrorEventHandlerFunc = function(ev) {
         var e = ev || event;
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, 0, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, 0, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -14245,7 +13433,7 @@ var ASM_CONSTS = {
   
         __fillVisibilityChangeEventData(visibilityChangeEvent);
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, visibilityChangeEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, visibilityChangeEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -14337,7 +13525,7 @@ var ASM_CONSTS = {
         }
         HEAP32[((touchEvent)>>2)]=numTouches;
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, touchEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, touchEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -14415,7 +13603,7 @@ var ASM_CONSTS = {
         var gamepadEvent = JSEvents.gamepadEvent;
         __fillGamepadEventData(gamepadEvent, e["gamepad"]);
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, gamepadEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, gamepadEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -14480,7 +13668,7 @@ var ASM_CONSTS = {
         var e = ev || event;
   
         // Note: This is always called on the main browser thread, since it needs synchronously return a value!
-        var confirmationMessage = dynCall_iiii(callbackfunc, eventTypeId, 0, userData);
+        var confirmationMessage = wasmTable.get(callbackfunc)(eventTypeId, 0, userData);
         
         if (confirmationMessage) {
           confirmationMessage = UTF8ToString(confirmationMessage);
@@ -14533,7 +13721,7 @@ var ASM_CONSTS = {
         var batteryEvent = JSEvents.batteryEvent;
         __fillBatteryEventData(batteryEvent, __battery());
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, batteryEvent, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, batteryEvent, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -14602,7 +13790,7 @@ var ASM_CONSTS = {
 
   function _emscripten_request_animation_frame(cb, userData) {
       return requestAnimationFrame(function(timeStamp) {
-        dynCall_idi(cb, timeStamp, userData);
+        wasmTable.get(cb)(timeStamp, userData);
       });
     }
   Module["_emscripten_request_animation_frame"] = _emscripten_request_animation_frame;
@@ -14614,7 +13802,7 @@ var ASM_CONSTS = {
 
   function _emscripten_request_animation_frame_loop(cb, userData) {
       function tick(timeStamp) {
-        if (dynCall_idi(cb, timeStamp, userData)) {
+        if (wasmTable.get(cb)(timeStamp, userData)) {
           requestAnimationFrame(tick);
         }
       }
@@ -14628,7 +13816,7 @@ var ASM_CONSTS = {
   function _emscripten_set_immediate(cb, userData) {
       polyfillSetImmediate();
       return setImmediate(function() {
-        dynCall_vi(cb, userData);
+        wasmTable.get(cb)(userData);
       });
     }
   Module["_emscripten_set_immediate"] = _emscripten_set_immediate;
@@ -14641,7 +13829,7 @@ var ASM_CONSTS = {
   function _emscripten_set_immediate_loop(cb, userData) {
       polyfillSetImmediate();
       function tick() {
-        if (dynCall_ii(cb, userData)) {
+        if (wasmTable.get(cb)(userData)) {
           setImmediate(tick);
         }
       }
@@ -14651,7 +13839,7 @@ var ASM_CONSTS = {
 
   function _emscripten_set_timeout(cb, msecs, userData) {
       return setTimeout(function() {
-        dynCall_vi(cb, userData);
+        wasmTable.get(cb)(userData);
       }, msecs);
     }
   Module["_emscripten_set_timeout"] = _emscripten_set_timeout;
@@ -14665,11 +13853,11 @@ var ASM_CONSTS = {
       function tick() {
         var t = performance.now();
         var n = t + msecs;
-        if (dynCall_idi(cb, t, userData)) {
-          setTimeout(tick,
-            // Save a little bit of code space: modern browsers should treat negative setTimeout as timeout of 0 (https://stackoverflow.com/questions/8430966/is-calling-settimeout-with-a-negative-delay-ok)
-            t - performance.now()
-            );
+        if (wasmTable.get(cb)(t, userData)) {
+          // Save a little bit of code space: modern browsers should treat
+          // negative setTimeout as timeout of 0
+          // (https://stackoverflow.com/questions/8430966/is-calling-settimeout-with-a-negative-delay-ok)
+          setTimeout(tick, t - performance.now());
         }
       }
       return setTimeout(tick, 0);
@@ -14678,7 +13866,7 @@ var ASM_CONSTS = {
 
   function _emscripten_set_interval(cb, msecs, userData) {
       return setInterval(function() {
-        dynCall_vi(cb, userData)
+        wasmTable.get(cb)(userData)
       }, msecs);
     }
   Module["_emscripten_set_interval"] = _emscripten_set_interval;
@@ -14821,7 +14009,6 @@ var ASM_CONSTS = {
     }
   Module["_clock_res_get"] = _clock_res_get;
 
-  
   function readI53FromI64(ptr) {
       return HEAPU32[ptr>>2] + HEAP32[ptr+4>>2] * 4294967296;
     }
@@ -14830,7 +14017,8 @@ var ASM_CONSTS = {
   function readI53FromU64(ptr) {
       return HEAPU32[ptr>>2] + HEAPU32[ptr+4>>2] * 4294967296;
     }
-  Module["readI53FromU64"] = readI53FromU64;function writeI53ToI64(ptr, num) {
+  Module["readI53FromU64"] = readI53FromU64;
+  function writeI53ToI64(ptr, num) {
       HEAPU32[ptr>>2] = num;
       HEAPU32[ptr+4>>2] = (num - HEAPU32[ptr>>2])/4294967296;
       var deserialized = (num >= 0) ? readI53FromU64(ptr) : readI53FromI64(ptr);
@@ -14883,6 +14071,44 @@ var ASM_CONSTS = {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  function _dlerror() {
+      // char *dlerror(void);
+      // http://pubs.opengroup.org/onlinepubs/009695399/functions/dlerror.html
+      if (DLFCN.errorMsg === null) {
+        return 0;
+      }
+      if (DLFCN.error) _free(DLFCN.error);
+      DLFCN.error = stringToNewUTF8(DLFCN.errorMsg);
+      DLFCN.errorMsg = null;
+      return DLFCN.error;
+    }
+  Module["_dlerror"] = _dlerror;
+
+  function _dladdr(addr, info) {
+      // report all function pointers as coming from this program itself XXX not really correct in any way
+      var fname = stringToNewUTF8(getExecutableName()); // XXX leak
+      HEAP32[((info)>>2)]=fname;
+      HEAP32[(((info)+(4))>>2)]=0;
+      HEAP32[(((info)+(8))>>2)]=0;
+      HEAP32[(((info)+(12))>>2)]=0;
+      return 1;
+    }
+  Module["_dladdr"] = _dladdr;
 
 
   var exceptionCaught= [];
@@ -14950,7 +14176,6 @@ var ASM_CONSTS = {
     }
   Module["exception_addRef"] = exception_addRef;
 
-  
   function ___cxa_free_exception(ptr) {
       try {
         return _free(new ExceptionInfo(ptr).ptr);
@@ -14958,7 +14183,8 @@ var ASM_CONSTS = {
         err('exception during cxa_free_exception: ' + e);
       }
     }
-  Module["___cxa_free_exception"] = ___cxa_free_exception;function exception_decRef(info) {
+  Module["___cxa_free_exception"] = ___cxa_free_exception;
+  function exception_decRef(info) {
       // A rethrown exception can reach refcount 0; it must not be discarded
       // Its next handler will clear the rethrown flag and addRef it, prior to
       // final decRef and destruction here
@@ -14966,7 +14192,7 @@ var ASM_CONSTS = {
         var destructor = info.get_destructor();
         if (destructor) {
           // In Wasm, destructors return 'this' as in ARM
-          Module['dynCall_ii'](destructor, info.excPtr);
+          wasmTable.get(destructor)(info.excPtr);
         }
         ___cxa_free_exception(info.excPtr);
       }
@@ -14991,6 +14217,8 @@ var ASM_CONSTS = {
         // Only pop if the corresponding push was through rethrow_primary_exception
         exceptionCaught.push(catchInfo);
         info.set_rethrown(true);
+        info.set_caught(false);
+        __ZSt18uncaught_exceptionv.uncaught_exceptions++;
       } else {
         catchInfo.free();
       }
@@ -15058,7 +14286,6 @@ var ASM_CONSTS = {
 
 
 
-  
   function ___resumeException(catchInfoPtr) {
       var catchInfo = new CatchInfo(catchInfoPtr);
       var ptr = catchInfo.get_base_ptr();
@@ -15066,7 +14293,8 @@ var ASM_CONSTS = {
       catchInfo.free();
       throw ptr + " - Exception catching is disabled, this exception cannot be caught. Compile with -s DISABLE_EXCEPTION_CATCHING=0 or DISABLE_EXCEPTION_CATCHING=2 to catch." + " (note: in dynamic linking, if a side module wants exceptions, the main module must be built with that support)";
     }
-  Module["___resumeException"] = ___resumeException;function ___cxa_find_matching_catch() {
+  Module["___resumeException"] = ___resumeException;
+  function ___cxa_find_matching_catch() {
       var thrown = exceptionLast;
       if (!thrown) {
         // just pass through the null ptr
@@ -15083,8 +14311,9 @@ var ASM_CONSTS = {
       var typeArray = Array.prototype.slice.call(arguments);
   
       // can_catch receives a **, add indirection
-      var thrownBuf = 0;
-      HEAP32[((thrownBuf)>>2)]=thrown;
+      var stackTop = stackSave();
+      var exceptionThrowBuf = stackAlloc(4);
+      HEAP32[((exceptionThrowBuf)>>2)]=thrown;
       // The different catch blocks are denoted by different types.
       // Due to inheritance, those types may not precisely match the
       // type of the thrown object. Find one which matches, and
@@ -15095,14 +14324,15 @@ var ASM_CONSTS = {
           // Catch all clause matched or exactly the same type is caught
           break;
         }
-        if (Module['___cxa_can_catch'](caughtType, thrownType, thrownBuf)) {
-          var adjusted = HEAP32[((thrownBuf)>>2)];
+        if (Module['___cxa_can_catch'](caughtType, thrownType, exceptionThrowBuf)) {
+          var adjusted = HEAP32[((exceptionThrowBuf)>>2)];
           if (thrown !== adjusted) {
             catchInfo.set_adjusted_ptr(adjusted);
           }
           return ((setTempRet0(caughtType),catchInfo.ptr)|0);
         }
       }
+      stackRestore(stackTop);
       return ((setTempRet0(thrownType),catchInfo.ptr)|0);
     }
   Module["___cxa_find_matching_catch"] = ___cxa_find_matching_catch;
@@ -15110,14 +14340,45 @@ var ASM_CONSTS = {
 
 
 
+  var funcWrappers={};
+  Module["funcWrappers"] = funcWrappers;
+
+  function getFuncWrapper(func, sig) {
+      if (!func) return; // on null pointer, return undefined
+      assert(sig);
+      if (!funcWrappers[sig]) {
+        funcWrappers[sig] = {};
+      }
+      var sigCache = funcWrappers[sig];
+      if (!sigCache[func]) {
+        // optimize away arguments usage in common cases
+        if (sig.length === 1) {
+          sigCache[func] = function dynCall_wrapper() {
+            return dynCall(sig, func);
+          };
+        } else if (sig.length === 2) {
+          sigCache[func] = function dynCall_wrapper(arg) {
+            return dynCall(sig, func, [arg]);
+          };
+        } else {
+          // general case
+          sigCache[func] = function dynCall_wrapper() {
+            return dynCall(sig, func, Array.prototype.slice.call(arguments));
+          };
+        }
+      }
+      return sigCache[func];
+    }
+  Module["getFuncWrapper"] = getFuncWrapper;
+
   function _emscripten_async_wget_data(url, arg, onload, onerror) {
       Browser.asyncLoad(UTF8ToString(url), function(byteArray) {
         var buffer = _malloc(byteArray.length);
         HEAPU8.set(byteArray, buffer);
-        dynCall_viii(onload, arg, buffer, byteArray.length);
+        wasmTable.get(onload)(arg, buffer, byteArray.length);
         _free(buffer);
       }, function() {
-        if (onerror) dynCall_vi(onerror, arg);
+        if (onerror) wasmTable.get(onerror)(arg);
       }, true /* no need for run dependency, this is async but will not do any prepare etc. step */ );
     }
   Module["_emscripten_async_wget_data"] = _emscripten_async_wget_data;
@@ -15153,11 +14414,11 @@ var ASM_CONSTS = {
           FS.createDataFile( _file.substr(0, index), _file.substr(index + 1), new Uint8Array(/** @type{ArrayBuffer}*/(http.response)), true, true, false);
           if (onload) {
             var stack = stackSave();
-            dynCall_viii(onload, handle, arg, allocate(intArrayFromString(_file), 'i8', ALLOC_STACK));
+            wasmTable.get(onload)(handle, arg, allocate(intArrayFromString(_file), ALLOC_STACK));
             stackRestore(stack);
           }
         } else {
-          if (onerror) dynCall_viii(onerror, handle, arg, http.status);
+          if (onerror) wasmTable.get(onerror)(handle, arg, http.status);
         }
   
         delete Browser.wgetRequests[handle];
@@ -15165,7 +14426,7 @@ var ASM_CONSTS = {
   
       // ERROR
       http.onerror = function http_onerror(e) {
-        if (onerror) dynCall_viii(onerror, handle, arg, http.status);
+        if (onerror) wasmTable.get(onerror)(handle, arg, http.status);
         delete Browser.wgetRequests[handle];
       };
   
@@ -15173,7 +14434,7 @@ var ASM_CONSTS = {
       http.onprogress = function http_onprogress(e) {
         if (e.lengthComputable || (e.lengthComputable === undefined && e.total != 0)) {
           var percentComplete = (e.loaded / e.total)*100;
-          if (onprogress) dynCall_viii(onprogress, handle, arg, percentComplete);
+          if (onprogress) wasmTable.get(onprogress)(handle, arg, percentComplete);
         }
       };
   
@@ -15213,10 +14474,10 @@ var ASM_CONSTS = {
           var byteArray = new Uint8Array(/** @type{ArrayBuffer} */(http.response));
           var buffer = _malloc(byteArray.length);
           HEAPU8.set(byteArray, buffer);
-          if (onload) dynCall_viiii(onload, handle, arg, buffer, byteArray.length);
+          if (onload) wasmTable.get(onload)(handle, arg, buffer, byteArray.length);
           if (free) _free(buffer);
         } else {
-          if (onerror) dynCall_viiii(onerror, handle, arg, http.status, http.statusText);
+          if (onerror) wasmTable.get(onerror)(handle, arg, http.status, http.statusText);
         }
         delete Browser.wgetRequests[handle];
       };
@@ -15224,14 +14485,14 @@ var ASM_CONSTS = {
       // ERROR
       http.onerror = function http_onerror(e) {
         if (onerror) {
-          dynCall_viiii(onerror, handle, arg, http.status, http.statusText);
+          wasmTable.get(onerror)(handle, arg, http.status, http.statusText);
         }
         delete Browser.wgetRequests[handle];
       };
   
       // PROGRESS
       http.onprogress = function http_onprogress(e) {
-        if (onprogress) dynCall_viiii(onprogress, handle, arg, e.loaded, e.lengthComputable || e.lengthComputable === undefined ? e.total : 0);
+        if (onprogress) wasmTable.get(onprogress)(handle, arg, e.loaded, e.lengthComputable || e.lengthComputable === undefined ? e.total : 0);
       };
   
       // ABORT
@@ -15272,10 +14533,10 @@ var ASM_CONSTS = {
         PATH.basename(_file),
         new Uint8Array(data.object.contents), true, true,
         function() {
-          if (onload) dynCall_vi(onload, file);
+          if (onload) wasmTable.get(onload)(file);
         },
         function() {
-          if (onerror) dynCall_vi(onerror, file);
+          if (onerror) wasmTable.get(onerror)(file);
         },
         true // don'tCreateFile - it's already there
       );
@@ -15298,10 +14559,10 @@ var ASM_CONSTS = {
         HEAPU8.subarray((data),(data + size)),
         true, true,
         function() {
-          if (onload) dynCall_vii(onload, arg, cname);
+          if (onload) wasmTable.get(onload)(arg, cname);
         },
         function() {
-          if (onerror) dynCall_vi(onerror, arg);
+          if (onerror) wasmTable.get(onerror)(arg);
         },
         true // don'tCreateFile - it's already there
       );
@@ -15348,9 +14609,17 @@ var ASM_CONSTS = {
   Module["_emscripten_get_main_loop_timing"] = _emscripten_get_main_loop_timing;
 
 
+  /** @param {number|boolean=} noSetTiming */
+  function _emscripten_set_main_loop(func, fps, simulateInfiniteLoop, arg, noSetTiming) {
+      var browserIterationFunc = function() { wasmTable.get(func)(); };
+      setMainLoop(browserIterationFunc, fps, simulateInfiniteLoop, arg, noSetTiming);
+    }
+  Module["_emscripten_set_main_loop"] = _emscripten_set_main_loop;
+
 
   function _emscripten_set_main_loop_arg(func, arg, fps, simulateInfiniteLoop) {
-      _emscripten_set_main_loop(func, fps, simulateInfiniteLoop, arg);
+      var browserIterationFunc = function() { wasmTable.get(func)(arg); };
+      setMainLoop(browserIterationFunc, fps, simulateInfiniteLoop, arg);
     }
   Module["_emscripten_set_main_loop_arg"] = _emscripten_set_main_loop_arg;
 
@@ -15372,7 +14641,7 @@ var ASM_CONSTS = {
 
   function __emscripten_push_main_loop_blocker(func, arg, name) {
       Browser.mainLoop.queue.push({ func: function() {
-        dynCall_vi(func, arg);
+        wasmTable.get(func)(arg);
       }, name: UTF8ToString(name), counted: true });
       Browser.mainLoop.updateStatus();
     }
@@ -15380,7 +14649,7 @@ var ASM_CONSTS = {
 
   function __emscripten_push_uncounted_main_loop_blocker(func, arg, name) {
       Browser.mainLoop.queue.push({ func: function() {
-        dynCall_vi(func, arg);
+        wasmTable.get(func)(arg);
       }, name: UTF8ToString(name), counted: false });
       Browser.mainLoop.updateStatus();
     }
@@ -15397,7 +14666,7 @@ var ASM_CONSTS = {
       noExitRuntime = true;
   
       function wrapper() {
-        getFuncWrapper(func, 'vi')(arg);
+        wasmTable.get(func)(arg);
       }
   
       if (millis >= 0) {
@@ -15626,16 +14895,17 @@ var ASM_CONSTS = {
 
 
 
+
   function ___set_network_callback(event, userData, callback) {
       function _callback(data) {
         try {
           if (event === 'error') {
             var sp = stackSave();
-            var msg = allocate(intArrayFromString(data[2]), 'i8', ALLOC_STACK);
-            dynCall_viiii(callback, data[0], data[1], msg, userData);
+            var msg = allocate(intArrayFromString(data[2]), ALLOC_STACK);
+            wasmTable.get(callback)(data[0], data[1], msg, userData);
             stackRestore(sp);
           } else {
-            dynCall_vii(callback, data, userData);
+            wasmTable.get(callback)(data, userData);
           }
         } catch (e) {
           if (e instanceof ExitStatus) {
@@ -15682,8 +14952,6 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_set_socket_close_callback"] = _emscripten_set_socket_close_callback;
 
-  
-  
   function __webgl_enable_ANGLE_instanced_arrays(ctx) {
       // Extension available in WebGL 1 from Firefox 26 and Google Chrome 30 onwards. Core feature in WebGL 2.
       var ext = ctx.getExtension('ANGLE_instanced_arrays');
@@ -15723,7 +14991,8 @@ var ASM_CONSTS = {
       // Closure is expected to be allowed to minify the '.multiDrawWebgl' property, so not accessing it quoted.
       return !!(ctx.multiDrawWebgl = ctx.getExtension('WEBGL_multi_draw'));
     }
-  Module["__webgl_enable_WEBGL_multi_draw"] = __webgl_enable_WEBGL_multi_draw;var GL={counter:1,buffers:[],programs:[],framebuffers:[],renderbuffers:[],textures:[],uniforms:[],shaders:[],vaos:[],contexts:[],offscreenCanvases:{},timerQueriesEXT:[],programInfos:{},stringCache:{},unpackAlignment:4,recordError:function recordError(errorCode) {
+  Module["__webgl_enable_WEBGL_multi_draw"] = __webgl_enable_WEBGL_multi_draw;
+  var GL={counter:1,buffers:[],programs:[],framebuffers:[],renderbuffers:[],textures:[],uniforms:[],shaders:[],vaos:[],contexts:[],offscreenCanvases:{},timerQueriesEXT:[],programInfos:{},stringCache:{},unpackAlignment:4,recordError:function recordError(errorCode) {
         if (!GL.lastError) {
           GL.lastError = errorCode;
         }
@@ -15742,21 +15011,14 @@ var ASM_CONSTS = {
         return source;
       },createContext:function(canvas, webGLContextAttributes) {
   
-  
-  
-  
-  
         var ctx = 
           (canvas.getContext("webgl", webGLContextAttributes)
             // https://caniuse.com/#feat=webgl
             );
   
-  
         if (!ctx) return 0;
   
         var handle = GL.registerContext(ctx, webGLContextAttributes);
-  
-  
   
         return handle;
       },registerContext:function(ctx, webGLContextAttributes) {
@@ -15770,16 +15032,12 @@ var ASM_CONSTS = {
           GLctx: ctx
         };
   
-  
         // Store the created context object so that we can access the context given a canvas without having to pass the parameters again.
         if (ctx.canvas) ctx.canvas.GLctxObject = context;
         GL.contexts[handle] = context;
         if (typeof webGLContextAttributes.enableExtensionsByDefault === 'undefined' || webGLContextAttributes.enableExtensionsByDefault) {
           GL.initExtensions(context);
         }
-  
-  
-  
   
         return handle;
       },makeContextCurrent:function(contextHandle) {
@@ -15894,7 +15152,8 @@ var ASM_CONSTS = {
           }
         }
       }};
-  Module["GL"] = GL;var tempFixedLengthArray=[];
+  Module["GL"] = GL;
+  var tempFixedLengthArray=[];
   Module["tempFixedLengthArray"] = tempFixedLengthArray;
 
   var miniTempWebGLFloatBuffers=[];
@@ -15911,7 +15170,6 @@ var ASM_CONSTS = {
       type -= 0x1400;
   
       if (type == 1) return HEAPU8;
-  
   
       if (type == 4) return HEAP32;
   
@@ -16659,8 +15917,6 @@ var ASM_CONSTS = {
 
   function _glUniform1iv(location, count, value) {
   
-  
-  
       if (count <= 288) {
         // avoid allocation when uploading few enough uniforms
         var view = __miniTempWebGLIntBuffers[count-1];
@@ -16676,8 +15932,6 @@ var ASM_CONSTS = {
   Module["_glUniform1iv"] = _glUniform1iv;
 
   function _glUniform2iv(location, count, value) {
-  
-  
   
       if (count <= 144) {
         // avoid allocation when uploading few enough uniforms
@@ -16696,8 +15950,6 @@ var ASM_CONSTS = {
 
   function _glUniform3iv(location, count, value) {
   
-  
-  
       if (count <= 96) {
         // avoid allocation when uploading few enough uniforms
         var view = __miniTempWebGLIntBuffers[3*count-1];
@@ -16715,8 +15967,6 @@ var ASM_CONSTS = {
   Module["_glUniform3iv"] = _glUniform3iv;
 
   function _glUniform4iv(location, count, value) {
-  
-  
   
       if (count <= 72) {
         // avoid allocation when uploading few enough uniforms
@@ -16737,8 +15987,6 @@ var ASM_CONSTS = {
 
   function _glUniform1fv(location, count, value) {
   
-  
-  
       if (count <= 288) {
         // avoid allocation when uploading few enough uniforms
         var view = miniTempWebGLFloatBuffers[count-1];
@@ -16754,8 +16002,6 @@ var ASM_CONSTS = {
   Module["_glUniform1fv"] = _glUniform1fv;
 
   function _glUniform2fv(location, count, value) {
-  
-  
   
       if (count <= 144) {
         // avoid allocation when uploading few enough uniforms
@@ -16774,8 +16020,6 @@ var ASM_CONSTS = {
 
   function _glUniform3fv(location, count, value) {
   
-  
-  
       if (count <= 96) {
         // avoid allocation when uploading few enough uniforms
         var view = miniTempWebGLFloatBuffers[3*count-1];
@@ -16793,8 +16037,6 @@ var ASM_CONSTS = {
   Module["_glUniform3fv"] = _glUniform3fv;
 
   function _glUniform4fv(location, count, value) {
-  
-  
   
       if (count <= 72) {
         // avoid allocation when uploading few enough uniforms
@@ -16819,8 +16061,6 @@ var ASM_CONSTS = {
 
   function _glUniformMatrix2fv(location, count, transpose, value) {
   
-  
-  
       if (count <= 72) {
         // avoid allocation when uploading few enough uniforms
         var view = miniTempWebGLFloatBuffers[4*count-1];
@@ -16839,8 +16079,6 @@ var ASM_CONSTS = {
   Module["_glUniformMatrix2fv"] = _glUniformMatrix2fv;
 
   function _glUniformMatrix3fv(location, count, transpose, value) {
-  
-  
   
       if (count <= 32) {
         // avoid allocation when uploading few enough uniforms
@@ -16865,8 +16103,6 @@ var ASM_CONSTS = {
   Module["_glUniformMatrix3fv"] = _glUniformMatrix3fv;
 
   function _glUniformMatrix4fv(location, count, transpose, value) {
-  
-  
   
       if (count <= 18) {
         // avoid allocation when uploading few enough uniforms
@@ -16993,7 +16229,6 @@ var ASM_CONSTS = {
 
   function _glShaderSource(shader, count, string, length) {
       var source = GL.getSource(shader, count, string, length);
-  
   
       GLctx.shaderSource(GL.shaders[shader], source);
     }
@@ -17375,12 +16610,12 @@ var ASM_CONSTS = {
     }
   Module["_gluUnProject"] = _gluUnProject;
 
-  
   function _glOrtho(
   ) {
   if (!Module['_glOrtho']) abort("external function 'glOrtho' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['_glOrtho'].apply(null, arguments);
-  }function _gluOrtho2D(left, right, bottom, top) {
+  }
+  function _gluOrtho2D(left, right, bottom, top) {
       _glOrtho(left, right, bottom, top, -1, 1);
     }
   Module["_gluOrtho2D"] = _gluOrtho2D;
@@ -18301,8 +17536,6 @@ var ASM_CONSTS = {
 
   function _emscripten_glUniform1iv(location, count, value) {
   
-  
-  
       if (count <= 288) {
         // avoid allocation when uploading few enough uniforms
         var view = __miniTempWebGLIntBuffers[count-1];
@@ -18318,8 +17551,6 @@ var ASM_CONSTS = {
   Module["_emscripten_glUniform1iv"] = _emscripten_glUniform1iv;
 
   function _emscripten_glUniform2iv(location, count, value) {
-  
-  
   
       if (count <= 144) {
         // avoid allocation when uploading few enough uniforms
@@ -18338,8 +17569,6 @@ var ASM_CONSTS = {
 
   function _emscripten_glUniform3iv(location, count, value) {
   
-  
-  
       if (count <= 96) {
         // avoid allocation when uploading few enough uniforms
         var view = __miniTempWebGLIntBuffers[3*count-1];
@@ -18357,8 +17586,6 @@ var ASM_CONSTS = {
   Module["_emscripten_glUniform3iv"] = _emscripten_glUniform3iv;
 
   function _emscripten_glUniform4iv(location, count, value) {
-  
-  
   
       if (count <= 72) {
         // avoid allocation when uploading few enough uniforms
@@ -18379,8 +17606,6 @@ var ASM_CONSTS = {
 
   function _emscripten_glUniform1fv(location, count, value) {
   
-  
-  
       if (count <= 288) {
         // avoid allocation when uploading few enough uniforms
         var view = miniTempWebGLFloatBuffers[count-1];
@@ -18396,8 +17621,6 @@ var ASM_CONSTS = {
   Module["_emscripten_glUniform1fv"] = _emscripten_glUniform1fv;
 
   function _emscripten_glUniform2fv(location, count, value) {
-  
-  
   
       if (count <= 144) {
         // avoid allocation when uploading few enough uniforms
@@ -18416,8 +17639,6 @@ var ASM_CONSTS = {
 
   function _emscripten_glUniform3fv(location, count, value) {
   
-  
-  
       if (count <= 96) {
         // avoid allocation when uploading few enough uniforms
         var view = miniTempWebGLFloatBuffers[3*count-1];
@@ -18435,8 +17656,6 @@ var ASM_CONSTS = {
   Module["_emscripten_glUniform3fv"] = _emscripten_glUniform3fv;
 
   function _emscripten_glUniform4fv(location, count, value) {
-  
-  
   
       if (count <= 72) {
         // avoid allocation when uploading few enough uniforms
@@ -18461,8 +17680,6 @@ var ASM_CONSTS = {
 
   function _emscripten_glUniformMatrix2fv(location, count, transpose, value) {
   
-  
-  
       if (count <= 72) {
         // avoid allocation when uploading few enough uniforms
         var view = miniTempWebGLFloatBuffers[4*count-1];
@@ -18481,8 +17698,6 @@ var ASM_CONSTS = {
   Module["_emscripten_glUniformMatrix2fv"] = _emscripten_glUniformMatrix2fv;
 
   function _emscripten_glUniformMatrix3fv(location, count, transpose, value) {
-  
-  
   
       if (count <= 32) {
         // avoid allocation when uploading few enough uniforms
@@ -18507,8 +17722,6 @@ var ASM_CONSTS = {
   Module["_emscripten_glUniformMatrix3fv"] = _emscripten_glUniformMatrix3fv;
 
   function _emscripten_glUniformMatrix4fv(location, count, transpose, value) {
-  
-  
   
       if (count <= 18) {
         // avoid allocation when uploading few enough uniforms
@@ -18623,7 +17836,6 @@ var ASM_CONSTS = {
 
   function _emscripten_glShaderSource(shader, count, string, length) {
       var source = GL.getSource(shader, count, string, length);
-  
   
       GLctx.shaderSource(GL.shaders[shader], source);
     }
@@ -19464,7 +18676,6 @@ var ASM_CONSTS = {
   var __emscripten_webgl_power_preferences=['default', 'low-power', 'high-performance'];
   Module["__emscripten_webgl_power_preferences"] = __emscripten_webgl_power_preferences;
 
-  
   function _emscripten_webgl_do_create_context(target, attributes) {
       assert(attributes);
       var contextAttributes = {};
@@ -19487,37 +18698,34 @@ var ASM_CONSTS = {
   
       var canvas = findCanvasEventTarget(target);
   
-  
-  
       if (!canvas) {
-        return -4;
+        return 0;
       }
   
       if (contextAttributes.explicitSwapControl) {
-        return -1;
+        return 0;
       }
-  
   
       var contextHandle = GL.createContext(canvas, contextAttributes);
       return contextHandle;
     }
-  Module["_emscripten_webgl_do_create_context"] = _emscripten_webgl_do_create_context;function _emscripten_webgl_create_context(a0,a1
+  Module["_emscripten_webgl_do_create_context"] = _emscripten_webgl_do_create_context;
+  function _emscripten_webgl_create_context(a0,a1
   ) {
   return _emscripten_webgl_do_create_context(a0,a1);
   }
   Module["_emscripten_webgl_create_context"] = _emscripten_webgl_create_context;
 
-  
   function _emscripten_webgl_do_get_current_context() {
       return GL.currentContext ? GL.currentContext.handle : 0;
     }
-  Module["_emscripten_webgl_do_get_current_context"] = _emscripten_webgl_do_get_current_context;function _emscripten_webgl_get_current_context(
+  Module["_emscripten_webgl_do_get_current_context"] = _emscripten_webgl_do_get_current_context;
+  function _emscripten_webgl_get_current_context(
   ) {
   return _emscripten_webgl_do_get_current_context();
   }
   Module["_emscripten_webgl_get_current_context"] = _emscripten_webgl_get_current_context;
 
-  
   function _emscripten_webgl_do_commit_frame() {
       if (!GL.currentContext || !GL.currentContext.GLctx) {
         return -3;
@@ -19531,7 +18739,8 @@ var ASM_CONSTS = {
       // (until/unless the spec changes).
       return 0;
     }
-  Module["_emscripten_webgl_do_commit_frame"] = _emscripten_webgl_do_commit_frame;function _emscripten_webgl_commit_frame(
+  Module["_emscripten_webgl_do_commit_frame"] = _emscripten_webgl_do_commit_frame;
+  function _emscripten_webgl_commit_frame(
   ) {
   return _emscripten_webgl_do_commit_frame();
   }
@@ -19606,9 +18815,7 @@ var ASM_CONSTS = {
       if (extString == 'OES_vertex_array_object') __webgl_enable_OES_vertex_array_object(GLctx);
       if (extString == 'WEBGL_draw_buffers') __webgl_enable_WEBGL_draw_buffers(GLctx);
   
-  
       if (extString == 'WEBGL_multi_draw') __webgl_enable_WEBGL_multi_draw(GLctx);
-  
   
       var ext = context.GLctx.getExtension(extString);
       return !!ext;
@@ -19624,11 +18831,10 @@ var ASM_CONSTS = {
 
   function __registerWebGlEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
   
-  
       var webGlEventHandlerFunc = function(ev) {
         var e = ev || event;
   
-        if (dynCall_iiii(callbackfunc, eventTypeId, 0, userData)) e.preventDefault();
+        if (wasmTable.get(callbackfunc)(eventTypeId, 0, userData)) e.preventDefault();
       };
   
       var eventHandler = {
@@ -21053,7 +20259,6 @@ var ASM_CONSTS = {
         return 0;
       }
   
-  
       // What we'll place into the `AL.captures` array in the end,
       // declared here for closures to access it
       var newCapture = {
@@ -21102,7 +20307,6 @@ var ASM_CONSTS = {
         }
   
         newCapture.inputChannelCount = inputChannelCount;
-  
   
         // Have to pick a size from 256, 512, 1024, 2048, 4096, 8192, 16384.
         // One can also set it to zero, which leaves the decision up to the impl.
@@ -21585,12 +20789,12 @@ var ASM_CONSTS = {
     }
   Module["_alcIsExtensionPresent"] = _alcIsExtensionPresent;
 
-  
   function _emscripten_GetAlcProcAddress(
   ) {
   if (!Module['_emscripten_GetAlcProcAddress']) abort("external function 'emscripten_GetAlcProcAddress' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['_emscripten_GetAlcProcAddress'].apply(null, arguments);
-  }function _alcGetProcAddress(deviceId, pProcName) {
+  }
+  function _alcGetProcAddress(deviceId, pProcName) {
       if (!pProcName) {
         AL.alcErr = 0xA004 /* ALC_INVALID_VALUE */;
         return 0; /* ALC_NONE */
@@ -21730,7 +20934,7 @@ var ASM_CONSTS = {
         return 0;
       }
   
-      ret = allocate(intArrayFromString(ret), 'i8', ALLOC_NORMAL);
+      ret = allocate(intArrayFromString(ret), ALLOC_NORMAL);
       AL.alcStringCache[param] = ret;
       return ret;
     }
@@ -21928,7 +21132,7 @@ var ASM_CONSTS = {
         }
       }
   
-      ret = allocate(intArrayFromString(ret), 'i8', ALLOC_NORMAL);
+      ret = allocate(intArrayFromString(ret), ALLOC_NORMAL);
       AL.alcStringCache[param] = ret;
       return ret;
     }
@@ -22087,7 +21291,6 @@ var ASM_CONSTS = {
     }
   Module["_alGenSources"] = _alGenSources;
 
-  
   function _alSourcei(sourceId, param, value) {
       switch (param) {
       case 0x202 /* AL_SOURCE_RELATIVE */:
@@ -22112,7 +21315,8 @@ var ASM_CONSTS = {
         break;
       }
     }
-  Module["_alSourcei"] = _alSourcei;function _alDeleteSources(count, pSourceIds) {
+  Module["_alSourcei"] = _alSourcei;
+  function _alDeleteSources(count, pSourceIds) {
       if (!AL.currentCtx) {
         return;
       }
@@ -22154,12 +21358,12 @@ var ASM_CONSTS = {
     }
   Module["_alIsExtensionPresent"] = _alIsExtensionPresent;
 
-  
   function _emscripten_GetAlProcAddress(
   ) {
   if (!Module['_emscripten_GetAlProcAddress']) abort("external function 'emscripten_GetAlProcAddress' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['_emscripten_GetAlProcAddress'].apply(null, arguments);
-  }function _alGetProcAddress(pProcName) {
+  }
+  function _alGetProcAddress(pProcName) {
       if (!AL.currentCtx) {
         return;
       }
@@ -22324,7 +21528,7 @@ var ASM_CONSTS = {
         return 0;
       }
   
-      ret = allocate(intArrayFromString(ret), 'i8', ALLOC_NORMAL);
+      ret = allocate(intArrayFromString(ret), ALLOC_NORMAL);
       AL.stringCache[param] = ret;
       return ret;
     }
@@ -23714,8 +22918,6 @@ var ASM_CONSTS = {
     }
   Module["_alSourceiv"] = _alSourceiv;
 
-  
-  
   function _SDL_GetTicks() {
       return (Date.now() - SDL.startTime)|0;
     }
@@ -23795,7 +22997,8 @@ var ASM_CONSTS = {
   
   /** @suppress{missingProperties} */
   function SDL_audio() { return SDL.audio}
-  Module["SDL_audio"] = SDL_audio;var SDL={defaults:{width:320,height:200,copyOnLock:true,discardOnLock:false,opaqueFrontBuffer:true},version:null,surfaces:{},canvasPool:[],events:[],fonts:[null],audios:[null],rwops:[null],music:{audio:null,volume:1},mixerFrequency:22050,mixerFormat:32784,mixerNumChannels:2,mixerChunkSize:1024,channelMinimumNumber:0,GL:false,glAttributes:{0:3,1:3,2:2,3:0,4:0,5:1,6:16,7:0,8:0,9:0,10:0,11:0,12:0,13:0,14:0,15:1,16:0,17:0,18:0},keyboardState:null,keyboardMap:{},canRequestFullscreen:false,isRequestingFullscreen:false,textInput:false,startTime:null,initFlags:0,buttonState:0,modState:0,DOMButtons:[0,0,0],DOMEventToSDLEvent:{},TOUCH_DEFAULT_ID:0,eventHandler:null,eventHandlerContext:null,eventHandlerTemp:0,keyCodes:{16:1249,17:1248,18:1250,20:1081,33:1099,34:1102,35:1101,36:1098,37:1104,38:1106,39:1103,40:1105,44:316,45:1097,46:127,91:1251,93:1125,96:1122,97:1113,98:1114,99:1115,100:1116,101:1117,102:1118,103:1119,104:1120,105:1121,106:1109,107:1111,109:1110,110:1123,111:1108,112:1082,113:1083,114:1084,115:1085,116:1086,117:1087,118:1088,119:1089,120:1090,121:1091,122:1092,123:1093,124:1128,125:1129,126:1130,127:1131,128:1132,129:1133,130:1134,131:1135,132:1136,133:1137,134:1138,135:1139,144:1107,160:94,161:33,162:34,163:35,164:36,165:37,166:38,167:95,168:40,169:41,170:42,171:43,172:124,173:45,174:123,175:125,176:126,181:127,182:129,183:128,188:44,190:46,191:47,192:96,219:91,220:92,221:93,222:39,224:1251},scanCodes:{8:42,9:43,13:40,27:41,32:44,35:204,39:53,44:54,46:55,47:56,48:39,49:30,50:31,51:32,52:33,53:34,54:35,55:36,56:37,57:38,58:203,59:51,61:46,91:47,92:49,93:48,96:52,97:4,98:5,99:6,100:7,101:8,102:9,103:10,104:11,105:12,106:13,107:14,108:15,109:16,110:17,111:18,112:19,113:20,114:21,115:22,116:23,117:24,118:25,119:26,120:27,121:28,122:29,127:76,305:224,308:226,316:70},loadRect:function(rect) {
+  Module["SDL_audio"] = SDL_audio;
+  var SDL={defaults:{width:320,height:200,copyOnLock:true,discardOnLock:false,opaqueFrontBuffer:true},version:null,surfaces:{},canvasPool:[],events:[],fonts:[null],audios:[null],rwops:[null],music:{audio:null,volume:1},mixerFrequency:22050,mixerFormat:32784,mixerNumChannels:2,mixerChunkSize:1024,channelMinimumNumber:0,GL:false,glAttributes:{0:3,1:3,2:2,3:0,4:0,5:1,6:16,7:0,8:0,9:0,10:0,11:0,12:0,13:0,14:0,15:1,16:0,17:0,18:0},keyboardState:null,keyboardMap:{},canRequestFullscreen:false,isRequestingFullscreen:false,textInput:false,startTime:null,initFlags:0,buttonState:0,modState:0,DOMButtons:[0,0,0],DOMEventToSDLEvent:{},TOUCH_DEFAULT_ID:0,eventHandler:null,eventHandlerContext:null,eventHandlerTemp:0,keyCodes:{16:1249,17:1248,18:1250,20:1081,33:1099,34:1102,35:1101,36:1098,37:1104,38:1106,39:1103,40:1105,44:316,45:1097,46:127,91:1251,93:1125,96:1122,97:1113,98:1114,99:1115,100:1116,101:1117,102:1118,103:1119,104:1120,105:1121,106:1109,107:1111,109:1110,110:1123,111:1108,112:1082,113:1083,114:1084,115:1085,116:1086,117:1087,118:1088,119:1089,120:1090,121:1091,122:1092,123:1093,124:1128,125:1129,126:1130,127:1131,128:1132,129:1133,130:1134,131:1135,132:1136,133:1137,134:1138,135:1139,144:1107,160:94,161:33,162:34,163:35,164:36,165:37,166:38,167:95,168:40,169:41,170:42,171:43,172:124,173:45,174:123,175:125,176:126,181:127,182:129,183:128,188:44,190:46,191:47,192:96,219:91,220:92,221:93,222:39,224:1251},scanCodes:{8:42,9:43,13:40,27:41,32:44,35:204,39:53,44:54,46:55,47:56,48:39,49:30,50:31,51:32,52:33,53:34,54:35,55:36,56:37,57:38,58:203,59:51,61:46,91:47,92:49,93:48,96:52,97:4,98:5,99:6,100:7,101:8,102:9,103:10,104:11,105:12,106:13,107:14,108:15,109:16,110:17,111:18,112:19,113:20,114:21,115:22,116:23,117:24,118:25,119:26,120:27,121:28,122:29,127:76,305:224,308:226,316:70},loadRect:function(rect) {
         return {
           x: HEAP32[((rect + 0)>>2)],
           y: HEAP32[((rect + 4)>>2)],
@@ -24336,7 +23539,7 @@ var ASM_CONSTS = {
         if (!SDL.eventHandler) return;
   
         while (SDL.pollEvent(SDL.eventHandlerTemp)) {
-          Module['dynCall_iii'](SDL.eventHandler, SDL.eventHandlerContext, SDL.eventHandlerTemp);
+          wasmTable.get(SDL.eventHandler)(SDL.eventHandlerContext, SDL.eventHandlerTemp);
         }
       },pollEvent:function(ptr) {
         if (SDL.initFlags & 0x200 && SDL.joystickEventState) {
@@ -24440,8 +23643,8 @@ var ASM_CONSTS = {
             if (dx === 0 && dy === 0 && event.type === 'touchmove') return false; // don't send these if nothing happened
             HEAP32[((ptr)>>2)]=SDL.DOMEventToSDLEvent[event.type];
             HEAP32[(((ptr)+(4))>>2)]=_SDL_GetTicks();
-            (tempI64 = [touch.deviceID>>>0,(tempDouble=touch.deviceID,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((ptr)+(8))>>2)]=tempI64[0],HEAP32[(((ptr)+(12))>>2)]=tempI64[1]);
-            (tempI64 = [touch.identifier>>>0,(tempDouble=touch.identifier,(+(Math_abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math_min((+(Math_floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math_ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((ptr)+(16))>>2)]=tempI64[0],HEAP32[(((ptr)+(20))>>2)]=tempI64[1]);
+            (tempI64 = [touch.deviceID>>>0,(tempDouble=touch.deviceID,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((ptr)+(8))>>2)]=tempI64[0],HEAP32[(((ptr)+(12))>>2)]=tempI64[1]);
+            (tempI64 = [touch.identifier>>>0,(tempDouble=touch.identifier,(+(Math.abs(tempDouble))) >= 1.0 ? (tempDouble > 0.0 ? ((Math.min((+(Math.floor((tempDouble)/4294967296.0))), 4294967295.0))|0)>>>0 : (~~((+(Math.ceil((tempDouble - +(((~~(tempDouble)))>>>0))/4294967296.0)))))>>>0) : 0)],HEAP32[(((ptr)+(16))>>2)]=tempI64[0],HEAP32[(((ptr)+(20))>>2)]=tempI64[1]);
             HEAPF32[(((ptr)+(24))>>2)]=x;
             HEAPF32[(((ptr)+(28))>>2)]=y;
             HEAPF32[(((ptr)+(32))>>2)]=dx;
@@ -24735,7 +23938,8 @@ var ASM_CONSTS = {
         }
         return null;
       }};
-  Module["SDL"] = SDL;/** @suppress{missingProperties} */
+  Module["SDL"] = SDL;
+  /** @suppress{missingProperties} */
   function SDL_unicode() { return SDL.unicode}
   Module["SDL_unicode"] = SDL_unicode;
 
@@ -24831,7 +24035,6 @@ var ASM_CONSTS = {
     }
   Module["_SDL_VideoModeOK"] = _SDL_VideoModeOK;
 
-  
   function _SDL_VideoDriverName(buf, max_size) {
       if (SDL.startTime === null) {
         return 0; //return NULL
@@ -24856,7 +24059,8 @@ var ASM_CONSTS = {
       HEAP8[(((buf)+(index))>>0)]=0;
       return buf;
     }
-  Module["_SDL_VideoDriverName"] = _SDL_VideoDriverName;function _SDL_AudioDriverName(buf, max_size) {
+  Module["_SDL_VideoDriverName"] = _SDL_VideoDriverName;
+  function _SDL_AudioDriverName(buf, max_size) {
       return _SDL_VideoDriverName(buf, max_size);
     }
   Module["_SDL_AudioDriverName"] = _SDL_AudioDriverName;
@@ -25099,7 +24303,7 @@ var ASM_CONSTS = {
 
   function _SDL_GetKeyName(key) {
       if (!SDL.keyName) {
-        SDL.keyName = allocate(intArrayFromString('unknown key'), 'i8', ALLOC_NORMAL);
+        SDL.keyName = allocate(intArrayFromString('unknown key'), ALLOC_NORMAL);
       }
       return SDL.keyName;
     }
@@ -25156,7 +24360,7 @@ var ASM_CONSTS = {
 
   function _SDL_GetError() {
       if (!SDL.errorMessage) {
-        SDL.errorMessage = allocate(intArrayFromString("unknown SDL-emscripten error"), 'i8', ALLOC_NORMAL);
+        SDL.errorMessage = allocate(intArrayFromString("unknown SDL-emscripten error"), ALLOC_NORMAL);
       }
       return SDL.errorMessage;
     }
@@ -25165,16 +24369,14 @@ var ASM_CONSTS = {
   function _SDL_SetError() {}
   Module["_SDL_SetError"] = _SDL_SetError;
 
-  function _SDL_malloc(a0
-  ) {
-  return _malloc(a0);
-  }
+  function _SDL_malloc(size) {
+      return _malloc(size);
+    }
   Module["_SDL_malloc"] = _SDL_malloc;
 
-  function _SDL_free(a0
-  ) {
-  return _free(a0);
-  }
+  function _SDL_free(ptr) {
+      _free(ptr);
+    }
   Module["_SDL_free"] = _SDL_free;
 
   function _SDL_CreateRGBSurface(flags, width, height, depth, rmask, gmask, bmask, amask) {
@@ -25548,14 +24750,14 @@ var ASM_CONSTS = {
     }
   Module["_IMG_Init"] = _IMG_Init;
 
-  
   function _SDL_FreeRW(rwopsID) {
       SDL.rwops[rwopsID] = null;
       while (SDL.rwops.length > 0 && SDL.rwops[SDL.rwops.length-1] === null) {
         SDL.rwops.pop();
       }
     }
-  Module["_SDL_FreeRW"] = _SDL_FreeRW;function _IMG_Load_RW(rwopsID, freeSrc) {
+  Module["_SDL_FreeRW"] = _SDL_FreeRW;
+  function _IMG_Load_RW(rwopsID, freeSrc) {
       try {
         // stb_image integration support
         var cleanup = function() {
@@ -25688,8 +24890,6 @@ var ASM_CONSTS = {
     }
   Module["_IMG_Load_RW"] = _IMG_Load_RW;
 
-  
-  
   /** @param {number=} mode */
   function _SDL_RWFromFile(_name, mode) {
       var id = SDL.rwops.length; // TODO: recycle ids when they are null
@@ -25697,12 +24897,14 @@ var ASM_CONSTS = {
       SDL.rwops.push({ filename: name, mimetype: Browser.getMimetype(name) });
       return id;
     }
-  Module["_SDL_RWFromFile"] = _SDL_RWFromFile;function _IMG_Load(filename){
+  Module["_SDL_RWFromFile"] = _SDL_RWFromFile;
+  function _IMG_Load(filename){
       var rwops = _SDL_RWFromFile(filename);
       var result = _IMG_Load_RW(rwops, 1);
       return result;
     }
-  Module["_IMG_Load"] = _IMG_Load;function _SDL_LoadBMP(a0
+  Module["_IMG_Load"] = _IMG_Load;
+  function _SDL_LoadBMP(a0
   ) {
   return _IMG_Load(a0);
   }
@@ -25805,12 +25007,11 @@ var ASM_CONSTS = {
             if (secsUntilNextPlayStart >= SDL.audio.bufferingDelay + SDL.audio.bufferDurationSecs*SDL.audio.numSimultaneouslyQueuedBuffers) return;
   
             // Ask SDL audio data from the user code.
-            dynCall_viii(SDL.audio.callback, SDL.audio.userdata, SDL.audio.buffer, SDL.audio.bufferSize);
+            wasmTable.get(SDL.audio.callback)(SDL.audio.userdata, SDL.audio.buffer, SDL.audio.bufferSize);
             // And queue it to be played after the currently playing audio stream.
             SDL.audio.pushAudio(SDL.audio.buffer, SDL.audio.bufferSize);
           }
         }
-  
   
         // Create a callback function that will be routinely called to ask more audio data from the user application.
         SDL.audio.caller = function SDL_audioCaller() {
@@ -26075,7 +25276,6 @@ var ASM_CONSTS = {
   function _Mix_LoadWAV_RW(rwopsID, freesrc) {
       var rwops = SDL.rwops[rwopsID];
   
-  
       if (rwops === undefined)
         return 0;
   
@@ -26249,7 +25449,7 @@ var ASM_CONSTS = {
       }
       audio['onended'] = function SDL_audio_onended() { // TODO: cache these
         if (channelInfo.audio == this) { channelInfo.audio.paused = true; channelInfo.audio = null; }
-        if (SDL.channelFinished) getFuncWrapper(SDL.channelFinished, 'vi')(channel);
+        if (SDL.channelFinished)  wasmTable.get(SDL.channelFinished)(channel);
       }
       channelInfo.audio = audio;
       // TODO: handle N loops. Behavior matches Mix_PlayMusic
@@ -26279,7 +25479,7 @@ var ASM_CONSTS = {
           info.audio = null;
         }
         if (SDL.channelFinished) {
-          getFuncWrapper(SDL.channelFinished, 'vi')(channel);
+          wasmTable.get(SDL.channelFinished)(channel);
         }
       }
       if (channel != -1) {
@@ -26291,7 +25491,6 @@ var ASM_CONSTS = {
     }
   Module["_Mix_HaltChannel"] = _Mix_HaltChannel;
 
-  
   function _Mix_HaltMusic() {
       var audio = SDL.music.audio;
       if (audio) {
@@ -26301,11 +25500,12 @@ var ASM_CONSTS = {
       }
       SDL.music.audio = null;
       if (SDL.hookMusicFinished) {
-        dynCall_v(SDL.hookMusicFinished);
+        wasmTable.get(SDL.hookMusicFinished)();
       }
       return 0;
     }
-  Module["_Mix_HaltMusic"] = _Mix_HaltMusic;function _Mix_HookMusicFinished(func) {
+  Module["_Mix_HaltMusic"] = _Mix_HaltMusic;
+  function _Mix_HookMusicFinished(func) {
       SDL.hookMusicFinished = func;
       if (SDL.music.audio) { // ensure the callback will be called, if a music is already playing
         SDL.music.audio['onended'] = _Mix_HaltMusic;
@@ -26359,7 +25559,7 @@ var ASM_CONSTS = {
         audio = info.audio;
       }
       audio['onended'] = function() { if (SDL.music.audio == this) _Mix_HaltMusic(); } // will send callback
-      audio.loop = loops != 0; // TODO: handle N loops for finite N
+      audio.loop = loops != 0 && loops != 1; // TODO: handle N loops for finite N
       audio.volume = SDL.music.volume;
       SDL.music.audio = audio;
       audio.play();
@@ -26534,7 +25734,6 @@ var ASM_CONSTS = {
   }
   Module["_TTF_RenderUTF8_Solid"] = _TTF_RenderUTF8_Solid;
 
-  
   function _TTF_SizeText(font, text, w, h) {
       var fontData = SDL.fonts[font];
       if (w) {
@@ -26545,7 +25744,8 @@ var ASM_CONSTS = {
       }
       return 0;
     }
-  Module["_TTF_SizeText"] = _TTF_SizeText;function _TTF_SizeUTF8(a0,a1,a2,a3
+  Module["_TTF_SizeText"] = _TTF_SizeText;
+  function _TTF_SizeUTF8(a0,a1,a2,a3
   ) {
   return _TTF_SizeText(a0,a1,a2,a3);
   }
@@ -26733,12 +25933,12 @@ var ASM_CONSTS = {
     }
   Module["_SDL_GL_GetAttribute"] = _SDL_GL_GetAttribute;
 
-  
   function _emscripten_GetProcAddress(
   ) {
   if (!Module['_emscripten_GetProcAddress']) abort("external function 'emscripten_GetProcAddress' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['_emscripten_GetProcAddress'].apply(null, arguments);
-  }function _SDL_GL_GetProcAddress(name_) {
+  }
+  function _SDL_GL_GetProcAddress(name_) {
       return _emscripten_GetProcAddress(name_);
     }
   Module["_SDL_GL_GetProcAddress"] = _SDL_GL_GetProcAddress;
@@ -26851,7 +26051,7 @@ var ASM_CONSTS = {
         if (SDL.joystickNamePool.hasOwnProperty(name)) {
           return SDL.joystickNamePool[name];
         }
-        return SDL.joystickNamePool[name] = allocate(intArrayFromString(name), 'i8', ALLOC_NORMAL);
+        return SDL.joystickNamePool[name] = allocate(intArrayFromString(name), ALLOC_NORMAL);
       }
       return 0;
     }
@@ -26969,7 +26169,7 @@ var ASM_CONSTS = {
   Module["_SDL_GetNumAudioDrivers"] = _SDL_GetNumAudioDrivers;
 
   function _SDL_GetCurrentAudioDriver() {
-      return allocate(intArrayFromString('Emscripten Audio'), 'i8', ALLOC_NORMAL);
+      return allocate(intArrayFromString('Emscripten Audio'), ALLOC_NORMAL);
     }
   Module["_SDL_GetCurrentAudioDriver"] = _SDL_GetCurrentAudioDriver;
 
@@ -26985,7 +26185,7 @@ var ASM_CONSTS = {
 
   function _SDL_AddTimer(interval, callback, param) {
       return window.setTimeout(function() {
-        dynCall_iii(callback, interval, param);
+        wasmTable.get(callback)(interval, param);
       }, interval);
     }
   Module["_SDL_AddTimer"] = _SDL_AddTimer;
@@ -27073,19 +26273,19 @@ var ASM_CONSTS = {
   function _SDL_HasAltiVec() { return 0; }
   Module["_SDL_HasAltiVec"] = _SDL_HasAltiVec;
 
-  
   function _glutPostRedisplay() {
       if (GLUT.displayFunc && !GLUT.requestedAnimationFrame) {
         GLUT.requestedAnimationFrame = true;
         Browser.requestAnimationFrame(function() {
           GLUT.requestedAnimationFrame = false;
           Browser.mainLoop.runIter(function() {
-            dynCall_v(GLUT.displayFunc);
+            wasmTable.get(GLUT.displayFunc)();
           });
         });
       }
     }
-  Module["_glutPostRedisplay"] = _glutPostRedisplay;var GLUT={initTime:null,idleFunc:null,displayFunc:null,keyboardFunc:null,keyboardUpFunc:null,specialFunc:null,specialUpFunc:null,reshapeFunc:null,motionFunc:null,passiveMotionFunc:null,mouseFunc:null,buttons:0,modifiers:0,initWindowWidth:256,initWindowHeight:256,initDisplayMode:18,windowX:0,windowY:0,windowWidth:0,windowHeight:0,requestedAnimationFrame:false,saveModifiers:function(event) {
+  Module["_glutPostRedisplay"] = _glutPostRedisplay;
+  var GLUT={initTime:null,idleFunc:null,displayFunc:null,keyboardFunc:null,keyboardUpFunc:null,specialFunc:null,specialUpFunc:null,reshapeFunc:null,motionFunc:null,passiveMotionFunc:null,mouseFunc:null,buttons:0,modifiers:0,initWindowWidth:256,initWindowHeight:256,initDisplayMode:18,windowX:0,windowY:0,windowWidth:0,windowHeight:0,requestedAnimationFrame:false,saveModifiers:function(event) {
         GLUT.modifiers = 0;
         if (event['shiftKey'])
           GLUT.modifiers += 1; /* GLUT_ACTIVE_SHIFT */
@@ -27108,11 +26308,11 @@ var ASM_CONSTS = {
         if (GLUT.buttons == 0 && event.target == Module["canvas"] && GLUT.passiveMotionFunc) {
           event.preventDefault();
           GLUT.saveModifiers(event);
-          dynCall_vii(GLUT.passiveMotionFunc, lastX, lastY);
+          wasmTable.get(GLUT.passiveMotionFunc)(lastX, lastY);
         } else if (GLUT.buttons != 0 && GLUT.motionFunc) {
           event.preventDefault();
           GLUT.saveModifiers(event);
-          dynCall_vii(GLUT.motionFunc, lastX, lastY);
+          wasmTable.get(GLUT.motionFunc)(lastX, lastY);
         }
       },getSpecialKey:function(keycode) {
           var key = null;
@@ -27214,7 +26414,7 @@ var ASM_CONSTS = {
             if( GLUT.specialFunc ) {
               event.preventDefault();
               GLUT.saveModifiers(event);
-              dynCall_viii(GLUT.specialFunc, key, Browser.mouseX, Browser.mouseY);
+              wasmTable.get(GLUT.specialFunc)(key, Browser.mouseX, Browser.mouseY);
             }
           }
           else
@@ -27223,7 +26423,7 @@ var ASM_CONSTS = {
             if( key !== null && GLUT.keyboardFunc ) {
               event.preventDefault();
               GLUT.saveModifiers(event);
-              dynCall_viii(GLUT.keyboardFunc, key, Browser.mouseX, Browser.mouseY);
+              wasmTable.get(GLUT.keyboardFunc)(key, Browser.mouseX, Browser.mouseY);
             }
           }
         }
@@ -27234,7 +26434,7 @@ var ASM_CONSTS = {
             if(GLUT.specialUpFunc) {
               event.preventDefault ();
               GLUT.saveModifiers(event);
-              dynCall_viii(GLUT.specialUpFunc, key, Browser.mouseX, Browser.mouseY);
+              wasmTable.get(GLUT.specialUpFunc)(key, Browser.mouseX, Browser.mouseY);
             }
           }
           else
@@ -27243,7 +26443,7 @@ var ASM_CONSTS = {
             if( key !== null && GLUT.keyboardUpFunc ) {
               event.preventDefault ();
               GLUT.saveModifiers(event);
-              dynCall_viii(GLUT.keyboardUpFunc, key, Browser.mouseX, Browser.mouseY);
+              wasmTable.get(GLUT.keyboardUpFunc)(key, Browser.mouseX, Browser.mouseY);
             }
           }
         }
@@ -27282,7 +26482,7 @@ var ASM_CONSTS = {
           } catch (e) {}
           event.preventDefault();
           GLUT.saveModifiers(event);
-          dynCall_viiii(GLUT.mouseFunc, event['button'], 0/*GLUT_DOWN*/, Browser.mouseX, Browser.mouseY);
+          wasmTable.get(GLUT.mouseFunc)(event['button'], 0/*GLUT_DOWN*/, Browser.mouseX, Browser.mouseY);
         }
       },onMouseButtonUp:function(event) {
         Browser.calculateMouseEvent(event);
@@ -27292,7 +26492,7 @@ var ASM_CONSTS = {
         if (GLUT.mouseFunc) {
           event.preventDefault();
           GLUT.saveModifiers(event);
-          dynCall_viiii(GLUT.mouseFunc, event['button'], 1/*GLUT_UP*/, Browser.mouseX, Browser.mouseY);
+          wasmTable.get(GLUT.mouseFunc)(event['button'], 1/*GLUT_UP*/, Browser.mouseX, Browser.mouseY);
         }
       },onMouseWheel:function(event) {
         Browser.calculateMouseEvent(event);
@@ -27311,7 +26511,7 @@ var ASM_CONSTS = {
         if (GLUT.mouseFunc) {
           event.preventDefault();
           GLUT.saveModifiers(event);
-          dynCall_viiii(GLUT.mouseFunc, button, 0/*GLUT_DOWN*/, Browser.mouseX, Browser.mouseY);
+          wasmTable.get(GLUT.mouseFunc)(button, 0/*GLUT_DOWN*/, Browser.mouseX, Browser.mouseY);
         }
       },onFullscreenEventChange:function(event) {
         var width;
@@ -27332,7 +26532,7 @@ var ASM_CONSTS = {
         /* Can't call _glutReshapeWindow as that requests cancelling fullscreen. */
         if (GLUT.reshapeFunc) {
           // console.log("GLUT.reshapeFunc (from FS): " + width + ", " + height);
-          dynCall_vii(GLUT.reshapeFunc, width, height);
+          wasmTable.get(GLUT.reshapeFunc)(width, height);
         }
         _glutPostRedisplay();
       }};
@@ -27373,7 +26573,7 @@ var ASM_CONSTS = {
   
       Browser.resizeListeners.push(function(width, height) {
         if (GLUT.reshapeFunc) {
-          dynCall_vii(GLUT.reshapeFunc, width, height);
+          wasmTable.get(GLUT.reshapeFunc)(width, height);
         }
       });
   
@@ -27453,7 +26653,7 @@ var ASM_CONSTS = {
   function _glutIdleFunc(func) {
       function callback() {
         if (GLUT.idleFunc) {
-          dynCall_v(GLUT.idleFunc);
+          wasmTable.get(GLUT.idleFunc)();
           Browser.safeSetTimeout(callback, 4); // HTML spec specifies a 4ms minimum delay on the main thread; workers might get more, but we standardize here
         }
       }
@@ -27465,7 +26665,7 @@ var ASM_CONSTS = {
   Module["_glutIdleFunc"] = _glutIdleFunc;
 
   function _glutTimerFunc(msec, func, value) {
-      Browser.safeSetTimeout(function() { dynCall_vi(func, value); }, msec);
+      Browser.safeSetTimeout(function() { wasmTable.get(func)(value); }, msec);
     }
   Module["_glutTimerFunc"] = _glutTimerFunc;
 
@@ -27613,7 +26813,7 @@ var ASM_CONSTS = {
       Browser.setCanvasSize(width, height, true); // N.B. GLUT.reshapeFunc is also registered as a canvas resize callback.
                                                   // Just call it once here.
       if (GLUT.reshapeFunc) {
-        dynCall_vii(GLUT.reshapeFunc, width, height);
+        wasmTable.get(GLUT.reshapeFunc)(width, height);
       }
       _glutPostRedisplay();
     }
@@ -28287,7 +27487,6 @@ var ASM_CONSTS = {
     }
   Module["_eglReleaseThread"] = _eglReleaseThread;
 
-  
   var GLFW={WindowFromId:function(id) {
         if (id <= 0 || !GLFW.windows) return null;
         return GLFW.windows[id - 1];
@@ -28433,7 +27632,7 @@ var ASM_CONSTS = {
         var charCode = event.charCode;
         if (charCode == 0 || (charCode >= 0x00 && charCode <= 0x1F)) return;
   
-        dynCall_vii(GLFW.active.charFunc, charCode, 1);
+        wasmTable.get(GLFW.active.charFunc)(charCode, 1);
   
       },onKeyChanged:function(keyCode, status) {
         if (!GLFW.active) return;
@@ -28445,7 +27644,7 @@ var ASM_CONSTS = {
         GLFW.active.domKeys[keyCode] = status;
         if (!GLFW.active.keyFunc) return;
   
-        dynCall_vii(GLFW.active.keyFunc, key, status);
+        wasmTable.get(GLFW.active.keyFunc)(key, status);
   
       },onGamepadConnected:function(event) {
         GLFW.refreshJoysticks();
@@ -28477,7 +27676,7 @@ var ASM_CONSTS = {
   
         if (event.target != Module["canvas"] || !GLFW.active.cursorPosFunc) return;
   
-        dynCall_vii(GLFW.active.cursorPosFunc, Browser.mouseX, Browser.mouseY);
+        wasmTable.get(GLFW.active.cursorPosFunc)(Browser.mouseX, Browser.mouseY);
   
       },DOMToGLFWMouseButton:function(event) {
         // DOM and glfw have different button codes.
@@ -28521,7 +27720,7 @@ var ASM_CONSTS = {
   
         if (!GLFW.active.mouseButtonFunc) return;
   
-        dynCall_vii(GLFW.active.mouseButtonFunc, eventButton, status);
+        wasmTable.get(GLFW.active.mouseButtonFunc)(eventButton, status);
   
       },onMouseButtonDown:function(event) {
         if (!GLFW.active) return;
@@ -28537,8 +27736,7 @@ var ASM_CONSTS = {
   
         if (!GLFW.active || !GLFW.active.scrollFunc || event.target != Module['canvas']) return;
   
-        dynCall_vi(GLFW.active.scrollFunc, GLFW.wheelPos);
-  
+        wasmTable.get(GLFW.active.scrollFunc)(GLFW.wheelPos);
   
         event.preventDefault();
       },onCanvasResize:function(width, height) {
@@ -28587,7 +27785,7 @@ var ASM_CONSTS = {
   
         if (!GLFW.active.windowSizeFunc) return;
   
-        dynCall_vii(GLFW.active.windowSizeFunc, GLFW.active.width, GLFW.active.height);
+        wasmTable.get(GLFW.active.windowSizeFunc)(GLFW.active.width, GLFW.active.height);
   
       },onFramebufferSizeChanged:function() {
         if (!GLFW.active) return;
@@ -28620,15 +27818,15 @@ var ASM_CONSTS = {
               if (!GLFW.joys[joy]) {
                 console.log('glfw joystick connected:',joy);
                 GLFW.joys[joy] = {
-                  id: allocate(intArrayFromString(gamepad.id), 'i8', ALLOC_NORMAL),
+                  id: allocate(intArrayFromString(gamepad.id), ALLOC_NORMAL),
                   buttonsCount: gamepad.buttons.length,
                   axesCount: gamepad.axes.length,
-                  buttons: allocate(new Array(gamepad.buttons.length), 'i8', ALLOC_NORMAL),
+                  buttons: allocate(new Array(gamepad.buttons.length), ALLOC_NORMAL),
                   axes: allocate(new Array(gamepad.axes.length*4), 'float', ALLOC_NORMAL)
                 };
   
                 if (GLFW.joystickFunc) {
-                  dynCall_vii(GLFW.joystickFunc, joy, 0x00040001); // GLFW_CONNECTED
+                  wasmTable.get(GLFW.joystickFunc)(joy, 0x00040001); // GLFW_CONNECTED
                 }
               }
   
@@ -28646,7 +27844,7 @@ var ASM_CONSTS = {
                 console.log('glfw joystick disconnected',joy);
   
                 if (GLFW.joystickFunc) {
-                  dynCall_vii(GLFW.joystickFunc, joy, 0x00040002); // GLFW_DISCONNECTED
+                  wasmTable.get(GLFW.joystickFunc)(joy, 0x00040002); // GLFW_DISCONNECTED
                 }
   
                 _free(GLFW.joys[joy].id);
@@ -28700,7 +27898,7 @@ var ASM_CONSTS = {
   
         event.preventDefault();
   
-        var filenames = allocate(new Array(event.dataTransfer.files.length*4), 'i8*', ALLOC_NORMAL);
+        var filenames = allocate(new Array(event.dataTransfer.files.length*4), ALLOC_NORMAL);
         var filenamesArray = [];
         var count = event.dataTransfer.files.length;
   
@@ -28722,7 +27920,7 @@ var ASM_CONSTS = {
             var data = e.target.result;
             FS.writeFile(path, new Uint8Array(data));
             if (++written === count) {
-              dynCall_viii(GLFW.active.dropFunc, GLFW.active.id, count, filenames);
+              wasmTable.get(GLFW.active.dropFunc)(GLFW.active.id, count, filenames);
   
               for (var i = 0; i < filenamesArray.length; ++i) {
                 _free(filenamesArray[i]);
@@ -28732,7 +27930,7 @@ var ASM_CONSTS = {
           };
           reader.readAsArrayBuffer(file);
   
-          var filename = allocate(intArrayFromString(path), 'i8', ALLOC_NORMAL);
+          var filename = allocate(intArrayFromString(path), ALLOC_NORMAL);
           filenamesArray.push(filename);
           setValue(filenames + i*4, filename, 'i8*');
         }
@@ -28758,7 +27956,7 @@ var ASM_CONSTS = {
         // function returns.
         // GLFW3 on the over hand doesn't have this behavior (https://github.com/glfw/glfw/issues/62).
         if (!win.windowSizeFunc) return null;
-        dynCall_vii(win.windowSizeFunc, win.width, win.height);
+        wasmTable.get(win.windowSizeFunc)(win.width, win.height);
   
         return prevcbfun;
       },setWindowCloseCallback:function(winid, cbfun) {
@@ -28849,7 +28047,7 @@ var ASM_CONSTS = {
         if (x) {
           setValue(x, wx, 'i32');
         }
-        
+  
         if (y) {
           setValue(y, wy, 'i32');
         }
@@ -28871,7 +28069,7 @@ var ASM_CONSTS = {
         if (width) {
           setValue(width, ww, 'i32');
         }
-        
+  
         if (height) {
           setValue(height, wh, 'i32');
         }
@@ -28892,7 +28090,7 @@ var ASM_CONSTS = {
   
         if (!win.windowSizeFunc) return;
   
-        dynCall_vii(win.windowSizeFunc, width, height);
+        wasmTable.get(win.windowSizeFunc)(width, height);
   
       },createWindow:function(width, height, title, monitor, share) {
         var i, id;
@@ -28946,7 +28144,6 @@ var ASM_CONSTS = {
         var win = GLFW.WindowFromId(winid);
         if (!win) return;
   
-  
         GLFW.windows[win.id - 1] = null;
         if (GLFW.active.id == win.id)
           GLFW.active = null;
@@ -28992,7 +28189,8 @@ var ASM_CONSTS = {
         };
         return table[param];
       }};
-  Module["GLFW"] = GLFW;/** @constructor */
+  Module["GLFW"] = GLFW;
+  /** @constructor */
   function GLFW_Window(id, width, height, title, monitor, share) {
         this.id = id;
         this.x = 0;
@@ -29092,7 +28290,6 @@ var ASM_CONSTS = {
       Module["canvas"].removeEventListener('mouseleave', GLFW.onMouseleave, true);
       Module["canvas"].removeEventListener('drop', GLFW.onDrop, true);
       Module["canvas"].removeEventListener('dragover', GLFW.onDragover, true);
-  
   
       Module["canvas"].width = Module["canvas"].height = 1;
       GLFW.windows = null;
@@ -29317,11 +28514,7 @@ var ASM_CONSTS = {
   Module["_glfwGetGLVersion"] = _glfwGetGLVersion;
 
   function _glfwCreateThread(fun, arg) {
-      var str = 'v';
-      for (var i in arg) {
-        str += 'i';
-      }
-      dynCall(str, fun, arg);
+      wasmTable.get(str)(fun, arg);
       // One single thread
       return 0;
     }
@@ -29543,7 +28736,7 @@ var ASM_CONSTS = {
             string = "Unknown error";
             error = 8; // prevent array from growing more than this
           }
-          GLEW.error[error] = allocate(intArrayFromString(string), 'i8', ALLOC_NORMAL);
+          GLEW.error[error] = allocate(intArrayFromString(string), ALLOC_NORMAL);
         }
         return GLEW.error[error];
       },versionStringConstantFromCode:function(name) {
@@ -29559,7 +28752,7 @@ var ASM_CONSTS = {
           var string = GLEW.versionStringConstantFromCode(name);
           if (!string)
             return 0;
-          GLEW.version[name] = allocate(intArrayFromString(string), 'i8', ALLOC_NORMAL);
+          GLEW.version[name] = allocate(intArrayFromString(string), ALLOC_NORMAL);
         }
         return GLEW.version[name];
       },extensionIsSupported:function(name) {
@@ -29708,12 +28901,12 @@ var ASM_CONSTS = {
   function _emscripten_idb_async_load(db, id, arg, onload, onerror) {
       IDBStore.getFile(UTF8ToString(db), UTF8ToString(id), function(error, byteArray) {
         if (error) {
-          if (onerror) dynCall_vi(onerror, arg);
+          if (onerror) wasmTable.get(onerror)(arg);
           return;
         }
         var buffer = _malloc(byteArray.length);
         HEAPU8.set(byteArray, buffer);
-        dynCall_viii(onload, arg, buffer, byteArray.length);
+        wasmTable.get(onload)(arg, buffer, byteArray.length);
         _free(buffer);
       });
     }
@@ -29723,10 +28916,10 @@ var ASM_CONSTS = {
       // note that we copy the data here, as these are async operatins - changes to HEAPU8 meanwhile should not affect us!
       IDBStore.setFile(UTF8ToString(db), UTF8ToString(id), new Uint8Array(HEAPU8.subarray(ptr, ptr+num)), function(error) {
         if (error) {
-          if (onerror) dynCall_vi(onerror, arg);
+          if (onerror) wasmTable.get(onerror)(arg);
           return;
         }
-        if (onstore) dynCall_vi(onstore, arg);
+        if (onstore) wasmTable.get(onstore)(arg);
       });
     }
   Module["_emscripten_idb_async_store"] = _emscripten_idb_async_store;
@@ -29734,10 +28927,10 @@ var ASM_CONSTS = {
   function _emscripten_idb_async_delete(db, id, arg, ondelete, onerror) {
       IDBStore.deleteFile(UTF8ToString(db), UTF8ToString(id), function(error) {
         if (error) {
-          if (onerror) dynCall_vi(onerror, arg);
+          if (onerror) wasmTable.get(onerror)(arg);
           return;
         }
-        if (ondelete) dynCall_vi(ondelete, arg);
+        if (ondelete) wasmTable.get(ondelete)(arg);
       });
     }
   Module["_emscripten_idb_async_delete"] = _emscripten_idb_async_delete;
@@ -29745,10 +28938,10 @@ var ASM_CONSTS = {
   function _emscripten_idb_async_exists(db, id, arg, oncheck, onerror) {
       IDBStore.existsFile(UTF8ToString(db), UTF8ToString(id), function(error, exists) {
         if (error) {
-          if (onerror) dynCall_vi(onerror, arg);
+          if (onerror) wasmTable.get(onerror)(arg);
           return;
         }
-        if (oncheck) dynCall_vii(oncheck, arg, exists);
+        if (oncheck) wasmTable.get(oncheck)(arg, exists);
       });
     }
   Module["_emscripten_idb_async_exists"] = _emscripten_idb_async_exists;
@@ -29787,32 +28980,17 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_sleep"] = _emscripten_sleep;
 
-  function _emscripten_coroutine_create() {
-      throw 'Please compile your program with async support in order to use asynchronous operations like emscripten_coroutine_create';
-    }
-  Module["_emscripten_coroutine_create"] = _emscripten_coroutine_create;
-
-  function _emscripten_coroutine_next() {
-      throw 'Please compile your program with async support in order to use asynchronous operations like emscripten_coroutine_next';
-    }
-  Module["_emscripten_coroutine_next"] = _emscripten_coroutine_next;
-
-  function _emscripten_yield() {
-      throw 'Please compile your program with async support in order to use asynchronous operations like emscripten_yield';
-    }
-  Module["_emscripten_yield"] = _emscripten_yield;
-
-  function _emscripten_wget(url, file) {
+  function _emscripten_wget() {
       throw 'Please compile your program with async support in order to use asynchronous operations like emscripten_wget';
     }
   Module["_emscripten_wget"] = _emscripten_wget;
 
-  function _emscripten_wget_data(url, file) {
+  function _emscripten_wget_data() {
       throw 'Please compile your program with async support in order to use asynchronous operations like emscripten_wget_data';
     }
   Module["_emscripten_wget_data"] = _emscripten_wget_data;
 
-  function _emscripten_scan_registers(url, file) {
+  function _emscripten_scan_registers() {
       throw 'Please compile your program with async support in order to use asynchronous operations like emscripten_scan_registers';
     }
   Module["_emscripten_scan_registers"] = _emscripten_scan_registers;
@@ -29916,18 +29094,6 @@ var ASM_CONSTS = {
   Module["_pthread_setcanceltype"] = _pthread_setcanceltype;
 
 
-
-  function __pthread_cleanup_push(a0,a1
-  ) {
-  return _pthread_cleanup_push(a0,a1);
-  }
-  Module["__pthread_cleanup_push"] = __pthread_cleanup_push;
-
-  function __pthread_cleanup_pop(
-  ) {
-  _pthread_cleanup_pop();
-  }
-  Module["__pthread_cleanup_pop"] = __pthread_cleanup_pop;
 
 
   function _pthread_rwlock_init() { return 0; }
@@ -30038,6 +29204,30 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_llvm_atomic_load_add_i32_p0i32"] = _llvm_atomic_load_add_i32_p0i32;
+
+  function _i64Add(a, b, c, d) {
+      /*
+        x = a + b*2^32
+        y = c + d*2^32
+        result = l + h*2^32
+      */
+      a = a|0; b = b|0; c = c|0; d = d|0;
+      var l = 0, h = 0;
+      l = (a + c)>>>0;
+      h = (b + d + (((l>>>0) < (a>>>0))|0))>>>0; // Add carry from low word to high word on overflow.
+      return ((setTempRet0((h) | 0),l|0)|0);
+    }
+  Module["_i64Add"] = _i64Add;
+
+  function _i64Subtract(a, b, c, d) {
+      a = a|0; b = b|0; c = c|0; d = d|0;
+      var l = 0, h = 0;
+      l = (a - c)>>>0;
+      h = (b - d)>>>0;
+      h = (b - d - (((c>>>0) > (a>>>0))|0))>>>0; // Borrow one from high word to low word on underflow.
+      return ((setTempRet0((h) | 0),l|0)|0);
+    }
+  Module["_i64Subtract"] = _i64Subtract;
 
   function ___atomic_is_lock_free(size, ptr) {
       return size <= 4 && (size & (size-1)) == 0 && (ptr&(size-1)) == 0;
@@ -30179,11 +29369,170 @@ function intArrayToString(array) {
 }
 
 
-// ASM_LIBRARY EXTERN PRIMITIVES: Math_floor,Math_ceil,Math_clz32,Math_imul,Math_min,Math_max
 
-var gb = GLOBAL_BASE, fb = 0;
-var asmGlobalArg = {};
-var asmLibraryArg = { "_Unwind_GetIP": __Unwind_GetIP, "_Unwind_GetLanguageSpecificData": __Unwind_GetLanguageSpecificData, "_Unwind_GetRegionStart": __Unwind_GetRegionStart, "_Unwind_SetGR": __Unwind_SetGR, "_Unwind_SetIP": __Unwind_SetIP, "__clock_gettime": ___clock_gettime, "__cxa_atexit": ___cxa_atexit, "__handle_stack_overflow": ___handle_stack_overflow, "__map_file": ___map_file, "__memory_base": 1024, "__posix_spawnx": ___posix_spawnx, "__stack_pointer": STACK_BASE, "__sys__newselect": ___sys__newselect, "__sys_access": ___sys_access, "__sys_acct": ___sys_acct, "__sys_chdir": ___sys_chdir, "__sys_chmod": ___sys_chmod, "__sys_chown32": ___sys_chown32, "__sys_dup": ___sys_dup, "__sys_dup2": ___sys_dup2, "__sys_dup3": ___sys_dup3, "__sys_fadvise64_64": ___sys_fadvise64_64, "__sys_fallocate": ___sys_fallocate, "__sys_fchdir": ___sys_fchdir, "__sys_fchmod": ___sys_fchmod, "__sys_fchmodat": ___sys_fchmodat, "__sys_fchown32": ___sys_fchown32, "__sys_fchownat": ___sys_fchownat, "__sys_fcntl64": ___sys_fcntl64, "__sys_fdatasync": ___sys_fdatasync, "__sys_fstat64": ___sys_fstat64, "__sys_fstatat64": ___sys_fstatat64, "__sys_fstatfs64": ___sys_fstatfs64, "__sys_ftruncate64": ___sys_ftruncate64, "__sys_getcwd": ___sys_getcwd, "__sys_getdents64": ___sys_getdents64, "__sys_getegid32": ___sys_getegid32, "__sys_geteuid32": ___sys_geteuid32, "__sys_getgid32": ___sys_getgid32, "__sys_getgroups32": ___sys_getgroups32, "__sys_getpgid": ___sys_getpgid, "__sys_getpid": ___sys_getpid, "__sys_getppid": ___sys_getppid, "__sys_getpriority": ___sys_getpriority, "__sys_getresgid32": ___sys_getresgid32, "__sys_getresuid32": ___sys_getresuid32, "__sys_getrusage": ___sys_getrusage, "__sys_getsid": ___sys_getsid, "__sys_getuid32": ___sys_getuid32, "__sys_ioctl": ___sys_ioctl, "__sys_lchown32": ___sys_lchown32, "__sys_link": ___sys_link, "__sys_linkat": ___sys_linkat, "__sys_lstat64": ___sys_lstat64, "__sys_madvise1": ___sys_madvise1, "__sys_mincore": ___sys_mincore, "__sys_mkdir": ___sys_mkdir, "__sys_mkdirat": ___sys_mkdirat, "__sys_mknod": ___sys_mknod, "__sys_mknodat": ___sys_mknodat, "__sys_mlock": ___sys_mlock, "__sys_mlockall": ___sys_mlockall, "__sys_mmap2": ___sys_mmap2, "__sys_mprotect": ___sys_mprotect, "__sys_mremap": ___sys_mremap, "__sys_msync": ___sys_msync, "__sys_munlock": ___sys_munlock, "__sys_munlockall": ___sys_munlockall, "__sys_munmap": ___sys_munmap, "__sys_nice": ___sys_nice, "__sys_open": ___sys_open, "__sys_openat": ___sys_openat, "__sys_pause": ___sys_pause, "__sys_pipe": ___sys_pipe, "__sys_pipe2": ___sys_pipe2, "__sys_poll": ___sys_poll, "__sys_pread64": ___sys_pread64, "__sys_preadv": ___sys_preadv, "__sys_prlimit64": ___sys_prlimit64, "__sys_pselect6": ___sys_pselect6, "__sys_pwrite64": ___sys_pwrite64, "__sys_pwritev": ___sys_pwritev, "__sys_read": ___sys_read, "__sys_readlink": ___sys_readlink, "__sys_readlinkat": ___sys_readlinkat, "__sys_recvmmsg": ___sys_recvmmsg, "__sys_rename": ___sys_rename, "__sys_renameat": ___sys_renameat, "__sys_rmdir": ___sys_rmdir, "__sys_sendmmsg": ___sys_sendmmsg, "__sys_setdomainname": ___sys_setdomainname, "__sys_setpgid": ___sys_setpgid, "__sys_setpriority": ___sys_setpriority, "__sys_setrlimit": ___sys_setrlimit, "__sys_setsid": ___sys_setsid, "__sys_socketcall": ___sys_socketcall, "__sys_stat64": ___sys_stat64, "__sys_statfs64": ___sys_statfs64, "__sys_symlink": ___sys_symlink, "__sys_symlinkat": ___sys_symlinkat, "__sys_sync": ___sys_sync, "__sys_truncate64": ___sys_truncate64, "__sys_ugetrlimit": ___sys_ugetrlimit, "__sys_umask": ___sys_umask, "__sys_uname": ___sys_uname, "__sys_unlink": ___sys_unlink, "__sys_unlinkat": ___sys_unlinkat, "__sys_utimensat": ___sys_utimensat, "__sys_wait4": ___sys_wait4, "__table_base": 1, "__wait": ___wait, "_exit": __exit, "abort": _abort, "clock_gettime": _clock_gettime, "dlclose": _dlclose, "dlopen": _dlopen, "dlsym": _dlsym, "emscripten_async_wget": _emscripten_async_wget, "emscripten_get_sbrk_ptr": _emscripten_get_sbrk_ptr, "emscripten_memcpy_big": _emscripten_memcpy_big, "emscripten_resize_heap": _emscripten_resize_heap, "emscripten_stack_get_end": _emscripten_stack_get_end, "environ_get": _environ_get, "environ_sizes_get": _environ_sizes_get, "execve": _execve, "exit": _exit, "fd_close": _fd_close, "fd_fdstat_get": _fd_fdstat_get, "fd_read": _fd_read, "fd_seek": _fd_seek, "fd_sync": _fd_sync, "fd_write": _fd_write, "fork": _fork, "getTempRet0": getTempRet0, "getnameinfo": _getnameinfo, "gmtime_r": _gmtime_r, "inet_addr": _inet_addr, "memory": wasmMemory, "nanosleep": _nanosleep, "pathconf": _pathconf, "pthread_cleanup_pop": _pthread_cleanup_pop, "pthread_cleanup_push": _pthread_cleanup_push, "pthread_detach": _pthread_detach, "pthread_join": _pthread_join, "pthread_mutexattr_destroy": _pthread_mutexattr_destroy, "pthread_mutexattr_init": _pthread_mutexattr_init, "pthread_mutexattr_settype": _pthread_mutexattr_settype, "pthread_setcancelstate": _pthread_setcancelstate, "pthread_sigmask": _pthread_sigmask, "round": _round, "roundf": _roundf, "setTempRet0": setTempRet0, "setitimer": _setitimer, "sigfillset": _sigfillset, "strftime": _strftime, "strftime_l": _strftime_l, "sysconf": _sysconf, "table": wasmTable, "time": _time };
+__ATINIT__.push({ func: function() { ___assign_got_enties() } }, { func: function() { ___wasm_call_ctors() } });
+var asmLibraryArg = {
+  "_Unwind_GetIP": __Unwind_GetIP,
+  "_Unwind_GetLanguageSpecificData": __Unwind_GetLanguageSpecificData,
+  "_Unwind_GetRegionStart": __Unwind_GetRegionStart,
+  "_Unwind_SetGR": __Unwind_SetGR,
+  "_Unwind_SetIP": __Unwind_SetIP,
+  "__asctime_r": ___asctime_r,
+  "__clock_gettime": ___clock_gettime,
+  "__cxa_atexit": ___cxa_atexit,
+  "__gmtime_r": ___gmtime_r,
+  "__indirect_function_table": wasmTable,
+  "__localtime_r": ___localtime_r,
+  "__map_file": ___map_file,
+  "__memory_base": 1024,
+  "__posix_spawnx": ___posix_spawnx,
+  "__stack_pointer": __stack_pointer,
+  "__sys__newselect": ___sys__newselect,
+  "__sys_access": ___sys_access,
+  "__sys_acct": ___sys_acct,
+  "__sys_chdir": ___sys_chdir,
+  "__sys_chmod": ___sys_chmod,
+  "__sys_chown32": ___sys_chown32,
+  "__sys_dup": ___sys_dup,
+  "__sys_dup2": ___sys_dup2,
+  "__sys_dup3": ___sys_dup3,
+  "__sys_fadvise64_64": ___sys_fadvise64_64,
+  "__sys_fallocate": ___sys_fallocate,
+  "__sys_fchdir": ___sys_fchdir,
+  "__sys_fchmod": ___sys_fchmod,
+  "__sys_fchmodat": ___sys_fchmodat,
+  "__sys_fchown32": ___sys_fchown32,
+  "__sys_fchownat": ___sys_fchownat,
+  "__sys_fcntl64": ___sys_fcntl64,
+  "__sys_fdatasync": ___sys_fdatasync,
+  "__sys_fstat64": ___sys_fstat64,
+  "__sys_fstatat64": ___sys_fstatat64,
+  "__sys_fstatfs64": ___sys_fstatfs64,
+  "__sys_ftruncate64": ___sys_ftruncate64,
+  "__sys_getcwd": ___sys_getcwd,
+  "__sys_getdents64": ___sys_getdents64,
+  "__sys_getegid32": ___sys_getegid32,
+  "__sys_geteuid32": ___sys_geteuid32,
+  "__sys_getgid32": ___sys_getgid32,
+  "__sys_getgroups32": ___sys_getgroups32,
+  "__sys_getpgid": ___sys_getpgid,
+  "__sys_getpid": ___sys_getpid,
+  "__sys_getppid": ___sys_getppid,
+  "__sys_getpriority": ___sys_getpriority,
+  "__sys_getresgid32": ___sys_getresgid32,
+  "__sys_getresuid32": ___sys_getresuid32,
+  "__sys_getrusage": ___sys_getrusage,
+  "__sys_getsid": ___sys_getsid,
+  "__sys_getuid32": ___sys_getuid32,
+  "__sys_ioctl": ___sys_ioctl,
+  "__sys_lchown32": ___sys_lchown32,
+  "__sys_link": ___sys_link,
+  "__sys_linkat": ___sys_linkat,
+  "__sys_lstat64": ___sys_lstat64,
+  "__sys_madvise1": ___sys_madvise1,
+  "__sys_mincore": ___sys_mincore,
+  "__sys_mkdir": ___sys_mkdir,
+  "__sys_mkdirat": ___sys_mkdirat,
+  "__sys_mknod": ___sys_mknod,
+  "__sys_mknodat": ___sys_mknodat,
+  "__sys_mlock": ___sys_mlock,
+  "__sys_mlockall": ___sys_mlockall,
+  "__sys_mmap2": ___sys_mmap2,
+  "__sys_mprotect": ___sys_mprotect,
+  "__sys_mremap": ___sys_mremap,
+  "__sys_msync": ___sys_msync,
+  "__sys_munlock": ___sys_munlock,
+  "__sys_munlockall": ___sys_munlockall,
+  "__sys_munmap": ___sys_munmap,
+  "__sys_nice": ___sys_nice,
+  "__sys_open": ___sys_open,
+  "__sys_openat": ___sys_openat,
+  "__sys_pause": ___sys_pause,
+  "__sys_pipe": ___sys_pipe,
+  "__sys_pipe2": ___sys_pipe2,
+  "__sys_poll": ___sys_poll,
+  "__sys_pread64": ___sys_pread64,
+  "__sys_preadv": ___sys_preadv,
+  "__sys_prlimit64": ___sys_prlimit64,
+  "__sys_pselect6": ___sys_pselect6,
+  "__sys_pwrite64": ___sys_pwrite64,
+  "__sys_pwritev": ___sys_pwritev,
+  "__sys_read": ___sys_read,
+  "__sys_readlink": ___sys_readlink,
+  "__sys_readlinkat": ___sys_readlinkat,
+  "__sys_recvmmsg": ___sys_recvmmsg,
+  "__sys_rename": ___sys_rename,
+  "__sys_renameat": ___sys_renameat,
+  "__sys_rmdir": ___sys_rmdir,
+  "__sys_sendmmsg": ___sys_sendmmsg,
+  "__sys_setdomainname": ___sys_setdomainname,
+  "__sys_setpgid": ___sys_setpgid,
+  "__sys_setpriority": ___sys_setpriority,
+  "__sys_setrlimit": ___sys_setrlimit,
+  "__sys_setsid": ___sys_setsid,
+  "__sys_socketcall": ___sys_socketcall,
+  "__sys_stat64": ___sys_stat64,
+  "__sys_statfs64": ___sys_statfs64,
+  "__sys_symlink": ___sys_symlink,
+  "__sys_symlinkat": ___sys_symlinkat,
+  "__sys_sync": ___sys_sync,
+  "__sys_truncate64": ___sys_truncate64,
+  "__sys_ugetrlimit": ___sys_ugetrlimit,
+  "__sys_umask": ___sys_umask,
+  "__sys_uname": ___sys_uname,
+  "__sys_unlink": ___sys_unlink,
+  "__sys_unlinkat": ___sys_unlinkat,
+  "__sys_utimensat": ___sys_utimensat,
+  "__sys_wait4": ___sys_wait4,
+  "__table_base": 1,
+  "__wait": ___wait,
+  "_exit": __exit,
+  "abort": _abort,
+  "clock_gettime": _clock_gettime,
+  "dlclose": _dlclose,
+  "dlopen": _dlopen,
+  "dlsym": _dlsym,
+  "emscripten_async_wget": _emscripten_async_wget,
+  "emscripten_memcpy_big": _emscripten_memcpy_big,
+  "emscripten_resize_heap": _emscripten_resize_heap,
+  "emscripten_stack_get_end": _emscripten_stack_get_end,
+  "environ_get": _environ_get,
+  "environ_sizes_get": _environ_sizes_get,
+  "execve": _execve,
+  "exit": _exit,
+  "fd_close": _fd_close,
+  "fd_fdstat_get": _fd_fdstat_get,
+  "fd_read": _fd_read,
+  "fd_seek": _fd_seek,
+  "fd_sync": _fd_sync,
+  "fd_write": _fd_write,
+  "fork": _fork,
+  "g$__heap_base": _g$__heap_base,
+  "getTempRet0": getTempRet0,
+  "getentropy": _getentropy,
+  "getnameinfo": _getnameinfo,
+  "gmtime_r": _gmtime_r,
+  "inet_addr": _inet_addr,
+  "memory": wasmMemory,
+  "nanosleep": _nanosleep,
+  "pathconf": _pathconf,
+  "pthread_cleanup_pop": _pthread_cleanup_pop,
+  "pthread_cleanup_push": _pthread_cleanup_push,
+  "pthread_detach": _pthread_detach,
+  "pthread_join": _pthread_join,
+  "pthread_mutexattr_destroy": _pthread_mutexattr_destroy,
+  "pthread_mutexattr_init": _pthread_mutexattr_init,
+  "pthread_mutexattr_settype": _pthread_mutexattr_settype,
+  "pthread_setcancelstate": _pthread_setcancelstate,
+  "pthread_sigmask": _pthread_sigmask,
+  "setTempRet0": setTempRet0,
+  "setitimer": _setitimer,
+  "sigfillset": _sigfillset,
+  "strftime": _strftime,
+  "strftime_l": _strftime_l,
+  "sysconf": _sysconf,
+  "time": _time
+};
 var asm = createWasm();
 /** @type {function(...*):?} */
 var ___wasm_call_ctors = Module["___wasm_call_ctors"] = createExportWrapper("__wasm_call_ctors");
@@ -31284,9 +30633,6 @@ var ___get_locale = Module["___get_locale"] = createExportWrapper("__get_locale"
 var _getenv = Module["_getenv"] = createExportWrapper("getenv");
 
 /** @type {function(...*):?} */
-var ___strchrnul = Module["___strchrnul"] = createExportWrapper("__strchrnul");
-
-/** @type {function(...*):?} */
 var ___newlocale = Module["___newlocale"] = createExportWrapper("__newlocale");
 
 /** @type {function(...*):?} */
@@ -31294,6 +30640,9 @@ var _newlocale = Module["_newlocale"] = createExportWrapper("newlocale");
 
 /** @type {function(...*):?} */
 var _setlocale = Module["_setlocale"] = createExportWrapper("setlocale");
+
+/** @type {function(...*):?} */
+var ___strchrnul = Module["___strchrnul"] = createExportWrapper("__strchrnul");
 
 /** @type {function(...*):?} */
 var ___strcoll_l = Module["___strcoll_l"] = createExportWrapper("__strcoll_l");
@@ -31368,6 +30717,12 @@ var _wcsxfrm_l = Module["_wcsxfrm_l"] = createExportWrapper("wcsxfrm_l");
 var ___lctrans_cur = Module["___lctrans_cur"] = createExportWrapper("__lctrans_cur");
 
 /** @type {function(...*):?} */
+var _acos = Module["_acos"] = createExportWrapper("acos");
+
+/** @type {function(...*):?} */
+var _acosf = Module["_acosf"] = createExportWrapper("acosf");
+
+/** @type {function(...*):?} */
 var _acosh = Module["_acosh"] = createExportWrapper("acosh");
 
 /** @type {function(...*):?} */
@@ -31383,6 +30738,21 @@ var _log1pf = Module["_log1pf"] = createExportWrapper("log1pf");
 var _acoshl = Module["_acoshl"] = createExportWrapper("acoshl");
 
 /** @type {function(...*):?} */
+var _acosl = Module["_acosl"] = createExportWrapper("acosl");
+
+/** @type {function(...*):?} */
+var ___invtrigl_R = Module["___invtrigl_R"] = createExportWrapper("__invtrigl_R");
+
+/** @type {function(...*):?} */
+var _sqrtl = Module["_sqrtl"] = createExportWrapper("sqrtl");
+
+/** @type {function(...*):?} */
+var _asin = Module["_asin"] = createExportWrapper("asin");
+
+/** @type {function(...*):?} */
+var _asinf = Module["_asinf"] = createExportWrapper("asinf");
+
+/** @type {function(...*):?} */
 var _asinh = Module["_asinh"] = createExportWrapper("asinh");
 
 /** @type {function(...*):?} */
@@ -31390,6 +30760,18 @@ var _asinhf = Module["_asinhf"] = createExportWrapper("asinhf");
 
 /** @type {function(...*):?} */
 var _asinhl = Module["_asinhl"] = createExportWrapper("asinhl");
+
+/** @type {function(...*):?} */
+var _asinl = Module["_asinl"] = createExportWrapper("asinl");
+
+/** @type {function(...*):?} */
+var _atan = Module["_atan"] = createExportWrapper("atan");
+
+/** @type {function(...*):?} */
+var _atanf = Module["_atanf"] = createExportWrapper("atanf");
+
+/** @type {function(...*):?} */
+var _atanl = Module["_atanl"] = createExportWrapper("atanl");
 
 /** @type {function(...*):?} */
 var _atanh = Module["_atanh"] = createExportWrapper("atanh");
@@ -31422,6 +30804,30 @@ var _ceil = Module["_ceil"] = createExportWrapper("ceil");
 var _ceilf = Module["_ceilf"] = createExportWrapper("ceilf");
 
 /** @type {function(...*):?} */
+var _ceill = Module["_ceill"] = createExportWrapper("ceill");
+
+/** @type {function(...*):?} */
+var ___lttf2 = Module["___lttf2"] = createExportWrapper("__lttf2");
+
+/** @type {function(...*):?} */
+var ___cos = Module["___cos"] = createExportWrapper("__cos");
+
+/** @type {function(...*):?} */
+var ___rem_pio2 = Module["___rem_pio2"] = createExportWrapper("__rem_pio2");
+
+/** @type {function(...*):?} */
+var ___sin = Module["___sin"] = createExportWrapper("__sin");
+
+/** @type {function(...*):?} */
+var ___cosdf = Module["___cosdf"] = createExportWrapper("__cosdf");
+
+/** @type {function(...*):?} */
+var ___sindf = Module["___sindf"] = createExportWrapper("__sindf");
+
+/** @type {function(...*):?} */
+var ___rem_pio2f = Module["___rem_pio2f"] = createExportWrapper("__rem_pio2f");
+
+/** @type {function(...*):?} */
 var _expm1 = Module["_expm1"] = createExportWrapper("expm1");
 
 /** @type {function(...*):?} */
@@ -31435,6 +30841,18 @@ var ___expo2f = Module["___expo2f"] = createExportWrapper("__expo2f");
 
 /** @type {function(...*):?} */
 var _coshl = Module["_coshl"] = createExportWrapper("coshl");
+
+/** @type {function(...*):?} */
+var _cosl = Module["_cosl"] = createExportWrapper("cosl");
+
+/** @type {function(...*):?} */
+var ___cosl = Module["___cosl"] = createExportWrapper("__cosl");
+
+/** @type {function(...*):?} */
+var ___rem_pio2l = Module["___rem_pio2l"] = createExportWrapper("__rem_pio2l");
+
+/** @type {function(...*):?} */
+var ___sinl = Module["___sinl"] = createExportWrapper("__sinl");
 
 /** @type {function(...*):?} */
 var _erf = Module["_erf"] = createExportWrapper("erf");
@@ -31470,10 +30888,13 @@ var _powl = Module["_powl"] = createExportWrapper("powl");
 var _pow10l = Module["_pow10l"] = createExportWrapper("pow10l");
 
 /** @type {function(...*):?} */
-var ___lttf2 = Module["___lttf2"] = createExportWrapper("__lttf2");
+var ___letf2 = Module["___letf2"] = createExportWrapper("__letf2");
 
 /** @type {function(...*):?} */
-var ___letf2 = Module["___letf2"] = createExportWrapper("__letf2");
+var _scalbnf = Module["_scalbnf"] = createExportWrapper("scalbnf");
+
+/** @type {function(...*):?} */
+var _expl = Module["_expl"] = createExportWrapper("expl");
 
 /** @type {function(...*):?} */
 var _expm1l = Module["_expm1l"] = createExportWrapper("expm1l");
@@ -31498,6 +30919,9 @@ var _floor = Module["_floor"] = createExportWrapper("floor");
 
 /** @type {function(...*):?} */
 var _floorf = Module["_floorf"] = createExportWrapper("floorf");
+
+/** @type {function(...*):?} */
+var _floorl = Module["_floorl"] = createExportWrapper("floorl");
 
 /** @type {function(...*):?} */
 var _fma = Module["_fma"] = createExportWrapper("fma");
@@ -31528,9 +30952,6 @@ var _ilogbl = Module["_ilogbl"] = createExportWrapper("ilogbl");
 
 /** @type {function(...*):?} */
 var _frexpf = Module["_frexpf"] = createExportWrapper("frexpf");
-
-/** @type {function(...*):?} */
-var _sqrtl = Module["_sqrtl"] = createExportWrapper("sqrtl");
 
 /** @type {function(...*):?} */
 var _ilogbf = Module["_ilogbf"] = createExportWrapper("ilogbf");
@@ -31578,9 +30999,6 @@ var _ldexp = Module["_ldexp"] = createExportWrapper("ldexp");
 var _ldexpf = Module["_ldexpf"] = createExportWrapper("ldexpf");
 
 /** @type {function(...*):?} */
-var _scalbnf = Module["_scalbnf"] = createExportWrapper("scalbnf");
-
-/** @type {function(...*):?} */
 var _ldexpl = Module["_ldexpl"] = createExportWrapper("ldexpl");
 
 /** @type {function(...*):?} */
@@ -31596,12 +31014,6 @@ var _lgammaf = Module["_lgammaf"] = createExportWrapper("lgammaf");
 var ___lgammaf_r = Module["___lgammaf_r"] = createExportWrapper("__lgammaf_r");
 
 /** @type {function(...*):?} */
-var ___sindf = Module["___sindf"] = createExportWrapper("__sindf");
-
-/** @type {function(...*):?} */
-var ___cosdf = Module["___cosdf"] = createExportWrapper("__cosdf");
-
-/** @type {function(...*):?} */
 var _lgammaf_r = Module["_lgammaf_r"] = createExportWrapper("lgammaf_r");
 
 /** @type {function(...*):?} */
@@ -31612,12 +31024,6 @@ var _lgammal = Module["_lgammal"] = createExportWrapper("lgammal");
 
 /** @type {function(...*):?} */
 var _lgammal_r = Module["_lgammal_r"] = createExportWrapper("lgammal_r");
-
-/** @type {function(...*):?} */
-var ___sin = Module["___sin"] = createExportWrapper("__sin");
-
-/** @type {function(...*):?} */
-var ___cos = Module["___cos"] = createExportWrapper("__cos");
 
 /** @type {function(...*):?} */
 var _lgamma_r = Module["_lgamma_r"] = createExportWrapper("lgamma_r");
@@ -31647,7 +31053,13 @@ var ___fixtfdi = Module["___fixtfdi"] = createExportWrapper("__fixtfdi");
 var _llround = Module["_llround"] = createExportWrapper("llround");
 
 /** @type {function(...*):?} */
+var _round = Module["_round"] = createExportWrapper("round");
+
+/** @type {function(...*):?} */
 var _llroundf = Module["_llroundf"] = createExportWrapper("llroundf");
+
+/** @type {function(...*):?} */
+var _roundf = Module["_roundf"] = createExportWrapper("roundf");
 
 /** @type {function(...*):?} */
 var _llroundl = Module["_llroundl"] = createExportWrapper("llroundl");
@@ -31734,6 +31146,12 @@ var _nexttowardf = Module["_nexttowardf"] = createExportWrapper("nexttowardf");
 var _nexttowardl = Module["_nexttowardl"] = createExportWrapper("nexttowardl");
 
 /** @type {function(...*):?} */
+var _pow = Module["_pow"] = createExportWrapper("pow");
+
+/** @type {function(...*):?} */
+var _powf = Module["_powf"] = createExportWrapper("powf");
+
+/** @type {function(...*):?} */
 var _remainder = Module["_remainder"] = createExportWrapper("remainder");
 
 /** @type {function(...*):?} */
@@ -31782,28 +31200,22 @@ var _significandf = Module["_significandf"] = createExportWrapper("significandf"
 var _sincos = Module["_sincos"] = createExportWrapper("sincos");
 
 /** @type {function(...*):?} */
-var ___rem_pio2 = Module["___rem_pio2"] = createExportWrapper("__rem_pio2");
-
-/** @type {function(...*):?} */
 var _sincosf = Module["_sincosf"] = createExportWrapper("sincosf");
-
-/** @type {function(...*):?} */
-var ___rem_pio2f = Module["___rem_pio2f"] = createExportWrapper("__rem_pio2f");
 
 /** @type {function(...*):?} */
 var _sincosl = Module["_sincosl"] = createExportWrapper("sincosl");
 
 /** @type {function(...*):?} */
-var ___sinl = Module["___sinl"] = createExportWrapper("__sinl");
-
-/** @type {function(...*):?} */
-var ___cosl = Module["___cosl"] = createExportWrapper("__cosl");
-
-/** @type {function(...*):?} */
-var ___rem_pio2l = Module["___rem_pio2l"] = createExportWrapper("__rem_pio2l");
-
-/** @type {function(...*):?} */
 var _sinhl = Module["_sinhl"] = createExportWrapper("sinhl");
+
+/** @type {function(...*):?} */
+var _sinl = Module["_sinl"] = createExportWrapper("sinl");
+
+/** @type {function(...*):?} */
+var ___tan = Module["___tan"] = createExportWrapper("__tan");
+
+/** @type {function(...*):?} */
+var ___tandf = Module["___tandf"] = createExportWrapper("__tandf");
 
 /** @type {function(...*):?} */
 var _tanh = Module["_tanh"] = createExportWrapper("tanh");
@@ -31815,10 +31227,13 @@ var _tanhf = Module["_tanhf"] = createExportWrapper("tanhf");
 var _tanhl = Module["_tanhl"] = createExportWrapper("tanhl");
 
 /** @type {function(...*):?} */
-var _tgamma = Module["_tgamma"] = createExportWrapper("tgamma");
+var _tanl = Module["_tanl"] = createExportWrapper("tanl");
 
 /** @type {function(...*):?} */
-var _pow = Module["_pow"] = createExportWrapper("pow");
+var ___tanl = Module["___tanl"] = createExportWrapper("__tanl");
+
+/** @type {function(...*):?} */
+var _tgamma = Module["_tgamma"] = createExportWrapper("tgamma");
 
 /** @type {function(...*):?} */
 var _tgammaf = Module["_tgammaf"] = createExportWrapper("tgammaf");
@@ -31842,9 +31257,6 @@ var ___fpclassify = Module["___fpclassify"] = createExportWrapper("__fpclassify"
 var ___fpclassifyf = Module["___fpclassifyf"] = createExportWrapper("__fpclassifyf");
 
 /** @type {function(...*):?} */
-var ___invtrigl_R = Module["___invtrigl_R"] = createExportWrapper("__invtrigl_R");
-
-/** @type {function(...*):?} */
 var ___polevll = Module["___polevll"] = createExportWrapper("__polevll");
 
 /** @type {function(...*):?} */
@@ -31852,15 +31264,6 @@ var ___p1evll = Module["___p1evll"] = createExportWrapper("__p1evll");
 
 /** @type {function(...*):?} */
 var ___rem_pio2_large = Module["___rem_pio2_large"] = createExportWrapper("__rem_pio2_large");
-
-/** @type {function(...*):?} */
-var ___tan = Module["___tan"] = createExportWrapper("__tan");
-
-/** @type {function(...*):?} */
-var ___tandf = Module["___tandf"] = createExportWrapper("__tandf");
-
-/** @type {function(...*):?} */
-var ___tanl = Module["___tanl"] = createExportWrapper("__tanl");
 
 /** @type {function(...*):?} */
 var _a64l = Module["_a64l"] = createExportWrapper("a64l");
@@ -33369,6 +32772,9 @@ var ___stdout_write = Module["___stdout_write"] = createExportWrapper("__stdout_
 var ___toread_needs_stdio_exit = Module["___toread_needs_stdio_exit"] = createExportWrapper("__toread_needs_stdio_exit");
 
 /** @type {function(...*):?} */
+var _abs = Module["_abs"] = createExportWrapper("abs");
+
+/** @type {function(...*):?} */
 var _atof = Module["_atof"] = createExportWrapper("atof");
 
 /** @type {function(...*):?} */
@@ -33934,6 +33340,18 @@ var _writev = Module["_writev"] = createExportWrapper("writev");
 
 /** @type {function(...*):?} */
 var _clock_settime = Module["_clock_settime"] = createExportWrapper("clock_settime");
+
+/** @type {function(...*):?} */
+var _asctime = Module["_asctime"] = createExportWrapper("asctime");
+
+/** @type {function(...*):?} */
+var _ctime = Module["_ctime"] = createExportWrapper("ctime");
+
+/** @type {function(...*):?} */
+var _localtime = Module["_localtime"] = createExportWrapper("localtime");
+
+/** @type {function(...*):?} */
+var _gmtime = Module["_gmtime"] = createExportWrapper("gmtime");
 
 /** @type {function(...*):?} */
 var _getpagesize = Module["_getpagesize"] = createExportWrapper("getpagesize");
@@ -34668,9 +34086,6 @@ var ___umodsi3 = Module["___umodsi3"] = createExportWrapper("__umodsi3");
 var ___umodti3 = Module["___umodti3"] = createExportWrapper("__umodti3");
 
 /** @type {function(...*):?} */
-var _setThrew = Module["_setThrew"] = createExportWrapper("setThrew");
-
-/** @type {function(...*):?} */
 var stackSave = Module["stackSave"] = createExportWrapper("stackSave");
 
 /** @type {function(...*):?} */
@@ -34695,52 +34110,7 @@ var _saveSetjmp = Module["_saveSetjmp"] = createExportWrapper("saveSetjmp");
 var _testSetjmp = Module["_testSetjmp"] = createExportWrapper("testSetjmp");
 
 /** @type {function(...*):?} */
-var _cosl = Module["_cosl"] = createExportWrapper("cosl");
-
-/** @type {function(...*):?} */
-var _sinl = Module["_sinl"] = createExportWrapper("sinl");
-
-/** @type {function(...*):?} */
-var _tanl = Module["_tanl"] = createExportWrapper("tanl");
-
-/** @type {function(...*):?} */
-var _acos = Module["_acos"] = createExportWrapper("acos");
-
-/** @type {function(...*):?} */
-var _acosf = Module["_acosf"] = createExportWrapper("acosf");
-
-/** @type {function(...*):?} */
-var _acosl = Module["_acosl"] = createExportWrapper("acosl");
-
-/** @type {function(...*):?} */
-var _asin = Module["_asin"] = createExportWrapper("asin");
-
-/** @type {function(...*):?} */
-var _asinf = Module["_asinf"] = createExportWrapper("asinf");
-
-/** @type {function(...*):?} */
-var _asinl = Module["_asinl"] = createExportWrapper("asinl");
-
-/** @type {function(...*):?} */
-var _atan = Module["_atan"] = createExportWrapper("atan");
-
-/** @type {function(...*):?} */
-var _atanf = Module["_atanf"] = createExportWrapper("atanf");
-
-/** @type {function(...*):?} */
-var _atanl = Module["_atanl"] = createExportWrapper("atanl");
-
-/** @type {function(...*):?} */
-var _expl = Module["_expl"] = createExportWrapper("expl");
-
-/** @type {function(...*):?} */
-var _powf = Module["_powf"] = createExportWrapper("powf");
-
-/** @type {function(...*):?} */
-var _ceill = Module["_ceill"] = createExportWrapper("ceill");
-
-/** @type {function(...*):?} */
-var _floorl = Module["_floorl"] = createExportWrapper("floorl");
+var _setThrew = Module["_setThrew"] = createExportWrapper("setThrew");
 
 /** @type {function(...*):?} */
 var __ZNSt3__26__sortIRNS_6__lessIccEEPcEEvT0_S5_T_ = Module["__ZNSt3__26__sortIRNS_6__lessIccEEPcEEvT0_S5_T_"] = createExportWrapper("_ZNSt3__26__sortIRNS_6__lessIccEEPcEEvT0_S5_T_");
@@ -47070,6 +46440,9 @@ var _emscripten_builtin_free = Module["_emscripten_builtin_free"] = createExport
 var _emscripten_builtin_memalign = Module["_emscripten_builtin_memalign"] = createExportWrapper("emscripten_builtin_memalign");
 
 /** @type {function(...*):?} */
+var _emscripten_get_sbrk_ptr = Module["_emscripten_get_sbrk_ptr"] = createExportWrapper("emscripten_get_sbrk_ptr");
+
+/** @type {function(...*):?} */
 var _brk = Module["_brk"] = createExportWrapper("brk");
 
 /** @type {function(...*):?} */
@@ -47352,70 +46725,16 @@ var _getsockopt = Module["_getsockopt"] = createExportWrapper("getsockopt");
 var _freeaddrinfo = Module["_freeaddrinfo"] = createExportWrapper("freeaddrinfo");
 
 /** @type {function(...*):?} */
-var ___set_stack_limit = Module["___set_stack_limit"] = createExportWrapper("__set_stack_limit");
-
-/** @type {function(...*):?} */
-var dynCall_vi = Module["dynCall_vi"] = createExportWrapper("dynCall_vi");
-
-/** @type {function(...*):?} */
-var dynCall_iii = Module["dynCall_iii"] = createExportWrapper("dynCall_iii");
-
-/** @type {function(...*):?} */
-var dynCall_iiiiii = Module["dynCall_iiiiii"] = createExportWrapper("dynCall_iiiiii");
-
-/** @type {function(...*):?} */
 var dynCall_jiji = Module["dynCall_jiji"] = createExportWrapper("dynCall_jiji");
-
-/** @type {function(...*):?} */
-var dynCall_iiii = Module["dynCall_iiii"] = createExportWrapper("dynCall_iiii");
-
-/** @type {function(...*):?} */
-var dynCall_ii = Module["dynCall_ii"] = createExportWrapper("dynCall_ii");
-
-/** @type {function(...*):?} */
-var dynCall_iidiiii = Module["dynCall_iidiiii"] = createExportWrapper("dynCall_iidiiii");
-
-/** @type {function(...*):?} */
-var dynCall_vii = Module["dynCall_vii"] = createExportWrapper("dynCall_vii");
-
-/** @type {function(...*):?} */
-var dynCall_v = Module["dynCall_v"] = createExportWrapper("dynCall_v");
-
-/** @type {function(...*):?} */
-var dynCall_viiiiii = Module["dynCall_viiiiii"] = createExportWrapper("dynCall_viiiiii");
-
-/** @type {function(...*):?} */
-var dynCall_viiiii = Module["dynCall_viiiii"] = createExportWrapper("dynCall_viiiii");
-
-/** @type {function(...*):?} */
-var dynCall_viiii = Module["dynCall_viiii"] = createExportWrapper("dynCall_viiii");
-
-/** @type {function(...*):?} */
-var dynCall_viii = Module["dynCall_viii"] = createExportWrapper("dynCall_viii");
 
 /** @type {function(...*):?} */
 var dynCall_viijii = Module["dynCall_viijii"] = createExportWrapper("dynCall_viijii");
 
 /** @type {function(...*):?} */
-var dynCall_iiiii = Module["dynCall_iiiii"] = createExportWrapper("dynCall_iiiii");
-
-/** @type {function(...*):?} */
-var dynCall_iiiiiiiii = Module["dynCall_iiiiiiiii"] = createExportWrapper("dynCall_iiiiiiiii");
-
-/** @type {function(...*):?} */
-var dynCall_iiiiiii = Module["dynCall_iiiiiii"] = createExportWrapper("dynCall_iiiiiii");
-
-/** @type {function(...*):?} */
 var dynCall_iiiiij = Module["dynCall_iiiiij"] = createExportWrapper("dynCall_iiiiij");
 
 /** @type {function(...*):?} */
-var dynCall_iiiiid = Module["dynCall_iiiiid"] = createExportWrapper("dynCall_iiiiid");
-
-/** @type {function(...*):?} */
 var dynCall_iiiiijj = Module["dynCall_iiiiijj"] = createExportWrapper("dynCall_iiiiijj");
-
-/** @type {function(...*):?} */
-var dynCall_iiiiiiii = Module["dynCall_iiiiiiii"] = createExportWrapper("dynCall_iiiiiiii");
 
 /** @type {function(...*):?} */
 var dynCall_iiiiiijj = Module["dynCall_iiiiiijj"] = createExportWrapper("dynCall_iiiiiijj");
@@ -47520,7 +46839,22 @@ var _orig$__multi3 = Module["_orig$__multi3"] = createExportWrapper("orig$__mult
 var _orig$acoshl = Module["_orig$acoshl"] = createExportWrapper("orig$acoshl");
 
 /** @type {function(...*):?} */
+var _orig$acosl = Module["_orig$acosl"] = createExportWrapper("orig$acosl");
+
+/** @type {function(...*):?} */
+var _orig$__invtrigl_R = Module["_orig$__invtrigl_R"] = createExportWrapper("orig$__invtrigl_R");
+
+/** @type {function(...*):?} */
+var _orig$sqrtl = Module["_orig$sqrtl"] = createExportWrapper("orig$sqrtl");
+
+/** @type {function(...*):?} */
 var _orig$asinhl = Module["_orig$asinhl"] = createExportWrapper("orig$asinhl");
+
+/** @type {function(...*):?} */
+var _orig$asinl = Module["_orig$asinl"] = createExportWrapper("orig$asinl");
+
+/** @type {function(...*):?} */
+var _orig$atanl = Module["_orig$atanl"] = createExportWrapper("orig$atanl");
 
 /** @type {function(...*):?} */
 var _orig$atanhl = Module["_orig$atanhl"] = createExportWrapper("orig$atanhl");
@@ -47535,7 +46869,25 @@ var _orig$cbrtl = Module["_orig$cbrtl"] = createExportWrapper("orig$cbrtl");
 var _orig$__trunctfsf2 = Module["_orig$__trunctfsf2"] = createExportWrapper("orig$__trunctfsf2");
 
 /** @type {function(...*):?} */
+var _orig$ceill = Module["_orig$ceill"] = createExportWrapper("orig$ceill");
+
+/** @type {function(...*):?} */
+var _orig$__lttf2 = Module["_orig$__lttf2"] = createExportWrapper("orig$__lttf2");
+
+/** @type {function(...*):?} */
 var _orig$coshl = Module["_orig$coshl"] = createExportWrapper("orig$coshl");
+
+/** @type {function(...*):?} */
+var _orig$cosl = Module["_orig$cosl"] = createExportWrapper("orig$cosl");
+
+/** @type {function(...*):?} */
+var _orig$__cosl = Module["_orig$__cosl"] = createExportWrapper("orig$__cosl");
+
+/** @type {function(...*):?} */
+var _orig$__rem_pio2l = Module["_orig$__rem_pio2l"] = createExportWrapper("orig$__rem_pio2l");
+
+/** @type {function(...*):?} */
+var _orig$__sinl = Module["_orig$__sinl"] = createExportWrapper("orig$__sinl");
 
 /** @type {function(...*):?} */
 var _orig$erfl = Module["_orig$erfl"] = createExportWrapper("orig$erfl");
@@ -47559,16 +46911,19 @@ var _orig$powl = Module["_orig$powl"] = createExportWrapper("orig$powl");
 var _orig$pow10l = Module["_orig$pow10l"] = createExportWrapper("orig$pow10l");
 
 /** @type {function(...*):?} */
-var _orig$__lttf2 = Module["_orig$__lttf2"] = createExportWrapper("orig$__lttf2");
+var _orig$__letf2 = Module["_orig$__letf2"] = createExportWrapper("orig$__letf2");
 
 /** @type {function(...*):?} */
-var _orig$__letf2 = Module["_orig$__letf2"] = createExportWrapper("orig$__letf2");
+var _orig$expl = Module["_orig$expl"] = createExportWrapper("orig$expl");
 
 /** @type {function(...*):?} */
 var _orig$expm1l = Module["_orig$expm1l"] = createExportWrapper("orig$expm1l");
 
 /** @type {function(...*):?} */
 var _orig$fdiml = Module["_orig$fdiml"] = createExportWrapper("orig$fdiml");
+
+/** @type {function(...*):?} */
+var _orig$floorl = Module["_orig$floorl"] = createExportWrapper("orig$floorl");
 
 /** @type {function(...*):?} */
 var _orig$fmal = Module["_orig$fmal"] = createExportWrapper("orig$fmal");
@@ -47581,9 +46936,6 @@ var _orig$nextafterl = Module["_orig$nextafterl"] = createExportWrapper("orig$ne
 
 /** @type {function(...*):?} */
 var _orig$ilogbl = Module["_orig$ilogbl"] = createExportWrapper("orig$ilogbl");
-
-/** @type {function(...*):?} */
-var _orig$sqrtl = Module["_orig$sqrtl"] = createExportWrapper("orig$sqrtl");
 
 /** @type {function(...*):?} */
 var _orig$ldexpl = Module["_orig$ldexpl"] = createExportWrapper("orig$ldexpl");
@@ -47667,19 +47019,19 @@ var _orig$scalblnl = Module["_orig$scalblnl"] = createExportWrapper("orig$scalbl
 var _orig$sincosl = Module["_orig$sincosl"] = createExportWrapper("orig$sincosl");
 
 /** @type {function(...*):?} */
-var _orig$__sinl = Module["_orig$__sinl"] = createExportWrapper("orig$__sinl");
-
-/** @type {function(...*):?} */
-var _orig$__cosl = Module["_orig$__cosl"] = createExportWrapper("orig$__cosl");
-
-/** @type {function(...*):?} */
-var _orig$__rem_pio2l = Module["_orig$__rem_pio2l"] = createExportWrapper("orig$__rem_pio2l");
-
-/** @type {function(...*):?} */
 var _orig$sinhl = Module["_orig$sinhl"] = createExportWrapper("orig$sinhl");
 
 /** @type {function(...*):?} */
+var _orig$sinl = Module["_orig$sinl"] = createExportWrapper("orig$sinl");
+
+/** @type {function(...*):?} */
 var _orig$tanhl = Module["_orig$tanhl"] = createExportWrapper("orig$tanhl");
+
+/** @type {function(...*):?} */
+var _orig$tanl = Module["_orig$tanl"] = createExportWrapper("orig$tanl");
+
+/** @type {function(...*):?} */
+var _orig$__tanl = Module["_orig$__tanl"] = createExportWrapper("orig$__tanl");
 
 /** @type {function(...*):?} */
 var _orig$tgammal = Module["_orig$tgammal"] = createExportWrapper("orig$tgammal");
@@ -47688,16 +47040,10 @@ var _orig$tgammal = Module["_orig$tgammal"] = createExportWrapper("orig$tgammal"
 var _orig$truncl = Module["_orig$truncl"] = createExportWrapper("orig$truncl");
 
 /** @type {function(...*):?} */
-var _orig$__invtrigl_R = Module["_orig$__invtrigl_R"] = createExportWrapper("orig$__invtrigl_R");
-
-/** @type {function(...*):?} */
 var _orig$__polevll = Module["_orig$__polevll"] = createExportWrapper("orig$__polevll");
 
 /** @type {function(...*):?} */
 var _orig$__p1evll = Module["_orig$__p1evll"] = createExportWrapper("orig$__p1evll");
-
-/** @type {function(...*):?} */
-var _orig$__tanl = Module["_orig$__tanl"] = createExportWrapper("orig$__tanl");
 
 /** @type {function(...*):?} */
 var _orig$ffsll = Module["_orig$ffsll"] = createExportWrapper("orig$ffsll");
@@ -48156,33 +47502,6 @@ var _orig$__umoddi3 = Module["_orig$__umoddi3"] = createExportWrapper("orig$__um
 var _orig$__umodti3 = Module["_orig$__umodti3"] = createExportWrapper("orig$__umodti3");
 
 /** @type {function(...*):?} */
-var _orig$cosl = Module["_orig$cosl"] = createExportWrapper("orig$cosl");
-
-/** @type {function(...*):?} */
-var _orig$sinl = Module["_orig$sinl"] = createExportWrapper("orig$sinl");
-
-/** @type {function(...*):?} */
-var _orig$tanl = Module["_orig$tanl"] = createExportWrapper("orig$tanl");
-
-/** @type {function(...*):?} */
-var _orig$acosl = Module["_orig$acosl"] = createExportWrapper("orig$acosl");
-
-/** @type {function(...*):?} */
-var _orig$asinl = Module["_orig$asinl"] = createExportWrapper("orig$asinl");
-
-/** @type {function(...*):?} */
-var _orig$atanl = Module["_orig$atanl"] = createExportWrapper("orig$atanl");
-
-/** @type {function(...*):?} */
-var _orig$expl = Module["_orig$expl"] = createExportWrapper("orig$expl");
-
-/** @type {function(...*):?} */
-var _orig$ceill = Module["_orig$ceill"] = createExportWrapper("orig$ceill");
-
-/** @type {function(...*):?} */
-var _orig$floorl = Module["_orig$floorl"] = createExportWrapper("orig$floorl");
-
-/** @type {function(...*):?} */
 var _orig$_ZNSt3__26__itoa8__u64toaEyPc = Module["_orig$_ZNSt3__26__itoa8__u64toaEyPc"] = createExportWrapper("orig$_ZNSt3__26__itoa8__u64toaEyPc");
 
 /** @type {function(...*):?} */
@@ -48486,842 +47805,829 @@ var _orig$_emscripten_atomic_fetch_and_xor_u64 = Module["_orig$_emscripten_atomi
 var _orig$fminl = Module["_orig$fminl"] = createExportWrapper("orig$fminl");
 
 /** @type {function(...*):?} */
-var __growWasmMemory = Module["__growWasmMemory"] = createExportWrapper("__growWasmMemory");
-
-/** @type {function(...*):?} */
 var ___assign_got_enties = Module["___assign_got_enties"] = createExportWrapper("__assign_got_enties");
 
-
-var NAMED_GLOBALS = {
-  "__progname": 29916,
-  "__progname_full": 29920,
-  "__libc": 29924,
-  "__hwcap": 29988,
-  "__sysinfo": 29992,
-  "program_invocation_short_name": 29916,
-  "program_invocation_name": 29920,
-  "__c_dot_utf8": 30052,
-  "__c_locale": 30080,
-  "__c_dot_utf8_locale": 30104,
-  "__signgam": 161572,
-  "signgam": 161572,
-  "__pio2_hi": 162000,
-  "__pio2_lo": 162016,
-  "stderr": 168688,
-  "__optreset": 165360,
-  "optind": 165352,
-  "__optpos": 165364,
-  "optarg": 165368,
-  "optopt": 165372,
-  "opterr": 165356,
-  "optreset": 165360,
-  "__fsmu8": 166144,
-  "h_errno": 166628,
-  "in6addr_any": 166632,
-  "in6addr_loopback": 166648,
-  "_ns_flagdata": 167008,
-  "__seed48": 167958,
-  "__environ": 173416,
-  "__stdout_used": 170044,
-  "stdin": 168848,
-  "stdout": 170040,
-  "__stderr_used": 168692,
-  "__stdin_used": 168852,
-  "___environ": 173416,
-  "_environ": 173416,
-  "environ": 173416,
-  "__env_map": 173424,
-  "tzname": 173428,
-  "daylight": 173436,
-  "timezone": 173440,
-  "__THREW__": 179508,
-  "__threwValue": 179512,
-  "atanlo": 179680,
-  "atanhi": 179616,
-  "aT": 179744,
-  "_ZNSt3__212__rs_default4__c_E": 180328,
-  "_ZTVSt12bad_any_cast": 182880,
-  "_ZTISt12bad_any_cast": 182920,
-  "_ZTSSt12bad_any_cast": 182900,
-  "_ZTVN10__cxxabiv120__si_class_type_infoE": 223176,
-  "_ZTISt8bad_cast": 221172,
-  "_ZTVNSt12experimental15fundamentals_v112bad_any_castE": 182932,
-  "_ZTINSt12experimental15fundamentals_v112bad_any_castE": 183004,
-  "_ZTSNSt12experimental15fundamentals_v112bad_any_castE": 182952,
-  "_ZNSt3__212placeholders2_1E": 183016,
-  "_ZNSt3__212placeholders2_2E": 183017,
-  "_ZNSt3__212placeholders2_3E": 183018,
-  "_ZNSt3__212placeholders2_4E": 183019,
-  "_ZNSt3__212placeholders2_5E": 183020,
-  "_ZNSt3__212placeholders2_6E": 183021,
-  "_ZNSt3__212placeholders2_7E": 183022,
-  "_ZNSt3__212placeholders2_8E": 183023,
-  "_ZNSt3__212placeholders2_9E": 183024,
-  "_ZNSt3__212placeholders3_10E": 183025,
-  "_ZNSt3__26chrono12system_clock9is_steadyE": 183240,
-  "_ZNSt3__26chrono12steady_clock9is_steadyE": 183278,
-  "_ZNSt3__223__libcpp_debug_functionE": 183516,
-  "_ZTVNSt3__28__c_nodeE": 183548,
-  "_ZTINSt3__28__c_nodeE": 183600,
-  "_ZTSNSt3__28__c_nodeE": 183580,
-  "_ZTVN10__cxxabiv117__class_type_infoE": 223136,
-  "_ZTVSt16nested_exception": 183636,
-  "_ZTISt16nested_exception": 183676,
-  "_ZTSSt16nested_exception": 183652,
-  "_ZTVNSt3__217bad_function_callE": 183708,
-  "_ZTINSt3__217bad_function_callE": 183756,
-  "_ZTSNSt3__217bad_function_callE": 183728,
-  "_ZTISt9exception": 220456,
-  "__dso_handle": 0,
-  "_ZTVNSt3__212future_errorE": 184128,
-  "_ZTVNSt3__217__assoc_sub_stateE": 184148,
-  "_ZTVNSt3__214__shared_countE": 201040,
-  "_ZTVNSt3__223__future_error_categoryE": 184088,
-  "_ZTINSt3__223__future_error_categoryE": 184248,
-  "_ZTINSt3__212future_errorE": 184284,
-  "_ZTINSt3__217__assoc_sub_stateE": 184200,
-  "_ZTSNSt3__217__assoc_sub_stateE": 184172,
-  "_ZTINSt3__214__shared_countE": 201088,
-  "_ZTSNSt3__223__future_error_categoryE": 184212,
-  "_ZTINSt3__212__do_messageE": 206140,
-  "_ZTSNSt3__212future_errorE": 184260,
-  "_ZTISt11logic_error": 220680,
-  "_ZTVNSt3__28ios_baseE": 185404,
-  "_ZTVNSt3__215basic_streambufIcNS_11char_traitsIcEEEE": 184760,
-  "_ZTVNSt3__215basic_streambufIwNS_11char_traitsIwEEEE": 184824,
-  "_ZTTNSt3__213basic_istreamIcNS_11char_traitsIcEEEE": 184928,
-  "_ZNSt3__25ctypeIcE2idE": 188536,
-  "_ZTTNSt3__213basic_istreamIwNS_11char_traitsIwEEEE": 184976,
-  "_ZNSt3__25ctypeIwE2idE": 188528,
-  "_ZTTNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE": 185024,
-  "_ZNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE": 187820,
-  "_ZTTNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE": 185072,
-  "_ZNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE": 187836,
-  "_ZTTNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE": 185140,
-  "_ZTVNSt3__28ios_base7failureE": 185260,
-  "_ZNSt3__28ios_base9__xindex_E": 185392,
-  "_ZNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE": 187768,
-  "_ZNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE": 187812,
-  "_ZTINSt3__215basic_streambufIcNS_11char_traitsIcEEEE": 185660,
-  "_ZTINSt3__215basic_streambufIwNS_11char_traitsIwEEEE": 185720,
-  "_ZTVNSt3__213basic_istreamIcNS_11char_traitsIcEEEE": 184888,
-  "_ZTINSt3__213basic_istreamIcNS_11char_traitsIcEEEE": 185776,
-  "_ZTVNSt3__213basic_istreamIwNS_11char_traitsIwEEEE": 184936,
-  "_ZTINSt3__213basic_istreamIwNS_11char_traitsIwEEEE": 185848,
-  "_ZTVNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE": 184984,
-  "_ZTINSt3__213basic_ostreamIcNS_11char_traitsIcEEEE": 185920,
-  "_ZTVNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE": 185032,
-  "_ZTINSt3__213basic_ostreamIwNS_11char_traitsIwEEEE": 185992,
-  "_ZTVNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE": 185080,
-  "_ZTINSt3__214basic_iostreamIcNS_11char_traitsIcEEEE": 186144,
-  "_ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE": 186016,
-  "_ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE8_NS_13basic_ostreamIcS2_EE": 186056,
-  "_ZTVNSt3__219__iostream_categoryE": 185220,
-  "_ZTINSt3__219__iostream_categoryE": 186208,
-  "_ZTINSt3__28ios_base7failureE": 186248,
-  "_ZNSt3__28ios_base9boolalphaE": 185280,
-  "_ZNSt3__28ios_base3decE": 185284,
-  "_ZNSt3__28ios_base5fixedE": 185288,
-  "_ZNSt3__28ios_base3hexE": 185292,
-  "_ZNSt3__28ios_base8internalE": 185296,
-  "_ZNSt3__28ios_base4leftE": 185300,
-  "_ZNSt3__28ios_base3octE": 185304,
-  "_ZNSt3__28ios_base5rightE": 185308,
-  "_ZNSt3__28ios_base10scientificE": 185312,
-  "_ZNSt3__28ios_base8showbaseE": 185316,
-  "_ZNSt3__28ios_base9showpointE": 185320,
-  "_ZNSt3__28ios_base7showposE": 185324,
-  "_ZNSt3__28ios_base6skipwsE": 185328,
-  "_ZNSt3__28ios_base7unitbufE": 185332,
-  "_ZNSt3__28ios_base9uppercaseE": 185336,
-  "_ZNSt3__28ios_base11adjustfieldE": 185340,
-  "_ZNSt3__28ios_base9basefieldE": 185344,
-  "_ZNSt3__28ios_base10floatfieldE": 185348,
-  "_ZNSt3__28ios_base6badbitE": 185352,
-  "_ZNSt3__28ios_base6eofbitE": 185356,
-  "_ZNSt3__28ios_base7failbitE": 185360,
-  "_ZNSt3__28ios_base7goodbitE": 185364,
-  "_ZNSt3__28ios_base3appE": 185368,
-  "_ZNSt3__28ios_base3ateE": 185372,
-  "_ZNSt3__28ios_base6binaryE": 185376,
-  "_ZNSt3__28ios_base2inE": 185380,
-  "_ZNSt3__28ios_base3outE": 185384,
-  "_ZNSt3__28ios_base5truncE": 185388,
-  "_ZTINSt3__28ios_baseE": 185456,
-  "_ZTSNSt3__28ios_baseE": 185437,
-  "_ZTVNSt3__29basic_iosIcNS_11char_traitsIcEEEE": 185464,
-  "_ZTINSt3__29basic_iosIcNS_11char_traitsIcEEEE": 185524,
-  "_ZTSNSt3__29basic_iosIcNS_11char_traitsIcEEEE": 185480,
-  "_ZTVNSt3__29basic_iosIwNS_11char_traitsIwEEEE": 185536,
-  "_ZTINSt3__29basic_iosIwNS_11char_traitsIwEEEE": 185596,
-  "_ZTSNSt3__29basic_iosIwNS_11char_traitsIwEEEE": 185552,
-  "_ZTSNSt3__215basic_streambufIcNS_11char_traitsIcEEEE": 185608,
-  "_ZTSNSt3__215basic_streambufIwNS_11char_traitsIwEEEE": 185668,
-  "_ZTSNSt3__213basic_istreamIcNS_11char_traitsIcEEEE": 185728,
-  "_ZTVN10__cxxabiv121__vmi_class_type_infoE": 223268,
-  "_ZTSNSt3__213basic_istreamIwNS_11char_traitsIwEEEE": 185800,
-  "_ZTSNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE": 185872,
-  "_ZTSNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE": 185944,
-  "_ZTSNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE": 186096,
-  "_ZTSNSt3__219__iostream_categoryE": 186176,
-  "_ZTSNSt3__28ios_base7failureE": 186220,
-  "_ZTINSt3__212system_errorE": 206272,
-  "_ZNSt3__219__start_std_streamsE": 186940,
-  "_ZNSt3__23cinE": 186260,
-  "_ZNSt3__24wcinE": 186348,
-  "_ZNSt3__24coutE": 186436,
-  "_ZNSt3__25wcoutE": 186520,
-  "_ZNSt3__24cerrE": 186604,
-  "_ZNSt3__24clogE": 186772,
-  "_ZNSt3__25wcerrE": 186688,
-  "_ZNSt3__25wclogE": 186856,
-  "_ZTVNSt3__210__stdinbufIcEE": 187304,
-  "_ZTVNSt3__210__stdinbufIwEE": 187444,
-  "_ZTVNSt3__211__stdoutbufIcEE": 187544,
-  "_ZTVNSt3__211__stdoutbufIwEE": 187648,
-  "_ZNSt3__27codecvtIcc11__mbstate_tE2idE": 188840,
-  "_ZNSt3__27codecvtIwc11__mbstate_tE2idE": 188848,
-  "_ZTINSt3__210__stdinbufIcEE": 187392,
-  "_ZTSNSt3__210__stdinbufIcEE": 187368,
-  "_ZTINSt3__210__stdinbufIwEE": 187532,
-  "_ZTSNSt3__210__stdinbufIwEE": 187508,
-  "_ZTINSt3__211__stdoutbufIcEE": 187636,
-  "_ZTSNSt3__211__stdoutbufIcEE": 187608,
-  "_ZTINSt3__211__stdoutbufIwEE": 187740,
-  "_ZTSNSt3__211__stdoutbufIwEE": 187712,
-  "_ZNSt3__28numpunctIcE2idE": 189004,
-  "_ZNSt3__214__num_get_base5__srcE": 187776,
-  "_ZNSt3__28numpunctIwE2idE": 189012,
-  "_ZNSt3__210moneypunctIcLb1EE2idE": 188092,
-  "_ZNSt3__210moneypunctIcLb0EE2idE": 188080,
-  "_ZNSt3__210moneypunctIwLb1EE2idE": 188116,
-  "_ZNSt3__210moneypunctIwLb0EE2idE": 188104,
-  "_ZTVNSt3__216__narrow_to_utf8ILm32EEE": 190644,
-  "_ZTVNSt3__217__widen_from_utf8ILm32EEE": 190836,
-  "_ZTVNSt3__26locale5__impE": 188244,
-  "_ZTVNSt3__26locale5facetE": 189964,
-  "_ZNSt3__27collateIcE2idE": 187752,
-  "_ZNSt3__27collateIwE2idE": 187760,
-  "_ZNSt3__27codecvtIDsc11__mbstate_tE2idE": 188988,
-  "_ZNSt3__27codecvtIDic11__mbstate_tE2idE": 188996,
-  "_ZNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE": 188128,
-  "_ZNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE": 188140,
-  "_ZNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE": 188160,
-  "_ZNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE": 188176,
-  "_ZNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE": 187856,
-  "_ZNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE": 187880,
-  "_ZNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE": 188064,
-  "_ZNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE": 188072,
-  "_ZNSt3__28messagesIcE2idE": 188184,
-  "_ZNSt3__28messagesIwE2idE": 188192,
-  "_ZTVNSt3__214codecvt_bynameIcc11__mbstate_tEE": 197068,
-  "_ZTVNSt3__214codecvt_bynameIwc11__mbstate_tEE": 197172,
-  "_ZTVNSt3__214codecvt_bynameIDsc11__mbstate_tEE": 197276,
-  "_ZTVNSt3__214codecvt_bynameIDic11__mbstate_tEE": 197380,
-  "_ZTVNSt3__217moneypunct_bynameIcLb0EEE": 195636,
-  "_ZTVNSt3__217moneypunct_bynameIcLb1EEE": 195740,
-  "_ZTVNSt3__217moneypunct_bynameIwLb0EEE": 195844,
-  "_ZTVNSt3__217moneypunct_bynameIwLb1EEE": 195948,
-  "_ZTVNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 194060,
-  "_ZTVNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 194356,
-  "_ZTVNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 194908,
-  "_ZTVNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 195024,
-  "_ZTVNSt3__215messages_bynameIcEE": 196916,
-  "_ZTVNSt3__215messages_bynameIwEE": 196992,
-  "_ZNSt3__26locale2id9__next_idE": 188292,
-  "_ZTVNSt3__214collate_bynameIcEE": 188296,
-  "_ZTVNSt3__214collate_bynameIwEE": 188392,
-  "_ZTVNSt3__25ctypeIcEE": 188544,
-  "_ZTVNSt3__212ctype_bynameIcEE": 188596,
-  "_ZTVNSt3__212ctype_bynameIwEE": 188708,
-  "_ZTVNSt3__27codecvtIwc11__mbstate_tEE": 188856,
-  "_ZTVNSt3__28numpunctIcEE": 189020,
-  "_ZTVNSt3__28numpunctIwEE": 189060,
-  "_ZTVNSt3__215numpunct_bynameIcEE": 189160,
-  "_ZTVNSt3__215numpunct_bynameIwEE": 189264,
-  "_ZTVNSt3__215__time_get_tempIcEE": 200288,
-  "_ZTVNSt3__215__time_get_tempIwEE": 200384,
-  "_ZTVNSt3__27collateIcEE": 192608,
-  "_ZTVNSt3__27collateIwEE": 192640,
-  "_ZTVNSt3__25ctypeIwEE": 190020,
-  "_ZTVNSt3__27codecvtIcc11__mbstate_tEE": 190168,
-  "_ZTVNSt3__27codecvtIDsc11__mbstate_tEE": 190316,
-  "_ZTVNSt3__27codecvtIDic11__mbstate_tEE": 190432,
-  "_ZTVNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 192672,
-  "_ZTVNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 192916,
-  "_ZTVNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 193128,
-  "_ZTVNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 193360,
-  "_ZTVNSt3__210moneypunctIcLb0EEE": 195140,
-  "_ZTVNSt3__210moneypunctIcLb1EEE": 195288,
-  "_ZTVNSt3__210moneypunctIwLb0EEE": 195404,
-  "_ZTVNSt3__210moneypunctIwLb1EEE": 195520,
-  "_ZTVNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 196052,
-  "_ZTVNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 196216,
-  "_ZTVNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 196380,
-  "_ZTVNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 196544,
-  "_ZTVNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 193560,
-  "_ZTVNSt3__220__time_get_c_storageIcEE": 199952,
-  "_ZTVNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 193824,
-  "_ZTVNSt3__220__time_get_c_storageIwEE": 200008,
-  "_ZTVNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 194624,
-  "_ZTVNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 194780,
-  "_ZTVNSt3__28messagesIcEE": 196708,
-  "_ZTVNSt3__28messagesIwEE": 196828,
-  "_ZNSt3__210moneypunctIcLb0EE4intlE": 188088,
-  "_ZNSt3__210moneypunctIcLb1EE4intlE": 188100,
-  "_ZNSt3__210moneypunctIwLb0EE4intlE": 188112,
-  "_ZNSt3__210moneypunctIwLb1EE4intlE": 188124,
-  "_ZNSt3__26locale4noneE": 188212,
-  "_ZNSt3__26locale7collateE": 188216,
-  "_ZNSt3__26locale5ctypeE": 188220,
-  "_ZNSt3__26locale8monetaryE": 188224,
-  "_ZNSt3__26locale7numericE": 188228,
-  "_ZNSt3__26locale4timeE": 188232,
-  "_ZNSt3__26locale8messagesE": 188236,
-  "_ZNSt3__26locale3allE": 188240,
-  "_ZTINSt3__26locale5__impE": 192160,
-  "_ZTINSt3__214collate_bynameIcEE": 192232,
-  "_ZTINSt3__214collate_bynameIwEE": 192304,
-  "_ZNSt3__210ctype_base5spaceE": 188502,
-  "_ZNSt3__210ctype_base5printE": 188504,
-  "_ZNSt3__210ctype_base5cntrlE": 188506,
-  "_ZNSt3__210ctype_base5upperE": 188508,
-  "_ZNSt3__210ctype_base5lowerE": 188510,
-  "_ZNSt3__210ctype_base5alphaE": 188512,
-  "_ZNSt3__210ctype_base5digitE": 188514,
-  "_ZNSt3__210ctype_base5punctE": 188516,
-  "_ZNSt3__210ctype_base6xdigitE": 188518,
-  "_ZNSt3__210ctype_base5blankE": 188520,
-  "_ZNSt3__210ctype_base5alnumE": 188522,
-  "_ZNSt3__210ctype_base5graphE": 188524,
-  "_ZTINSt3__25ctypeIcEE": 192336,
-  "_ZTINSt3__212ctype_bynameIcEE": 192396,
-  "_ZTINSt3__212ctype_bynameIwEE": 192436,
-  "_ZTINSt3__27codecvtIwc11__mbstate_tEE": 191044,
-  "_ZTINSt3__28numpunctIcEE": 192472,
-  "_ZTINSt3__28numpunctIwEE": 192508,
-  "_ZTINSt3__215numpunct_bynameIcEE": 192552,
-  "_ZTINSt3__215numpunct_bynameIwEE": 192596,
-  "_ZTINSt3__26locale5facetE": 190008,
-  "_ZTSNSt3__26locale5facetE": 189984,
-  "_ZTINSt3__25ctypeIwEE": 190136,
-  "_ZTSNSt3__25ctypeIwEE": 190088,
-  "_ZTSNSt3__210ctype_baseE": 190106,
-  "_ZTINSt3__210ctype_baseE": 190128,
-  "_ZTINSt3__27codecvtIcc11__mbstate_tEE": 190284,
-  "_ZTSNSt3__27codecvtIcc11__mbstate_tEE": 190216,
-  "_ZTSNSt3__212codecvt_baseE": 190250,
-  "_ZTINSt3__212codecvt_baseE": 190276,
-  "_ZTINSt3__27codecvtIDsc11__mbstate_tEE": 190400,
-  "_ZTSNSt3__27codecvtIDsc11__mbstate_tEE": 190364,
-  "_ZTINSt3__27codecvtIDic11__mbstate_tEE": 190516,
-  "_ZTSNSt3__27codecvtIDic11__mbstate_tEE": 190480,
-  "_ZTVNSt3__216__narrow_to_utf8ILm16EEE": 190548,
-  "_ZTINSt3__216__narrow_to_utf8ILm16EEE": 190632,
-  "_ZTSNSt3__216__narrow_to_utf8ILm16EEE": 190596,
-  "_ZTINSt3__216__narrow_to_utf8ILm32EEE": 190728,
-  "_ZTSNSt3__216__narrow_to_utf8ILm32EEE": 190692,
-  "_ZTVNSt3__217__widen_from_utf8ILm16EEE": 190740,
-  "_ZTINSt3__217__widen_from_utf8ILm16EEE": 190824,
-  "_ZTSNSt3__217__widen_from_utf8ILm16EEE": 190788,
-  "_ZTINSt3__217__widen_from_utf8ILm32EEE": 190920,
-  "_ZTSNSt3__217__widen_from_utf8ILm32EEE": 190884,
-  "_ZTVNSt3__214__codecvt_utf8IwEE": 190932,
-  "_ZTINSt3__214__codecvt_utf8IwEE": 191076,
-  "_ZTSNSt3__214__codecvt_utf8IwEE": 190980,
-  "_ZTSNSt3__27codecvtIwc11__mbstate_tEE": 191008,
-  "_ZTVNSt3__214__codecvt_utf8IDsEE": 191088,
-  "_ZTINSt3__214__codecvt_utf8IDsEE": 191168,
-  "_ZTSNSt3__214__codecvt_utf8IDsEE": 191136,
-  "_ZTVNSt3__214__codecvt_utf8IDiEE": 191180,
-  "_ZTINSt3__214__codecvt_utf8IDiEE": 191260,
-  "_ZTSNSt3__214__codecvt_utf8IDiEE": 191228,
-  "_ZTVNSt3__215__codecvt_utf16IwLb0EEE": 191272,
-  "_ZTINSt3__215__codecvt_utf16IwLb0EEE": 191356,
-  "_ZTSNSt3__215__codecvt_utf16IwLb0EEE": 191320,
-  "_ZTVNSt3__215__codecvt_utf16IwLb1EEE": 191368,
-  "_ZTINSt3__215__codecvt_utf16IwLb1EEE": 191452,
-  "_ZTSNSt3__215__codecvt_utf16IwLb1EEE": 191416,
-  "_ZTVNSt3__215__codecvt_utf16IDsLb0EEE": 191464,
-  "_ZTINSt3__215__codecvt_utf16IDsLb0EEE": 191548,
-  "_ZTSNSt3__215__codecvt_utf16IDsLb0EEE": 191512,
-  "_ZTVNSt3__215__codecvt_utf16IDsLb1EEE": 191560,
-  "_ZTINSt3__215__codecvt_utf16IDsLb1EEE": 191644,
-  "_ZTSNSt3__215__codecvt_utf16IDsLb1EEE": 191608,
-  "_ZTVNSt3__215__codecvt_utf16IDiLb0EEE": 191656,
-  "_ZTINSt3__215__codecvt_utf16IDiLb0EEE": 191740,
-  "_ZTSNSt3__215__codecvt_utf16IDiLb0EEE": 191704,
-  "_ZTVNSt3__215__codecvt_utf16IDiLb1EEE": 191752,
-  "_ZTINSt3__215__codecvt_utf16IDiLb1EEE": 191836,
-  "_ZTSNSt3__215__codecvt_utf16IDiLb1EEE": 191800,
-  "_ZTVNSt3__220__codecvt_utf8_utf16IwEE": 191848,
-  "_ZTINSt3__220__codecvt_utf8_utf16IwEE": 191932,
-  "_ZTSNSt3__220__codecvt_utf8_utf16IwEE": 191896,
-  "_ZTVNSt3__220__codecvt_utf8_utf16IDiEE": 191944,
-  "_ZTINSt3__220__codecvt_utf8_utf16IDiEE": 192028,
-  "_ZTSNSt3__220__codecvt_utf8_utf16IDiEE": 191992,
-  "_ZTVNSt3__220__codecvt_utf8_utf16IDsEE": 192040,
-  "_ZTINSt3__220__codecvt_utf8_utf16IDsEE": 192124,
-  "_ZTSNSt3__220__codecvt_utf8_utf16IDsEE": 192088,
-  "_ZTSNSt3__26locale5__impE": 192136,
-  "_ZTSNSt3__214collate_bynameIcEE": 192172,
-  "_ZTSNSt3__27collateIcEE": 192200,
-  "_ZTINSt3__27collateIcEE": 192220,
-  "_ZTSNSt3__214collate_bynameIwEE": 192244,
-  "_ZTSNSt3__27collateIwEE": 192272,
-  "_ZTINSt3__27collateIwEE": 192292,
-  "_ZTSNSt3__25ctypeIcEE": 192316,
-  "_ZTSNSt3__212ctype_bynameIcEE": 192368,
-  "_ZTSNSt3__212ctype_bynameIwEE": 192408,
-  "_ZTSNSt3__28numpunctIcEE": 192448,
-  "_ZTSNSt3__28numpunctIwEE": 192484,
-  "_ZTSNSt3__215numpunct_bynameIcEE": 192520,
-  "_ZTSNSt3__215numpunct_bynameIwEE": 192564,
-  "_ZTINSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 192884,
-  "_ZTSNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 192736,
-  "_ZTSNSt3__29__num_getIcEE": 192804,
-  "_ZTSNSt3__214__num_get_baseE": 192826,
-  "_ZTINSt3__214__num_get_baseE": 192852,
-  "_ZTINSt3__29__num_getIcEE": 192860,
-  "_ZTINSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 193096,
-  "_ZTSNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 192980,
-  "_ZTSNSt3__29__num_getIwEE": 193048,
-  "_ZTINSt3__29__num_getIwEE": 193072,
-  "_ZTINSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 193328,
-  "_ZTSNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 193180,
-  "_ZTSNSt3__29__num_putIcEE": 193248,
-  "_ZTSNSt3__214__num_put_baseE": 193270,
-  "_ZTINSt3__214__num_put_baseE": 193296,
-  "_ZTINSt3__29__num_putIcEE": 193304,
-  "_ZTINSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 193528,
-  "_ZTSNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 193412,
-  "_ZTSNSt3__29__num_putIwEE": 193480,
-  "_ZTINSt3__29__num_putIwEE": 193504,
-  "_ZTINSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 193784,
-  "_ZTSNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 193644,
-  "_ZTSNSt3__29time_baseE": 193713,
-  "_ZTINSt3__29time_baseE": 193732,
-  "_ZTSNSt3__220__time_get_c_storageIcEE": 193740,
-  "_ZTINSt3__220__time_get_c_storageIcEE": 193776,
-  "_ZTINSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 194020,
-  "_ZTSNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 193908,
-  "_ZTSNSt3__220__time_get_c_storageIwEE": 193977,
-  "_ZTINSt3__220__time_get_c_storageIwEE": 194012,
-  "_ZTINSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 194324,
-  "_ZTSNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 194172,
-  "_ZTSNSt3__218__time_get_storageIcEE": 194249,
-  "_ZTSNSt3__210__time_getE": 194281,
-  "_ZTINSt3__210__time_getE": 194304,
-  "_ZTINSt3__218__time_get_storageIcEE": 194312,
-  "_ZTINSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 194592,
-  "_ZTSNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 194468,
-  "_ZTSNSt3__218__time_get_storageIwEE": 194545,
-  "_ZTINSt3__218__time_get_storageIwEE": 194580,
-  "_ZTINSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 194748,
-  "_ZTSNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 194648,
-  "_ZTSNSt3__210__time_putE": 194717,
-  "_ZTINSt3__210__time_putE": 194740,
-  "_ZTINSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 194876,
-  "_ZTSNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 194804,
-  "_ZTINSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 195012,
-  "_ZTSNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 194932,
-  "_ZTINSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 195128,
-  "_ZTSNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 195048,
-  "_ZTINSt3__210moneypunctIcLb0EEE": 195256,
-  "_ZTSNSt3__210moneypunctIcLb0EEE": 195196,
-  "_ZTSNSt3__210money_baseE": 195224,
-  "_ZTINSt3__210money_baseE": 195248,
-  "_ZTINSt3__210moneypunctIcLb1EEE": 195372,
-  "_ZTSNSt3__210moneypunctIcLb1EEE": 195344,
-  "_ZTINSt3__210moneypunctIwLb0EEE": 195488,
-  "_ZTSNSt3__210moneypunctIwLb0EEE": 195460,
-  "_ZTINSt3__210moneypunctIwLb1EEE": 195604,
-  "_ZTSNSt3__210moneypunctIwLb1EEE": 195576,
-  "_ZTINSt3__217moneypunct_bynameIcLb0EEE": 195728,
-  "_ZTSNSt3__217moneypunct_bynameIcLb0EEE": 195692,
-  "_ZTINSt3__217moneypunct_bynameIcLb1EEE": 195832,
-  "_ZTSNSt3__217moneypunct_bynameIcLb1EEE": 195796,
-  "_ZTINSt3__217moneypunct_bynameIwLb0EEE": 195936,
-  "_ZTSNSt3__217moneypunct_bynameIwLb0EEE": 195900,
-  "_ZTINSt3__217moneypunct_bynameIwLb1EEE": 196040,
-  "_ZTSNSt3__217moneypunct_bynameIwLb1EEE": 196004,
-  "_ZTINSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 196184,
-  "_ZTSNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 196080,
-  "_ZTSNSt3__211__money_getIcEE": 196150,
-  "_ZTINSt3__211__money_getIcEE": 196176,
-  "_ZTINSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 196348,
-  "_ZTSNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 196244,
-  "_ZTSNSt3__211__money_getIwEE": 196314,
-  "_ZTINSt3__211__money_getIwEE": 196340,
-  "_ZTINSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 196512,
-  "_ZTSNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE": 196408,
-  "_ZTSNSt3__211__money_putIcEE": 196478,
-  "_ZTINSt3__211__money_putIcEE": 196504,
-  "_ZTINSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 196676,
-  "_ZTSNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE": 196572,
-  "_ZTSNSt3__211__money_putIwEE": 196642,
-  "_ZTINSt3__211__money_putIwEE": 196668,
-  "_ZTINSt3__28messagesIcEE": 196796,
-  "_ZTSNSt3__28messagesIcEE": 196740,
-  "_ZTSNSt3__213messages_baseE": 196761,
-  "_ZTINSt3__213messages_baseE": 196788,
-  "_ZTINSt3__28messagesIwEE": 196884,
-  "_ZTSNSt3__28messagesIwEE": 196860,
-  "_ZTINSt3__215messages_bynameIcEE": 196980,
-  "_ZTSNSt3__215messages_bynameIcEE": 196948,
-  "_ZTINSt3__215messages_bynameIwEE": 197056,
-  "_ZTSNSt3__215messages_bynameIwEE": 197024,
-  "_ZTINSt3__214codecvt_bynameIcc11__mbstate_tEE": 197160,
-  "_ZTSNSt3__214codecvt_bynameIcc11__mbstate_tEE": 197116,
-  "_ZTINSt3__214codecvt_bynameIwc11__mbstate_tEE": 197264,
-  "_ZTSNSt3__214codecvt_bynameIwc11__mbstate_tEE": 197220,
-  "_ZTINSt3__214codecvt_bynameIDsc11__mbstate_tEE": 197368,
-  "_ZTSNSt3__214codecvt_bynameIDsc11__mbstate_tEE": 197324,
-  "_ZTINSt3__214codecvt_bynameIDic11__mbstate_tEE": 197472,
-  "_ZTSNSt3__214codecvt_bynameIDic11__mbstate_tEE": 197428,
-  "_ZTINSt3__215__time_get_tempIcEE": 200372,
-  "_ZTSNSt3__215__time_get_tempIcEE": 200340,
-  "_ZTINSt3__215__time_get_tempIwEE": 200484,
-  "_ZTSNSt3__215__time_get_tempIwEE": 200452,
-  "_ZNSt3__213allocator_argE": 200496,
-  "_ZTSNSt3__214__shared_countE": 201060,
-  "_ZTVNSt3__219__shared_weak_countE": 201096,
-  "_ZTINSt3__219__shared_weak_countE": 201156,
-  "_ZTSNSt3__219__shared_weak_countE": 201124,
-  "_ZTVNSt3__212bad_weak_ptrE": 201180,
-  "_ZTINSt3__212bad_weak_ptrE": 201224,
-  "_ZTSNSt3__212bad_weak_ptrE": 201200,
-  "_ZNSt3__210defer_lockE": 201236,
-  "_ZNSt3__211try_to_lockE": 201237,
-  "_ZNSt3__210adopt_lockE": 201238,
-  "_ZSt7nothrow": 201472,
-  "_ZTVSt19bad_optional_access": 201496,
-  "_ZTISt19bad_optional_access": 201540,
-  "_ZTSSt19bad_optional_access": 201516,
-  "_ZTVNSt12experimental19bad_optional_accessE": 201552,
-  "_ZTINSt12experimental19bad_optional_accessE": 201612,
-  "_ZTSNSt12experimental19bad_optional_accessE": 201572,
-  "_ZTVNSt3__211regex_errorE": 201716,
-  "_ZTINSt3__211regex_errorE": 202784,
-  "_ZTSNSt3__211regex_errorE": 202760,
-  "_ZTISt13runtime_error": 220920,
-  "_ZTVSt11logic_error": 220584,
-  "_ZTVSt9exception": 220420,
-  "_ZTVSt13runtime_error": 220604,
-  "_ZNSt3__212basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4nposE": 204740,
-  "_ZNSt3__212basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE4nposE": 204744,
-  "_ZTVNSt3__212strstreambufE": 205168,
-  "_ZTTNSt3__210istrstreamE": 205272,
-  "_ZTTNSt3__210ostrstreamE": 205328,
-  "_ZTTNSt3__29strstreamE": 205404,
-  "_ZTINSt3__212strstreambufE": 205468,
-  "_ZTVNSt3__210istrstreamE": 205232,
-  "_ZTINSt3__210istrstreamE": 205544,
-  "_ZTCNSt3__210istrstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE": 205480,
-  "_ZTVNSt3__210ostrstreamE": 205288,
-  "_ZTINSt3__210ostrstreamE": 205620,
-  "_ZTCNSt3__210ostrstreamE0_NS_13basic_ostreamIcNS_11char_traitsIcEEEE": 205556,
-  "_ZTVNSt3__29strstreamE": 205344,
-  "_ZTINSt3__29strstreamE": 205792,
-  "_ZTCNSt3__29strstreamE0_NS_14basic_iostreamIcNS_11char_traitsIcEEEE": 205632,
-  "_ZTCNSt3__29strstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE": 205692,
-  "_ZTCNSt3__29strstreamE8_NS_13basic_ostreamIcNS_11char_traitsIcEEEE": 205732,
-  "_ZTSNSt3__212strstreambufE": 205444,
-  "_ZTSNSt3__210istrstreamE": 205520,
-  "_ZTSNSt3__210ostrstreamE": 205596,
-  "_ZTSNSt3__29strstreamE": 205772,
-  "_ZTVNSt3__212system_errorE": 205984,
-  "_ZTVNSt3__224__generic_error_categoryE": 205852,
-  "_ZTINSt3__224__generic_error_categoryE": 206188,
-  "_ZTVNSt3__223__system_error_categoryE": 205940,
-  "_ZTINSt3__223__system_error_categoryE": 206236,
-  "_ZTVNSt3__214error_categoryE": 206008,
-  "_ZTINSt3__214error_categoryE": 206072,
-  "_ZTSNSt3__214error_categoryE": 206044,
-  "_ZTVNSt3__212__do_messageE": 206080,
-  "_ZTSNSt3__212__do_messageE": 206116,
-  "_ZTSNSt3__224__generic_error_categoryE": 206152,
-  "_ZTSNSt3__223__system_error_categoryE": 206200,
-  "_ZTSNSt3__212system_errorE": 206248,
-  "_ZNSt3__219piecewise_constructE": 206394,
-  "_ZTVSt18bad_variant_access": 206416,
-  "_ZTISt18bad_variant_access": 206460,
-  "_ZTSSt18bad_variant_access": 206436,
-  "_ZTVNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE": 206480,
-  "_ZTINSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE": 206684,
-  "_ZTVNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE": 206508,
-  "_ZTINSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE": 206764,
-  "_ZTSNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE": 206544,
-  "_ZTSNSt12experimental15fundamentals_v13pmr15memory_resourceE": 206618,
-  "_ZTINSt12experimental15fundamentals_v13pmr15memory_resourceE": 206676,
-  "_ZTSNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE": 206696,
-  "_ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE": 207048,
-  "_ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE": 207184,
-  "_ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE": 207164,
-  "_ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE": 207076,
-  "_ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE": 207332,
-  "_ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE": 207212,
-  "_ZTVNSt3__24__fs10filesystem16filesystem_errorE": 207384,
-  "_ZTVNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE": 208152,
-  "_ZTTNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE": 208192,
-  "_ZTVNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE": 208468,
-  "_ZTTNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE": 208508,
-  "_ZTVNSt3__213basic_filebufIcNS_11char_traitsIcEEEE": 208308,
-  "_ZNSt3__24__fs10filesystem16_FilesystemClock9is_steadyE": 207344,
-  "_ZTINSt3__24__fs10filesystem16filesystem_errorE": 207916,
-  "_ZNSt3__24__fs10filesystem4path19preferred_separatorE": 207868,
-  "_ZTSNSt3__24__fs10filesystem16filesystem_errorE": 207872,
-  "_ZTINSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE": 208296,
-  "_ZTCNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE": 208208,
-  "_ZTSNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE": 208248,
-  "_ZTINSt3__213basic_filebufIcNS_11char_traitsIcEEEE": 208420,
-  "_ZTSNSt3__213basic_filebufIcNS_11char_traitsIcEEEE": 208372,
-  "_ZTINSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE": 208612,
-  "_ZTCNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE0_NS_13basic_ostreamIcS2_EE": 208524,
-  "_ZTSNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE": 208564,
-  "__cxa_unexpected_handler": 208652,
-  "__cxa_terminate_handler": 208648,
-  "__cxa_new_handler": 219716,
-  "_ZTVSt9bad_alloc": 220340,
-  "_ZTVSt20bad_array_new_length": 220376,
-  "_ZTISt9bad_alloc": 220532,
-  "_ZTISt20bad_array_new_length": 220572,
-  "_ZTSSt9exception": 220440,
-  "_ZTVSt13bad_exception": 220464,
-  "_ZTISt13bad_exception": 220504,
-  "_ZTSSt13bad_exception": 220484,
-  "_ZTSSt9bad_alloc": 220516,
-  "_ZTSSt20bad_array_new_length": 220544,
-  "_ZTVSt12domain_error": 220624,
-  "_ZTISt12domain_error": 220692,
-  "_ZTSSt12domain_error": 220644,
-  "_ZTSSt11logic_error": 220661,
-  "_ZTVSt16invalid_argument": 220704,
-  "_ZTISt16invalid_argument": 220748,
-  "_ZTSSt16invalid_argument": 220724,
-  "_ZTVSt12length_error": 220760,
-  "_ZTISt12length_error": 220800,
-  "_ZTSSt12length_error": 220780,
-  "_ZTVSt12out_of_range": 220812,
-  "_ZTISt12out_of_range": 220852,
-  "_ZTSSt12out_of_range": 220832,
-  "_ZTVSt11range_error": 220864,
-  "_ZTISt11range_error": 220932,
-  "_ZTSSt11range_error": 220884,
-  "_ZTSSt13runtime_error": 220900,
-  "_ZTVSt14overflow_error": 220944,
-  "_ZTISt14overflow_error": 220984,
-  "_ZTSSt14overflow_error": 220964,
-  "_ZTVSt15underflow_error": 220996,
-  "_ZTISt15underflow_error": 221036,
-  "_ZTSSt15underflow_error": 221016,
-  "_ZTVSt8bad_cast": 221048,
-  "_ZTVSt10bad_typeid": 221084,
-  "_ZTISt10bad_typeid": 221200,
-  "_ZTVSt9type_info": 221120,
-  "_ZTISt9type_info": 221152,
-  "_ZTSSt9type_info": 221136,
-  "_ZTSSt8bad_cast": 221160,
-  "_ZTSSt10bad_typeid": 221184,
-  "_ZTIN10__cxxabiv117__class_type_infoE": 221296,
-  "_ZTIN10__cxxabiv116__shim_type_infoE": 221248,
-  "_ZTIN10__cxxabiv117__pbase_type_infoE": 221344,
-  "_ZTIDn": 221692,
-  "_ZTIN10__cxxabiv119__pointer_type_infoE": 221392,
-  "_ZTIv": 221640,
-  "_ZTIN10__cxxabiv120__function_type_infoE": 221444,
-  "_ZTIN10__cxxabiv129__pointer_to_member_type_infoE": 221504,
-  "_ZTSN10__cxxabiv116__shim_type_infoE": 221212,
-  "_ZTSN10__cxxabiv117__class_type_infoE": 221260,
-  "_ZTSN10__cxxabiv117__pbase_type_infoE": 221308,
-  "_ZTSN10__cxxabiv119__pointer_type_infoE": 221356,
-  "_ZTSN10__cxxabiv120__function_type_infoE": 221404,
-  "_ZTSN10__cxxabiv129__pointer_to_member_type_infoE": 221456,
-  "_ZTVN10__cxxabiv116__shim_type_infoE": 221528,
-  "_ZTVN10__cxxabiv123__fundamental_type_infoE": 221556,
-  "_ZTIN10__cxxabiv123__fundamental_type_infoE": 221624,
-  "_ZTSN10__cxxabiv123__fundamental_type_infoE": 221584,
-  "_ZTSv": 221636,
-  "_ZTSPv": 221648,
-  "_ZTIPv": 221652,
-  "_ZTVN10__cxxabiv119__pointer_type_infoE": 223388,
-  "_ZTSPKv": 221668,
-  "_ZTIPKv": 221672,
-  "_ZTSDn": 221688,
-  "_ZTSPDn": 221700,
-  "_ZTIPDn": 221704,
-  "_ZTSPKDn": 221720,
-  "_ZTIPKDn": 221728,
-  "_ZTSb": 221744,
-  "_ZTIb": 221748,
-  "_ZTSPb": 221756,
-  "_ZTIPb": 221760,
-  "_ZTSPKb": 221776,
-  "_ZTIPKb": 221780,
-  "_ZTSw": 221796,
-  "_ZTIw": 221800,
-  "_ZTSPw": 221808,
-  "_ZTIPw": 221812,
-  "_ZTSPKw": 221828,
-  "_ZTIPKw": 221832,
-  "_ZTSc": 221848,
-  "_ZTIc": 221852,
-  "_ZTSPc": 221860,
-  "_ZTIPc": 221864,
-  "_ZTSPKc": 221880,
-  "_ZTIPKc": 221884,
-  "_ZTSh": 221900,
-  "_ZTIh": 221904,
-  "_ZTSPh": 221912,
-  "_ZTIPh": 221916,
-  "_ZTSPKh": 221932,
-  "_ZTIPKh": 221936,
-  "_ZTSa": 221952,
-  "_ZTIa": 221956,
-  "_ZTSPa": 221964,
-  "_ZTIPa": 221968,
-  "_ZTSPKa": 221984,
-  "_ZTIPKa": 221988,
-  "_ZTSs": 222004,
-  "_ZTIs": 222008,
-  "_ZTSPs": 222016,
-  "_ZTIPs": 222020,
-  "_ZTSPKs": 222036,
-  "_ZTIPKs": 222040,
-  "_ZTSt": 222056,
-  "_ZTIt": 222060,
-  "_ZTSPt": 222068,
-  "_ZTIPt": 222072,
-  "_ZTSPKt": 222088,
-  "_ZTIPKt": 222092,
-  "_ZTSi": 222108,
-  "_ZTIi": 222112,
-  "_ZTSPi": 222120,
-  "_ZTIPi": 222124,
-  "_ZTSPKi": 222140,
-  "_ZTIPKi": 222144,
-  "_ZTSj": 222160,
-  "_ZTIj": 222164,
-  "_ZTSPj": 222172,
-  "_ZTIPj": 222176,
-  "_ZTSPKj": 222192,
-  "_ZTIPKj": 222196,
-  "_ZTSl": 222212,
-  "_ZTIl": 222216,
-  "_ZTSPl": 222224,
-  "_ZTIPl": 222228,
-  "_ZTSPKl": 222244,
-  "_ZTIPKl": 222248,
-  "_ZTSm": 222264,
-  "_ZTIm": 222268,
-  "_ZTSPm": 222276,
-  "_ZTIPm": 222280,
-  "_ZTSPKm": 222296,
-  "_ZTIPKm": 222300,
-  "_ZTSx": 222316,
-  "_ZTIx": 222320,
-  "_ZTSPx": 222328,
-  "_ZTIPx": 222332,
-  "_ZTSPKx": 222348,
-  "_ZTIPKx": 222352,
-  "_ZTSy": 222368,
-  "_ZTIy": 222372,
-  "_ZTSPy": 222380,
-  "_ZTIPy": 222384,
-  "_ZTSPKy": 222400,
-  "_ZTIPKy": 222404,
-  "_ZTSn": 222420,
-  "_ZTIn": 222424,
-  "_ZTSPn": 222432,
-  "_ZTIPn": 222436,
-  "_ZTSPKn": 222452,
-  "_ZTIPKn": 222456,
-  "_ZTSo": 222472,
-  "_ZTIo": 222476,
-  "_ZTSPo": 222484,
-  "_ZTIPo": 222488,
-  "_ZTSPKo": 222504,
-  "_ZTIPKo": 222508,
-  "_ZTSDh": 222524,
-  "_ZTIDh": 222528,
-  "_ZTSPDh": 222536,
-  "_ZTIPDh": 222540,
-  "_ZTSPKDh": 222556,
-  "_ZTIPKDh": 222564,
-  "_ZTSf": 222580,
-  "_ZTIf": 222584,
-  "_ZTSPf": 222592,
-  "_ZTIPf": 222596,
-  "_ZTSPKf": 222612,
-  "_ZTIPKf": 222616,
-  "_ZTSd": 222632,
-  "_ZTId": 222636,
-  "_ZTSPd": 222644,
-  "_ZTIPd": 222648,
-  "_ZTSPKd": 222664,
-  "_ZTIPKd": 222668,
-  "_ZTSe": 222684,
-  "_ZTIe": 222688,
-  "_ZTSPe": 222696,
-  "_ZTIPe": 222700,
-  "_ZTSPKe": 222716,
-  "_ZTIPKe": 222720,
-  "_ZTSg": 222736,
-  "_ZTIg": 222740,
-  "_ZTSPg": 222748,
-  "_ZTIPg": 222752,
-  "_ZTSPKg": 222768,
-  "_ZTIPKg": 222772,
-  "_ZTSDu": 222788,
-  "_ZTIDu": 222792,
-  "_ZTSPDu": 222800,
-  "_ZTIPDu": 222804,
-  "_ZTSPKDu": 222820,
-  "_ZTIPKDu": 222828,
-  "_ZTSDs": 222844,
-  "_ZTIDs": 222848,
-  "_ZTSPDs": 222856,
-  "_ZTIPDs": 222860,
-  "_ZTSPKDs": 222876,
-  "_ZTIPKDs": 222884,
-  "_ZTSDi": 222900,
-  "_ZTIDi": 222904,
-  "_ZTSPDi": 222912,
-  "_ZTIPDi": 222916,
-  "_ZTSPKDi": 222932,
-  "_ZTIPKDi": 222940,
-  "_ZTVN10__cxxabiv117__array_type_infoE": 222956,
-  "_ZTIN10__cxxabiv117__array_type_infoE": 223020,
-  "_ZTSN10__cxxabiv117__array_type_infoE": 222984,
-  "_ZTVN10__cxxabiv120__function_type_infoE": 223032,
-  "_ZTVN10__cxxabiv116__enum_type_infoE": 223060,
-  "_ZTIN10__cxxabiv116__enum_type_infoE": 223124,
-  "_ZTSN10__cxxabiv116__enum_type_infoE": 223088,
-  "_ZTIN10__cxxabiv120__si_class_type_infoE": 223256,
-  "_ZTSN10__cxxabiv120__si_class_type_infoE": 223216,
-  "_ZTIN10__cxxabiv121__vmi_class_type_infoE": 223348,
-  "_ZTSN10__cxxabiv121__vmi_class_type_infoE": 223308,
-  "_ZTVN10__cxxabiv117__pbase_type_infoE": 223360,
-  "_ZTVN10__cxxabiv129__pointer_to_member_type_infoE": 223416,
-  "__data_end": 228492
-};
-for (var named in NAMED_GLOBALS) {
-  Module['_' + named] = gb + NAMED_GLOBALS[named];
-}
-Module['NAMED_GLOBALS'] = NAMED_GLOBALS;
-
-for (var named in NAMED_GLOBALS) {
-  (function(named) {
-    var addr = Module['_' + named];
-    Module['g$_' + named] = function() { return addr };
-  })(named);
+var ___progname = Module['___progname'] = 30940;
+var ___progname_full = Module['___progname_full'] = 30944;
+var ___libc = Module['___libc'] = 30948;
+var ___hwcap = Module['___hwcap'] = 31012;
+var ___sysinfo = Module['___sysinfo'] = 31016;
+var _program_invocation_short_name = Module['_program_invocation_short_name'] = 30940;
+var _program_invocation_name = Module['_program_invocation_name'] = 30944;
+var ___c_dot_utf8 = Module['___c_dot_utf8'] = 31076;
+var ___c_locale = Module['___c_locale'] = 31104;
+var ___c_dot_utf8_locale = Module['___c_dot_utf8_locale'] = 31128;
+var ___pio2_hi = Module['___pio2_hi'] = 163824;
+var ___pio2_lo = Module['___pio2_lo'] = 163840;
+var _atanlo = Module['_atanlo'] = 157488;
+var _atanhi = Module['_atanhi'] = 157424;
+var _aT = Module['_aT'] = 157552;
+var ___signgam = Module['___signgam'] = 163400;
+var _signgam = Module['_signgam'] = 163400;
+var _stderr = Module['_stderr'] = 170480;
+var ___optreset = Module['___optreset'] = 167184;
+var _optind = Module['_optind'] = 167176;
+var ___optpos = Module['___optpos'] = 167188;
+var _optarg = Module['_optarg'] = 167192;
+var _optopt = Module['_optopt'] = 167196;
+var _opterr = Module['_opterr'] = 167180;
+var _optreset = Module['_optreset'] = 167184;
+var ___fsmu8 = Module['___fsmu8'] = 167968;
+var _h_errno = Module['_h_errno'] = 168452;
+var __ns_flagdata = Module['__ns_flagdata'] = 168800;
+var ___seed48 = Module['___seed48'] = 169750;
+var ___environ = Module['___environ'] = 175324;
+var ___stdout_used = Module['___stdout_used'] = 171836;
+var _stdin = Module['_stdin'] = 170640;
+var _stdout = Module['_stdout'] = 171832;
+var ___stderr_used = Module['___stderr_used'] = 170484;
+var ___stdin_used = Module['___stdin_used'] = 170644;
+var ____environ = Module['____environ'] = 175324;
+var __environ = Module['__environ'] = 175324;
+var _environ = Module['_environ'] = 175324;
+var ___env_map = Module['___env_map'] = 175332;
+var _tzname = Module['_tzname'] = 175336;
+var _daylight = Module['_daylight'] = 175344;
+var _timezone = Module['_timezone'] = 175348;
+var ___THREW__ = Module['___THREW__'] = 181416;
+var ___threwValue = Module['___threwValue'] = 181420;
+var __ZNSt3__212__rs_default4__c_E = Module['__ZNSt3__212__rs_default4__c_E'] = 181424;
+var __ZTVSt12bad_any_cast = Module['__ZTVSt12bad_any_cast'] = 183976;
+var __ZTISt12bad_any_cast = Module['__ZTISt12bad_any_cast'] = 184016;
+var __ZTSSt12bad_any_cast = Module['__ZTSSt12bad_any_cast'] = 183996;
+var __ZTVN10__cxxabiv120__si_class_type_infoE = Module['__ZTVN10__cxxabiv120__si_class_type_infoE'] = 224248;
+var __ZTISt8bad_cast = Module['__ZTISt8bad_cast'] = 222244;
+var __ZTVNSt12experimental15fundamentals_v112bad_any_castE = Module['__ZTVNSt12experimental15fundamentals_v112bad_any_castE'] = 184028;
+var __ZTINSt12experimental15fundamentals_v112bad_any_castE = Module['__ZTINSt12experimental15fundamentals_v112bad_any_castE'] = 184100;
+var __ZTSNSt12experimental15fundamentals_v112bad_any_castE = Module['__ZTSNSt12experimental15fundamentals_v112bad_any_castE'] = 184048;
+var __ZNSt3__212placeholders2_1E = Module['__ZNSt3__212placeholders2_1E'] = 184112;
+var __ZNSt3__212placeholders2_2E = Module['__ZNSt3__212placeholders2_2E'] = 184113;
+var __ZNSt3__212placeholders2_3E = Module['__ZNSt3__212placeholders2_3E'] = 184114;
+var __ZNSt3__212placeholders2_4E = Module['__ZNSt3__212placeholders2_4E'] = 184115;
+var __ZNSt3__212placeholders2_5E = Module['__ZNSt3__212placeholders2_5E'] = 184116;
+var __ZNSt3__212placeholders2_6E = Module['__ZNSt3__212placeholders2_6E'] = 184117;
+var __ZNSt3__212placeholders2_7E = Module['__ZNSt3__212placeholders2_7E'] = 184118;
+var __ZNSt3__212placeholders2_8E = Module['__ZNSt3__212placeholders2_8E'] = 184119;
+var __ZNSt3__212placeholders2_9E = Module['__ZNSt3__212placeholders2_9E'] = 184120;
+var __ZNSt3__212placeholders3_10E = Module['__ZNSt3__212placeholders3_10E'] = 184121;
+var __ZNSt3__26chrono12system_clock9is_steadyE = Module['__ZNSt3__26chrono12system_clock9is_steadyE'] = 184328;
+var __ZNSt3__26chrono12steady_clock9is_steadyE = Module['__ZNSt3__26chrono12steady_clock9is_steadyE'] = 184366;
+var __ZNSt3__223__libcpp_debug_functionE = Module['__ZNSt3__223__libcpp_debug_functionE'] = 184604;
+var __ZTVNSt3__28__c_nodeE = Module['__ZTVNSt3__28__c_nodeE'] = 184636;
+var __ZTINSt3__28__c_nodeE = Module['__ZTINSt3__28__c_nodeE'] = 184688;
+var __ZTSNSt3__28__c_nodeE = Module['__ZTSNSt3__28__c_nodeE'] = 184668;
+var __ZTVN10__cxxabiv117__class_type_infoE = Module['__ZTVN10__cxxabiv117__class_type_infoE'] = 224208;
+var __ZTVSt16nested_exception = Module['__ZTVSt16nested_exception'] = 184724;
+var __ZTISt16nested_exception = Module['__ZTISt16nested_exception'] = 184764;
+var __ZTSSt16nested_exception = Module['__ZTSSt16nested_exception'] = 184740;
+var __ZTVNSt3__217bad_function_callE = Module['__ZTVNSt3__217bad_function_callE'] = 184796;
+var __ZTINSt3__217bad_function_callE = Module['__ZTINSt3__217bad_function_callE'] = 184844;
+var __ZTSNSt3__217bad_function_callE = Module['__ZTSNSt3__217bad_function_callE'] = 184816;
+var __ZTISt9exception = Module['__ZTISt9exception'] = 221528;
+var ___dso_handle = Module['___dso_handle'] = 1024;
+var __ZTVNSt3__212future_errorE = Module['__ZTVNSt3__212future_errorE'] = 185216;
+var __ZTVNSt3__217__assoc_sub_stateE = Module['__ZTVNSt3__217__assoc_sub_stateE'] = 185236;
+var __ZTVNSt3__214__shared_countE = Module['__ZTVNSt3__214__shared_countE'] = 202128;
+var __ZTVNSt3__223__future_error_categoryE = Module['__ZTVNSt3__223__future_error_categoryE'] = 185176;
+var __ZTINSt3__223__future_error_categoryE = Module['__ZTINSt3__223__future_error_categoryE'] = 185336;
+var __ZTINSt3__212future_errorE = Module['__ZTINSt3__212future_errorE'] = 185372;
+var __ZTINSt3__217__assoc_sub_stateE = Module['__ZTINSt3__217__assoc_sub_stateE'] = 185288;
+var __ZTSNSt3__217__assoc_sub_stateE = Module['__ZTSNSt3__217__assoc_sub_stateE'] = 185260;
+var __ZTINSt3__214__shared_countE = Module['__ZTINSt3__214__shared_countE'] = 202176;
+var __ZTSNSt3__223__future_error_categoryE = Module['__ZTSNSt3__223__future_error_categoryE'] = 185300;
+var __ZTINSt3__212__do_messageE = Module['__ZTINSt3__212__do_messageE'] = 207212;
+var __ZTSNSt3__212future_errorE = Module['__ZTSNSt3__212future_errorE'] = 185348;
+var __ZTISt11logic_error = Module['__ZTISt11logic_error'] = 221752;
+var __ZTVNSt3__28ios_baseE = Module['__ZTVNSt3__28ios_baseE'] = 186492;
+var __ZTVNSt3__215basic_streambufIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__215basic_streambufIcNS_11char_traitsIcEEEE'] = 185848;
+var __ZTVNSt3__215basic_streambufIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__215basic_streambufIwNS_11char_traitsIwEEEE'] = 185912;
+var __ZTTNSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 186016;
+var __ZNSt3__25ctypeIcE2idE = Module['__ZNSt3__25ctypeIcE2idE'] = 189624;
+var __ZTTNSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTTNSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186064;
+var __ZNSt3__25ctypeIwE2idE = Module['__ZNSt3__25ctypeIwE2idE'] = 189616;
+var __ZTTNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 186112;
+var __ZNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 188908;
+var __ZTTNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTTNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 186160;
+var __ZNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 188924;
+var __ZTTNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 186228;
+var __ZTVNSt3__28ios_base7failureE = Module['__ZTVNSt3__28ios_base7failureE'] = 186348;
+var __ZNSt3__28ios_base9__xindex_E = Module['__ZNSt3__28ios_base9__xindex_E'] = 186480;
+var __ZNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 188856;
+var __ZNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 188900;
+var __ZTINSt3__215basic_streambufIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__215basic_streambufIcNS_11char_traitsIcEEEE'] = 186748;
+var __ZTINSt3__215basic_streambufIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__215basic_streambufIwNS_11char_traitsIwEEEE'] = 186808;
+var __ZTVNSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 185976;
+var __ZTINSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 186864;
+var __ZTVNSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186024;
+var __ZTINSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186936;
+var __ZTVNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 186072;
+var __ZTINSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 187008;
+var __ZTVNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 186120;
+var __ZTINSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 187080;
+var __ZTVNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 186168;
+var __ZTINSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 187232;
+var __ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE = Module['__ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE'] = 187104;
+var __ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE8_NS_13basic_ostreamIcS2_EE = Module['__ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE8_NS_13basic_ostreamIcS2_EE'] = 187144;
+var __ZTVNSt3__219__iostream_categoryE = Module['__ZTVNSt3__219__iostream_categoryE'] = 186308;
+var __ZTINSt3__219__iostream_categoryE = Module['__ZTINSt3__219__iostream_categoryE'] = 187296;
+var __ZTINSt3__28ios_base7failureE = Module['__ZTINSt3__28ios_base7failureE'] = 187336;
+var __ZNSt3__28ios_base9boolalphaE = Module['__ZNSt3__28ios_base9boolalphaE'] = 186368;
+var __ZNSt3__28ios_base3decE = Module['__ZNSt3__28ios_base3decE'] = 186372;
+var __ZNSt3__28ios_base5fixedE = Module['__ZNSt3__28ios_base5fixedE'] = 186376;
+var __ZNSt3__28ios_base3hexE = Module['__ZNSt3__28ios_base3hexE'] = 186380;
+var __ZNSt3__28ios_base8internalE = Module['__ZNSt3__28ios_base8internalE'] = 186384;
+var __ZNSt3__28ios_base4leftE = Module['__ZNSt3__28ios_base4leftE'] = 186388;
+var __ZNSt3__28ios_base3octE = Module['__ZNSt3__28ios_base3octE'] = 186392;
+var __ZNSt3__28ios_base5rightE = Module['__ZNSt3__28ios_base5rightE'] = 186396;
+var __ZNSt3__28ios_base10scientificE = Module['__ZNSt3__28ios_base10scientificE'] = 186400;
+var __ZNSt3__28ios_base8showbaseE = Module['__ZNSt3__28ios_base8showbaseE'] = 186404;
+var __ZNSt3__28ios_base9showpointE = Module['__ZNSt3__28ios_base9showpointE'] = 186408;
+var __ZNSt3__28ios_base7showposE = Module['__ZNSt3__28ios_base7showposE'] = 186412;
+var __ZNSt3__28ios_base6skipwsE = Module['__ZNSt3__28ios_base6skipwsE'] = 186416;
+var __ZNSt3__28ios_base7unitbufE = Module['__ZNSt3__28ios_base7unitbufE'] = 186420;
+var __ZNSt3__28ios_base9uppercaseE = Module['__ZNSt3__28ios_base9uppercaseE'] = 186424;
+var __ZNSt3__28ios_base11adjustfieldE = Module['__ZNSt3__28ios_base11adjustfieldE'] = 186428;
+var __ZNSt3__28ios_base9basefieldE = Module['__ZNSt3__28ios_base9basefieldE'] = 186432;
+var __ZNSt3__28ios_base10floatfieldE = Module['__ZNSt3__28ios_base10floatfieldE'] = 186436;
+var __ZNSt3__28ios_base6badbitE = Module['__ZNSt3__28ios_base6badbitE'] = 186440;
+var __ZNSt3__28ios_base6eofbitE = Module['__ZNSt3__28ios_base6eofbitE'] = 186444;
+var __ZNSt3__28ios_base7failbitE = Module['__ZNSt3__28ios_base7failbitE'] = 186448;
+var __ZNSt3__28ios_base7goodbitE = Module['__ZNSt3__28ios_base7goodbitE'] = 186452;
+var __ZNSt3__28ios_base3appE = Module['__ZNSt3__28ios_base3appE'] = 186456;
+var __ZNSt3__28ios_base3ateE = Module['__ZNSt3__28ios_base3ateE'] = 186460;
+var __ZNSt3__28ios_base6binaryE = Module['__ZNSt3__28ios_base6binaryE'] = 186464;
+var __ZNSt3__28ios_base2inE = Module['__ZNSt3__28ios_base2inE'] = 186468;
+var __ZNSt3__28ios_base3outE = Module['__ZNSt3__28ios_base3outE'] = 186472;
+var __ZNSt3__28ios_base5truncE = Module['__ZNSt3__28ios_base5truncE'] = 186476;
+var __ZTINSt3__28ios_baseE = Module['__ZTINSt3__28ios_baseE'] = 186544;
+var __ZTSNSt3__28ios_baseE = Module['__ZTSNSt3__28ios_baseE'] = 186525;
+var __ZTVNSt3__29basic_iosIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__29basic_iosIcNS_11char_traitsIcEEEE'] = 186552;
+var __ZTINSt3__29basic_iosIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__29basic_iosIcNS_11char_traitsIcEEEE'] = 186612;
+var __ZTSNSt3__29basic_iosIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__29basic_iosIcNS_11char_traitsIcEEEE'] = 186568;
+var __ZTVNSt3__29basic_iosIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__29basic_iosIwNS_11char_traitsIwEEEE'] = 186624;
+var __ZTINSt3__29basic_iosIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__29basic_iosIwNS_11char_traitsIwEEEE'] = 186684;
+var __ZTSNSt3__29basic_iosIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__29basic_iosIwNS_11char_traitsIwEEEE'] = 186640;
+var __ZTSNSt3__215basic_streambufIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__215basic_streambufIcNS_11char_traitsIcEEEE'] = 186696;
+var __ZTSNSt3__215basic_streambufIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__215basic_streambufIwNS_11char_traitsIwEEEE'] = 186756;
+var __ZTSNSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 186816;
+var __ZTVN10__cxxabiv121__vmi_class_type_infoE = Module['__ZTVN10__cxxabiv121__vmi_class_type_infoE'] = 224340;
+var __ZTSNSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186888;
+var __ZTSNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 186960;
+var __ZTSNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 187032;
+var __ZTSNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 187184;
+var __ZTSNSt3__219__iostream_categoryE = Module['__ZTSNSt3__219__iostream_categoryE'] = 187264;
+var __ZTSNSt3__28ios_base7failureE = Module['__ZTSNSt3__28ios_base7failureE'] = 187308;
+var __ZTINSt3__212system_errorE = Module['__ZTINSt3__212system_errorE'] = 207344;
+var __ZNSt3__219__start_std_streamsE = Module['__ZNSt3__219__start_std_streamsE'] = 188028;
+var __ZNSt3__23cinE = Module['__ZNSt3__23cinE'] = 187348;
+var __ZNSt3__24wcinE = Module['__ZNSt3__24wcinE'] = 187436;
+var __ZNSt3__24coutE = Module['__ZNSt3__24coutE'] = 187524;
+var __ZNSt3__25wcoutE = Module['__ZNSt3__25wcoutE'] = 187608;
+var __ZNSt3__24cerrE = Module['__ZNSt3__24cerrE'] = 187692;
+var __ZNSt3__24clogE = Module['__ZNSt3__24clogE'] = 187860;
+var __ZNSt3__25wcerrE = Module['__ZNSt3__25wcerrE'] = 187776;
+var __ZNSt3__25wclogE = Module['__ZNSt3__25wclogE'] = 187944;
+var __ZTVNSt3__210__stdinbufIcEE = Module['__ZTVNSt3__210__stdinbufIcEE'] = 188392;
+var __ZTVNSt3__210__stdinbufIwEE = Module['__ZTVNSt3__210__stdinbufIwEE'] = 188532;
+var __ZTVNSt3__211__stdoutbufIcEE = Module['__ZTVNSt3__211__stdoutbufIcEE'] = 188632;
+var __ZTVNSt3__211__stdoutbufIwEE = Module['__ZTVNSt3__211__stdoutbufIwEE'] = 188736;
+var __ZNSt3__27codecvtIcc11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIcc11__mbstate_tE2idE'] = 189928;
+var __ZNSt3__27codecvtIwc11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIwc11__mbstate_tE2idE'] = 189936;
+var __ZTINSt3__210__stdinbufIcEE = Module['__ZTINSt3__210__stdinbufIcEE'] = 188480;
+var __ZTSNSt3__210__stdinbufIcEE = Module['__ZTSNSt3__210__stdinbufIcEE'] = 188456;
+var __ZTINSt3__210__stdinbufIwEE = Module['__ZTINSt3__210__stdinbufIwEE'] = 188620;
+var __ZTSNSt3__210__stdinbufIwEE = Module['__ZTSNSt3__210__stdinbufIwEE'] = 188596;
+var __ZTINSt3__211__stdoutbufIcEE = Module['__ZTINSt3__211__stdoutbufIcEE'] = 188724;
+var __ZTSNSt3__211__stdoutbufIcEE = Module['__ZTSNSt3__211__stdoutbufIcEE'] = 188696;
+var __ZTINSt3__211__stdoutbufIwEE = Module['__ZTINSt3__211__stdoutbufIwEE'] = 188828;
+var __ZTSNSt3__211__stdoutbufIwEE = Module['__ZTSNSt3__211__stdoutbufIwEE'] = 188800;
+var __ZNSt3__28numpunctIcE2idE = Module['__ZNSt3__28numpunctIcE2idE'] = 190092;
+var __ZNSt3__214__num_get_base5__srcE = Module['__ZNSt3__214__num_get_base5__srcE'] = 188864;
+var __ZNSt3__28numpunctIwE2idE = Module['__ZNSt3__28numpunctIwE2idE'] = 190100;
+var __ZNSt3__210moneypunctIcLb1EE2idE = Module['__ZNSt3__210moneypunctIcLb1EE2idE'] = 189180;
+var __ZNSt3__210moneypunctIcLb0EE2idE = Module['__ZNSt3__210moneypunctIcLb0EE2idE'] = 189168;
+var __ZNSt3__210moneypunctIwLb1EE2idE = Module['__ZNSt3__210moneypunctIwLb1EE2idE'] = 189204;
+var __ZNSt3__210moneypunctIwLb0EE2idE = Module['__ZNSt3__210moneypunctIwLb0EE2idE'] = 189192;
+var __ZTVNSt3__216__narrow_to_utf8ILm32EEE = Module['__ZTVNSt3__216__narrow_to_utf8ILm32EEE'] = 191732;
+var __ZTVNSt3__217__widen_from_utf8ILm32EEE = Module['__ZTVNSt3__217__widen_from_utf8ILm32EEE'] = 191924;
+var __ZTVNSt3__26locale5__impE = Module['__ZTVNSt3__26locale5__impE'] = 189332;
+var __ZTVNSt3__26locale5facetE = Module['__ZTVNSt3__26locale5facetE'] = 191052;
+var __ZNSt3__27collateIcE2idE = Module['__ZNSt3__27collateIcE2idE'] = 188840;
+var __ZNSt3__27collateIwE2idE = Module['__ZNSt3__27collateIwE2idE'] = 188848;
+var __ZNSt3__27codecvtIDsc11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIDsc11__mbstate_tE2idE'] = 190076;
+var __ZNSt3__27codecvtIDic11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIDic11__mbstate_tE2idE'] = 190084;
+var __ZNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 189216;
+var __ZNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 189228;
+var __ZNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 189248;
+var __ZNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 189264;
+var __ZNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 188944;
+var __ZNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 188968;
+var __ZNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 189152;
+var __ZNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 189160;
+var __ZNSt3__28messagesIcE2idE = Module['__ZNSt3__28messagesIcE2idE'] = 189272;
+var __ZNSt3__28messagesIwE2idE = Module['__ZNSt3__28messagesIwE2idE'] = 189280;
+var __ZTVNSt3__214codecvt_bynameIcc11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIcc11__mbstate_tEE'] = 198156;
+var __ZTVNSt3__214codecvt_bynameIwc11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIwc11__mbstate_tEE'] = 198260;
+var __ZTVNSt3__214codecvt_bynameIDsc11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIDsc11__mbstate_tEE'] = 198364;
+var __ZTVNSt3__214codecvt_bynameIDic11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIDic11__mbstate_tEE'] = 198468;
+var __ZTVNSt3__217moneypunct_bynameIcLb0EEE = Module['__ZTVNSt3__217moneypunct_bynameIcLb0EEE'] = 196724;
+var __ZTVNSt3__217moneypunct_bynameIcLb1EEE = Module['__ZTVNSt3__217moneypunct_bynameIcLb1EEE'] = 196828;
+var __ZTVNSt3__217moneypunct_bynameIwLb0EEE = Module['__ZTVNSt3__217moneypunct_bynameIwLb0EEE'] = 196932;
+var __ZTVNSt3__217moneypunct_bynameIwLb1EEE = Module['__ZTVNSt3__217moneypunct_bynameIwLb1EEE'] = 197036;
+var __ZTVNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195148;
+var __ZTVNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195444;
+var __ZTVNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195996;
+var __ZTVNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 196112;
+var __ZTVNSt3__215messages_bynameIcEE = Module['__ZTVNSt3__215messages_bynameIcEE'] = 198004;
+var __ZTVNSt3__215messages_bynameIwEE = Module['__ZTVNSt3__215messages_bynameIwEE'] = 198080;
+var __ZNSt3__26locale2id9__next_idE = Module['__ZNSt3__26locale2id9__next_idE'] = 189380;
+var __ZTVNSt3__214collate_bynameIcEE = Module['__ZTVNSt3__214collate_bynameIcEE'] = 189384;
+var __ZTVNSt3__214collate_bynameIwEE = Module['__ZTVNSt3__214collate_bynameIwEE'] = 189480;
+var __ZTVNSt3__25ctypeIcEE = Module['__ZTVNSt3__25ctypeIcEE'] = 189632;
+var __ZTVNSt3__212ctype_bynameIcEE = Module['__ZTVNSt3__212ctype_bynameIcEE'] = 189684;
+var __ZTVNSt3__212ctype_bynameIwEE = Module['__ZTVNSt3__212ctype_bynameIwEE'] = 189796;
+var __ZTVNSt3__27codecvtIwc11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIwc11__mbstate_tEE'] = 189944;
+var __ZTVNSt3__28numpunctIcEE = Module['__ZTVNSt3__28numpunctIcEE'] = 190108;
+var __ZTVNSt3__28numpunctIwEE = Module['__ZTVNSt3__28numpunctIwEE'] = 190148;
+var __ZTVNSt3__215numpunct_bynameIcEE = Module['__ZTVNSt3__215numpunct_bynameIcEE'] = 190248;
+var __ZTVNSt3__215numpunct_bynameIwEE = Module['__ZTVNSt3__215numpunct_bynameIwEE'] = 190352;
+var __ZTVNSt3__215__time_get_tempIcEE = Module['__ZTVNSt3__215__time_get_tempIcEE'] = 201376;
+var __ZTVNSt3__215__time_get_tempIwEE = Module['__ZTVNSt3__215__time_get_tempIwEE'] = 201472;
+var __ZTVNSt3__27collateIcEE = Module['__ZTVNSt3__27collateIcEE'] = 193696;
+var __ZTVNSt3__27collateIwEE = Module['__ZTVNSt3__27collateIwEE'] = 193728;
+var __ZTVNSt3__25ctypeIwEE = Module['__ZTVNSt3__25ctypeIwEE'] = 191108;
+var __ZTVNSt3__27codecvtIcc11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIcc11__mbstate_tEE'] = 191256;
+var __ZTVNSt3__27codecvtIDsc11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIDsc11__mbstate_tEE'] = 191404;
+var __ZTVNSt3__27codecvtIDic11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIDic11__mbstate_tEE'] = 191520;
+var __ZTVNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 193760;
+var __ZTVNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194004;
+var __ZTVNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194216;
+var __ZTVNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194448;
+var __ZTVNSt3__210moneypunctIcLb0EEE = Module['__ZTVNSt3__210moneypunctIcLb0EEE'] = 196228;
+var __ZTVNSt3__210moneypunctIcLb1EEE = Module['__ZTVNSt3__210moneypunctIcLb1EEE'] = 196376;
+var __ZTVNSt3__210moneypunctIwLb0EEE = Module['__ZTVNSt3__210moneypunctIwLb0EEE'] = 196492;
+var __ZTVNSt3__210moneypunctIwLb1EEE = Module['__ZTVNSt3__210moneypunctIwLb1EEE'] = 196608;
+var __ZTVNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197140;
+var __ZTVNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197304;
+var __ZTVNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197468;
+var __ZTVNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197632;
+var __ZTVNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194648;
+var __ZTVNSt3__220__time_get_c_storageIcEE = Module['__ZTVNSt3__220__time_get_c_storageIcEE'] = 201040;
+var __ZTVNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194912;
+var __ZTVNSt3__220__time_get_c_storageIwEE = Module['__ZTVNSt3__220__time_get_c_storageIwEE'] = 201096;
+var __ZTVNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195712;
+var __ZTVNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195868;
+var __ZTVNSt3__28messagesIcEE = Module['__ZTVNSt3__28messagesIcEE'] = 197796;
+var __ZTVNSt3__28messagesIwEE = Module['__ZTVNSt3__28messagesIwEE'] = 197916;
+var __ZNSt3__210moneypunctIcLb0EE4intlE = Module['__ZNSt3__210moneypunctIcLb0EE4intlE'] = 189176;
+var __ZNSt3__210moneypunctIcLb1EE4intlE = Module['__ZNSt3__210moneypunctIcLb1EE4intlE'] = 189188;
+var __ZNSt3__210moneypunctIwLb0EE4intlE = Module['__ZNSt3__210moneypunctIwLb0EE4intlE'] = 189200;
+var __ZNSt3__210moneypunctIwLb1EE4intlE = Module['__ZNSt3__210moneypunctIwLb1EE4intlE'] = 189212;
+var __ZNSt3__26locale4noneE = Module['__ZNSt3__26locale4noneE'] = 189300;
+var __ZNSt3__26locale7collateE = Module['__ZNSt3__26locale7collateE'] = 189304;
+var __ZNSt3__26locale5ctypeE = Module['__ZNSt3__26locale5ctypeE'] = 189308;
+var __ZNSt3__26locale8monetaryE = Module['__ZNSt3__26locale8monetaryE'] = 189312;
+var __ZNSt3__26locale7numericE = Module['__ZNSt3__26locale7numericE'] = 189316;
+var __ZNSt3__26locale4timeE = Module['__ZNSt3__26locale4timeE'] = 189320;
+var __ZNSt3__26locale8messagesE = Module['__ZNSt3__26locale8messagesE'] = 189324;
+var __ZNSt3__26locale3allE = Module['__ZNSt3__26locale3allE'] = 189328;
+var __ZTINSt3__26locale5__impE = Module['__ZTINSt3__26locale5__impE'] = 193248;
+var __ZTINSt3__214collate_bynameIcEE = Module['__ZTINSt3__214collate_bynameIcEE'] = 193320;
+var __ZTINSt3__214collate_bynameIwEE = Module['__ZTINSt3__214collate_bynameIwEE'] = 193392;
+var __ZNSt3__210ctype_base5spaceE = Module['__ZNSt3__210ctype_base5spaceE'] = 189590;
+var __ZNSt3__210ctype_base5printE = Module['__ZNSt3__210ctype_base5printE'] = 189592;
+var __ZNSt3__210ctype_base5cntrlE = Module['__ZNSt3__210ctype_base5cntrlE'] = 189594;
+var __ZNSt3__210ctype_base5upperE = Module['__ZNSt3__210ctype_base5upperE'] = 189596;
+var __ZNSt3__210ctype_base5lowerE = Module['__ZNSt3__210ctype_base5lowerE'] = 189598;
+var __ZNSt3__210ctype_base5alphaE = Module['__ZNSt3__210ctype_base5alphaE'] = 189600;
+var __ZNSt3__210ctype_base5digitE = Module['__ZNSt3__210ctype_base5digitE'] = 189602;
+var __ZNSt3__210ctype_base5punctE = Module['__ZNSt3__210ctype_base5punctE'] = 189604;
+var __ZNSt3__210ctype_base6xdigitE = Module['__ZNSt3__210ctype_base6xdigitE'] = 189606;
+var __ZNSt3__210ctype_base5blankE = Module['__ZNSt3__210ctype_base5blankE'] = 189608;
+var __ZNSt3__210ctype_base5alnumE = Module['__ZNSt3__210ctype_base5alnumE'] = 189610;
+var __ZNSt3__210ctype_base5graphE = Module['__ZNSt3__210ctype_base5graphE'] = 189612;
+var __ZTINSt3__25ctypeIcEE = Module['__ZTINSt3__25ctypeIcEE'] = 193424;
+var __ZTINSt3__212ctype_bynameIcEE = Module['__ZTINSt3__212ctype_bynameIcEE'] = 193484;
+var __ZTINSt3__212ctype_bynameIwEE = Module['__ZTINSt3__212ctype_bynameIwEE'] = 193524;
+var __ZTINSt3__27codecvtIwc11__mbstate_tEE = Module['__ZTINSt3__27codecvtIwc11__mbstate_tEE'] = 192132;
+var __ZTINSt3__28numpunctIcEE = Module['__ZTINSt3__28numpunctIcEE'] = 193560;
+var __ZTINSt3__28numpunctIwEE = Module['__ZTINSt3__28numpunctIwEE'] = 193596;
+var __ZTINSt3__215numpunct_bynameIcEE = Module['__ZTINSt3__215numpunct_bynameIcEE'] = 193640;
+var __ZTINSt3__215numpunct_bynameIwEE = Module['__ZTINSt3__215numpunct_bynameIwEE'] = 193684;
+var __ZTINSt3__26locale5facetE = Module['__ZTINSt3__26locale5facetE'] = 191096;
+var __ZTSNSt3__26locale5facetE = Module['__ZTSNSt3__26locale5facetE'] = 191072;
+var __ZTINSt3__25ctypeIwEE = Module['__ZTINSt3__25ctypeIwEE'] = 191224;
+var __ZTSNSt3__25ctypeIwEE = Module['__ZTSNSt3__25ctypeIwEE'] = 191176;
+var __ZTSNSt3__210ctype_baseE = Module['__ZTSNSt3__210ctype_baseE'] = 191194;
+var __ZTINSt3__210ctype_baseE = Module['__ZTINSt3__210ctype_baseE'] = 191216;
+var __ZTINSt3__27codecvtIcc11__mbstate_tEE = Module['__ZTINSt3__27codecvtIcc11__mbstate_tEE'] = 191372;
+var __ZTSNSt3__27codecvtIcc11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIcc11__mbstate_tEE'] = 191304;
+var __ZTSNSt3__212codecvt_baseE = Module['__ZTSNSt3__212codecvt_baseE'] = 191338;
+var __ZTINSt3__212codecvt_baseE = Module['__ZTINSt3__212codecvt_baseE'] = 191364;
+var __ZTINSt3__27codecvtIDsc11__mbstate_tEE = Module['__ZTINSt3__27codecvtIDsc11__mbstate_tEE'] = 191488;
+var __ZTSNSt3__27codecvtIDsc11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIDsc11__mbstate_tEE'] = 191452;
+var __ZTINSt3__27codecvtIDic11__mbstate_tEE = Module['__ZTINSt3__27codecvtIDic11__mbstate_tEE'] = 191604;
+var __ZTSNSt3__27codecvtIDic11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIDic11__mbstate_tEE'] = 191568;
+var __ZTVNSt3__216__narrow_to_utf8ILm16EEE = Module['__ZTVNSt3__216__narrow_to_utf8ILm16EEE'] = 191636;
+var __ZTINSt3__216__narrow_to_utf8ILm16EEE = Module['__ZTINSt3__216__narrow_to_utf8ILm16EEE'] = 191720;
+var __ZTSNSt3__216__narrow_to_utf8ILm16EEE = Module['__ZTSNSt3__216__narrow_to_utf8ILm16EEE'] = 191684;
+var __ZTINSt3__216__narrow_to_utf8ILm32EEE = Module['__ZTINSt3__216__narrow_to_utf8ILm32EEE'] = 191816;
+var __ZTSNSt3__216__narrow_to_utf8ILm32EEE = Module['__ZTSNSt3__216__narrow_to_utf8ILm32EEE'] = 191780;
+var __ZTVNSt3__217__widen_from_utf8ILm16EEE = Module['__ZTVNSt3__217__widen_from_utf8ILm16EEE'] = 191828;
+var __ZTINSt3__217__widen_from_utf8ILm16EEE = Module['__ZTINSt3__217__widen_from_utf8ILm16EEE'] = 191912;
+var __ZTSNSt3__217__widen_from_utf8ILm16EEE = Module['__ZTSNSt3__217__widen_from_utf8ILm16EEE'] = 191876;
+var __ZTINSt3__217__widen_from_utf8ILm32EEE = Module['__ZTINSt3__217__widen_from_utf8ILm32EEE'] = 192008;
+var __ZTSNSt3__217__widen_from_utf8ILm32EEE = Module['__ZTSNSt3__217__widen_from_utf8ILm32EEE'] = 191972;
+var __ZTVNSt3__214__codecvt_utf8IwEE = Module['__ZTVNSt3__214__codecvt_utf8IwEE'] = 192020;
+var __ZTINSt3__214__codecvt_utf8IwEE = Module['__ZTINSt3__214__codecvt_utf8IwEE'] = 192164;
+var __ZTSNSt3__214__codecvt_utf8IwEE = Module['__ZTSNSt3__214__codecvt_utf8IwEE'] = 192068;
+var __ZTSNSt3__27codecvtIwc11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIwc11__mbstate_tEE'] = 192096;
+var __ZTVNSt3__214__codecvt_utf8IDsEE = Module['__ZTVNSt3__214__codecvt_utf8IDsEE'] = 192176;
+var __ZTINSt3__214__codecvt_utf8IDsEE = Module['__ZTINSt3__214__codecvt_utf8IDsEE'] = 192256;
+var __ZTSNSt3__214__codecvt_utf8IDsEE = Module['__ZTSNSt3__214__codecvt_utf8IDsEE'] = 192224;
+var __ZTVNSt3__214__codecvt_utf8IDiEE = Module['__ZTVNSt3__214__codecvt_utf8IDiEE'] = 192268;
+var __ZTINSt3__214__codecvt_utf8IDiEE = Module['__ZTINSt3__214__codecvt_utf8IDiEE'] = 192348;
+var __ZTSNSt3__214__codecvt_utf8IDiEE = Module['__ZTSNSt3__214__codecvt_utf8IDiEE'] = 192316;
+var __ZTVNSt3__215__codecvt_utf16IwLb0EEE = Module['__ZTVNSt3__215__codecvt_utf16IwLb0EEE'] = 192360;
+var __ZTINSt3__215__codecvt_utf16IwLb0EEE = Module['__ZTINSt3__215__codecvt_utf16IwLb0EEE'] = 192444;
+var __ZTSNSt3__215__codecvt_utf16IwLb0EEE = Module['__ZTSNSt3__215__codecvt_utf16IwLb0EEE'] = 192408;
+var __ZTVNSt3__215__codecvt_utf16IwLb1EEE = Module['__ZTVNSt3__215__codecvt_utf16IwLb1EEE'] = 192456;
+var __ZTINSt3__215__codecvt_utf16IwLb1EEE = Module['__ZTINSt3__215__codecvt_utf16IwLb1EEE'] = 192540;
+var __ZTSNSt3__215__codecvt_utf16IwLb1EEE = Module['__ZTSNSt3__215__codecvt_utf16IwLb1EEE'] = 192504;
+var __ZTVNSt3__215__codecvt_utf16IDsLb0EEE = Module['__ZTVNSt3__215__codecvt_utf16IDsLb0EEE'] = 192552;
+var __ZTINSt3__215__codecvt_utf16IDsLb0EEE = Module['__ZTINSt3__215__codecvt_utf16IDsLb0EEE'] = 192636;
+var __ZTSNSt3__215__codecvt_utf16IDsLb0EEE = Module['__ZTSNSt3__215__codecvt_utf16IDsLb0EEE'] = 192600;
+var __ZTVNSt3__215__codecvt_utf16IDsLb1EEE = Module['__ZTVNSt3__215__codecvt_utf16IDsLb1EEE'] = 192648;
+var __ZTINSt3__215__codecvt_utf16IDsLb1EEE = Module['__ZTINSt3__215__codecvt_utf16IDsLb1EEE'] = 192732;
+var __ZTSNSt3__215__codecvt_utf16IDsLb1EEE = Module['__ZTSNSt3__215__codecvt_utf16IDsLb1EEE'] = 192696;
+var __ZTVNSt3__215__codecvt_utf16IDiLb0EEE = Module['__ZTVNSt3__215__codecvt_utf16IDiLb0EEE'] = 192744;
+var __ZTINSt3__215__codecvt_utf16IDiLb0EEE = Module['__ZTINSt3__215__codecvt_utf16IDiLb0EEE'] = 192828;
+var __ZTSNSt3__215__codecvt_utf16IDiLb0EEE = Module['__ZTSNSt3__215__codecvt_utf16IDiLb0EEE'] = 192792;
+var __ZTVNSt3__215__codecvt_utf16IDiLb1EEE = Module['__ZTVNSt3__215__codecvt_utf16IDiLb1EEE'] = 192840;
+var __ZTINSt3__215__codecvt_utf16IDiLb1EEE = Module['__ZTINSt3__215__codecvt_utf16IDiLb1EEE'] = 192924;
+var __ZTSNSt3__215__codecvt_utf16IDiLb1EEE = Module['__ZTSNSt3__215__codecvt_utf16IDiLb1EEE'] = 192888;
+var __ZTVNSt3__220__codecvt_utf8_utf16IwEE = Module['__ZTVNSt3__220__codecvt_utf8_utf16IwEE'] = 192936;
+var __ZTINSt3__220__codecvt_utf8_utf16IwEE = Module['__ZTINSt3__220__codecvt_utf8_utf16IwEE'] = 193020;
+var __ZTSNSt3__220__codecvt_utf8_utf16IwEE = Module['__ZTSNSt3__220__codecvt_utf8_utf16IwEE'] = 192984;
+var __ZTVNSt3__220__codecvt_utf8_utf16IDiEE = Module['__ZTVNSt3__220__codecvt_utf8_utf16IDiEE'] = 193032;
+var __ZTINSt3__220__codecvt_utf8_utf16IDiEE = Module['__ZTINSt3__220__codecvt_utf8_utf16IDiEE'] = 193116;
+var __ZTSNSt3__220__codecvt_utf8_utf16IDiEE = Module['__ZTSNSt3__220__codecvt_utf8_utf16IDiEE'] = 193080;
+var __ZTVNSt3__220__codecvt_utf8_utf16IDsEE = Module['__ZTVNSt3__220__codecvt_utf8_utf16IDsEE'] = 193128;
+var __ZTINSt3__220__codecvt_utf8_utf16IDsEE = Module['__ZTINSt3__220__codecvt_utf8_utf16IDsEE'] = 193212;
+var __ZTSNSt3__220__codecvt_utf8_utf16IDsEE = Module['__ZTSNSt3__220__codecvt_utf8_utf16IDsEE'] = 193176;
+var __ZTSNSt3__26locale5__impE = Module['__ZTSNSt3__26locale5__impE'] = 193224;
+var __ZTSNSt3__214collate_bynameIcEE = Module['__ZTSNSt3__214collate_bynameIcEE'] = 193260;
+var __ZTSNSt3__27collateIcEE = Module['__ZTSNSt3__27collateIcEE'] = 193288;
+var __ZTINSt3__27collateIcEE = Module['__ZTINSt3__27collateIcEE'] = 193308;
+var __ZTSNSt3__214collate_bynameIwEE = Module['__ZTSNSt3__214collate_bynameIwEE'] = 193332;
+var __ZTSNSt3__27collateIwEE = Module['__ZTSNSt3__27collateIwEE'] = 193360;
+var __ZTINSt3__27collateIwEE = Module['__ZTINSt3__27collateIwEE'] = 193380;
+var __ZTSNSt3__25ctypeIcEE = Module['__ZTSNSt3__25ctypeIcEE'] = 193404;
+var __ZTSNSt3__212ctype_bynameIcEE = Module['__ZTSNSt3__212ctype_bynameIcEE'] = 193456;
+var __ZTSNSt3__212ctype_bynameIwEE = Module['__ZTSNSt3__212ctype_bynameIwEE'] = 193496;
+var __ZTSNSt3__28numpunctIcEE = Module['__ZTSNSt3__28numpunctIcEE'] = 193536;
+var __ZTSNSt3__28numpunctIwEE = Module['__ZTSNSt3__28numpunctIwEE'] = 193572;
+var __ZTSNSt3__215numpunct_bynameIcEE = Module['__ZTSNSt3__215numpunct_bynameIcEE'] = 193608;
+var __ZTSNSt3__215numpunct_bynameIwEE = Module['__ZTSNSt3__215numpunct_bynameIwEE'] = 193652;
+var __ZTINSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 193972;
+var __ZTSNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 193824;
+var __ZTSNSt3__29__num_getIcEE = Module['__ZTSNSt3__29__num_getIcEE'] = 193892;
+var __ZTSNSt3__214__num_get_baseE = Module['__ZTSNSt3__214__num_get_baseE'] = 193914;
+var __ZTINSt3__214__num_get_baseE = Module['__ZTINSt3__214__num_get_baseE'] = 193940;
+var __ZTINSt3__29__num_getIcEE = Module['__ZTINSt3__29__num_getIcEE'] = 193948;
+var __ZTINSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194184;
+var __ZTSNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194068;
+var __ZTSNSt3__29__num_getIwEE = Module['__ZTSNSt3__29__num_getIwEE'] = 194136;
+var __ZTINSt3__29__num_getIwEE = Module['__ZTINSt3__29__num_getIwEE'] = 194160;
+var __ZTINSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194416;
+var __ZTSNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194268;
+var __ZTSNSt3__29__num_putIcEE = Module['__ZTSNSt3__29__num_putIcEE'] = 194336;
+var __ZTSNSt3__214__num_put_baseE = Module['__ZTSNSt3__214__num_put_baseE'] = 194358;
+var __ZTINSt3__214__num_put_baseE = Module['__ZTINSt3__214__num_put_baseE'] = 194384;
+var __ZTINSt3__29__num_putIcEE = Module['__ZTINSt3__29__num_putIcEE'] = 194392;
+var __ZTINSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194616;
+var __ZTSNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194500;
+var __ZTSNSt3__29__num_putIwEE = Module['__ZTSNSt3__29__num_putIwEE'] = 194568;
+var __ZTINSt3__29__num_putIwEE = Module['__ZTINSt3__29__num_putIwEE'] = 194592;
+var __ZTINSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194872;
+var __ZTSNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194732;
+var __ZTSNSt3__29time_baseE = Module['__ZTSNSt3__29time_baseE'] = 194801;
+var __ZTINSt3__29time_baseE = Module['__ZTINSt3__29time_baseE'] = 194820;
+var __ZTSNSt3__220__time_get_c_storageIcEE = Module['__ZTSNSt3__220__time_get_c_storageIcEE'] = 194828;
+var __ZTINSt3__220__time_get_c_storageIcEE = Module['__ZTINSt3__220__time_get_c_storageIcEE'] = 194864;
+var __ZTINSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195108;
+var __ZTSNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194996;
+var __ZTSNSt3__220__time_get_c_storageIwEE = Module['__ZTSNSt3__220__time_get_c_storageIwEE'] = 195065;
+var __ZTINSt3__220__time_get_c_storageIwEE = Module['__ZTINSt3__220__time_get_c_storageIwEE'] = 195100;
+var __ZTINSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195412;
+var __ZTSNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195260;
+var __ZTSNSt3__218__time_get_storageIcEE = Module['__ZTSNSt3__218__time_get_storageIcEE'] = 195337;
+var __ZTSNSt3__210__time_getE = Module['__ZTSNSt3__210__time_getE'] = 195369;
+var __ZTINSt3__210__time_getE = Module['__ZTINSt3__210__time_getE'] = 195392;
+var __ZTINSt3__218__time_get_storageIcEE = Module['__ZTINSt3__218__time_get_storageIcEE'] = 195400;
+var __ZTINSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195680;
+var __ZTSNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195556;
+var __ZTSNSt3__218__time_get_storageIwEE = Module['__ZTSNSt3__218__time_get_storageIwEE'] = 195633;
+var __ZTINSt3__218__time_get_storageIwEE = Module['__ZTINSt3__218__time_get_storageIwEE'] = 195668;
+var __ZTINSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195836;
+var __ZTSNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195736;
+var __ZTSNSt3__210__time_putE = Module['__ZTSNSt3__210__time_putE'] = 195805;
+var __ZTINSt3__210__time_putE = Module['__ZTINSt3__210__time_putE'] = 195828;
+var __ZTINSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195964;
+var __ZTSNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195892;
+var __ZTINSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 196100;
+var __ZTSNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 196020;
+var __ZTINSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 196216;
+var __ZTSNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 196136;
+var __ZTINSt3__210moneypunctIcLb0EEE = Module['__ZTINSt3__210moneypunctIcLb0EEE'] = 196344;
+var __ZTSNSt3__210moneypunctIcLb0EEE = Module['__ZTSNSt3__210moneypunctIcLb0EEE'] = 196284;
+var __ZTSNSt3__210money_baseE = Module['__ZTSNSt3__210money_baseE'] = 196312;
+var __ZTINSt3__210money_baseE = Module['__ZTINSt3__210money_baseE'] = 196336;
+var __ZTINSt3__210moneypunctIcLb1EEE = Module['__ZTINSt3__210moneypunctIcLb1EEE'] = 196460;
+var __ZTSNSt3__210moneypunctIcLb1EEE = Module['__ZTSNSt3__210moneypunctIcLb1EEE'] = 196432;
+var __ZTINSt3__210moneypunctIwLb0EEE = Module['__ZTINSt3__210moneypunctIwLb0EEE'] = 196576;
+var __ZTSNSt3__210moneypunctIwLb0EEE = Module['__ZTSNSt3__210moneypunctIwLb0EEE'] = 196548;
+var __ZTINSt3__210moneypunctIwLb1EEE = Module['__ZTINSt3__210moneypunctIwLb1EEE'] = 196692;
+var __ZTSNSt3__210moneypunctIwLb1EEE = Module['__ZTSNSt3__210moneypunctIwLb1EEE'] = 196664;
+var __ZTINSt3__217moneypunct_bynameIcLb0EEE = Module['__ZTINSt3__217moneypunct_bynameIcLb0EEE'] = 196816;
+var __ZTSNSt3__217moneypunct_bynameIcLb0EEE = Module['__ZTSNSt3__217moneypunct_bynameIcLb0EEE'] = 196780;
+var __ZTINSt3__217moneypunct_bynameIcLb1EEE = Module['__ZTINSt3__217moneypunct_bynameIcLb1EEE'] = 196920;
+var __ZTSNSt3__217moneypunct_bynameIcLb1EEE = Module['__ZTSNSt3__217moneypunct_bynameIcLb1EEE'] = 196884;
+var __ZTINSt3__217moneypunct_bynameIwLb0EEE = Module['__ZTINSt3__217moneypunct_bynameIwLb0EEE'] = 197024;
+var __ZTSNSt3__217moneypunct_bynameIwLb0EEE = Module['__ZTSNSt3__217moneypunct_bynameIwLb0EEE'] = 196988;
+var __ZTINSt3__217moneypunct_bynameIwLb1EEE = Module['__ZTINSt3__217moneypunct_bynameIwLb1EEE'] = 197128;
+var __ZTSNSt3__217moneypunct_bynameIwLb1EEE = Module['__ZTSNSt3__217moneypunct_bynameIwLb1EEE'] = 197092;
+var __ZTINSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197272;
+var __ZTSNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197168;
+var __ZTSNSt3__211__money_getIcEE = Module['__ZTSNSt3__211__money_getIcEE'] = 197238;
+var __ZTINSt3__211__money_getIcEE = Module['__ZTINSt3__211__money_getIcEE'] = 197264;
+var __ZTINSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197436;
+var __ZTSNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197332;
+var __ZTSNSt3__211__money_getIwEE = Module['__ZTSNSt3__211__money_getIwEE'] = 197402;
+var __ZTINSt3__211__money_getIwEE = Module['__ZTINSt3__211__money_getIwEE'] = 197428;
+var __ZTINSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197600;
+var __ZTSNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197496;
+var __ZTSNSt3__211__money_putIcEE = Module['__ZTSNSt3__211__money_putIcEE'] = 197566;
+var __ZTINSt3__211__money_putIcEE = Module['__ZTINSt3__211__money_putIcEE'] = 197592;
+var __ZTINSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197764;
+var __ZTSNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197660;
+var __ZTSNSt3__211__money_putIwEE = Module['__ZTSNSt3__211__money_putIwEE'] = 197730;
+var __ZTINSt3__211__money_putIwEE = Module['__ZTINSt3__211__money_putIwEE'] = 197756;
+var __ZTINSt3__28messagesIcEE = Module['__ZTINSt3__28messagesIcEE'] = 197884;
+var __ZTSNSt3__28messagesIcEE = Module['__ZTSNSt3__28messagesIcEE'] = 197828;
+var __ZTSNSt3__213messages_baseE = Module['__ZTSNSt3__213messages_baseE'] = 197849;
+var __ZTINSt3__213messages_baseE = Module['__ZTINSt3__213messages_baseE'] = 197876;
+var __ZTINSt3__28messagesIwEE = Module['__ZTINSt3__28messagesIwEE'] = 197972;
+var __ZTSNSt3__28messagesIwEE = Module['__ZTSNSt3__28messagesIwEE'] = 197948;
+var __ZTINSt3__215messages_bynameIcEE = Module['__ZTINSt3__215messages_bynameIcEE'] = 198068;
+var __ZTSNSt3__215messages_bynameIcEE = Module['__ZTSNSt3__215messages_bynameIcEE'] = 198036;
+var __ZTINSt3__215messages_bynameIwEE = Module['__ZTINSt3__215messages_bynameIwEE'] = 198144;
+var __ZTSNSt3__215messages_bynameIwEE = Module['__ZTSNSt3__215messages_bynameIwEE'] = 198112;
+var __ZTINSt3__214codecvt_bynameIcc11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIcc11__mbstate_tEE'] = 198248;
+var __ZTSNSt3__214codecvt_bynameIcc11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIcc11__mbstate_tEE'] = 198204;
+var __ZTINSt3__214codecvt_bynameIwc11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIwc11__mbstate_tEE'] = 198352;
+var __ZTSNSt3__214codecvt_bynameIwc11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIwc11__mbstate_tEE'] = 198308;
+var __ZTINSt3__214codecvt_bynameIDsc11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIDsc11__mbstate_tEE'] = 198456;
+var __ZTSNSt3__214codecvt_bynameIDsc11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIDsc11__mbstate_tEE'] = 198412;
+var __ZTINSt3__214codecvt_bynameIDic11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIDic11__mbstate_tEE'] = 198560;
+var __ZTSNSt3__214codecvt_bynameIDic11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIDic11__mbstate_tEE'] = 198516;
+var __ZTINSt3__215__time_get_tempIcEE = Module['__ZTINSt3__215__time_get_tempIcEE'] = 201460;
+var __ZTSNSt3__215__time_get_tempIcEE = Module['__ZTSNSt3__215__time_get_tempIcEE'] = 201428;
+var __ZTINSt3__215__time_get_tempIwEE = Module['__ZTINSt3__215__time_get_tempIwEE'] = 201572;
+var __ZTSNSt3__215__time_get_tempIwEE = Module['__ZTSNSt3__215__time_get_tempIwEE'] = 201540;
+var __ZNSt3__213allocator_argE = Module['__ZNSt3__213allocator_argE'] = 201584;
+var __ZTSNSt3__214__shared_countE = Module['__ZTSNSt3__214__shared_countE'] = 202148;
+var __ZTVNSt3__219__shared_weak_countE = Module['__ZTVNSt3__219__shared_weak_countE'] = 202184;
+var __ZTINSt3__219__shared_weak_countE = Module['__ZTINSt3__219__shared_weak_countE'] = 202244;
+var __ZTSNSt3__219__shared_weak_countE = Module['__ZTSNSt3__219__shared_weak_countE'] = 202212;
+var __ZTVNSt3__212bad_weak_ptrE = Module['__ZTVNSt3__212bad_weak_ptrE'] = 202268;
+var __ZTINSt3__212bad_weak_ptrE = Module['__ZTINSt3__212bad_weak_ptrE'] = 202312;
+var __ZTSNSt3__212bad_weak_ptrE = Module['__ZTSNSt3__212bad_weak_ptrE'] = 202288;
+var __ZNSt3__210defer_lockE = Module['__ZNSt3__210defer_lockE'] = 202324;
+var __ZNSt3__211try_to_lockE = Module['__ZNSt3__211try_to_lockE'] = 202325;
+var __ZNSt3__210adopt_lockE = Module['__ZNSt3__210adopt_lockE'] = 202326;
+var __ZSt7nothrow = Module['__ZSt7nothrow'] = 202560;
+var __ZTVSt19bad_optional_access = Module['__ZTVSt19bad_optional_access'] = 202584;
+var __ZTISt19bad_optional_access = Module['__ZTISt19bad_optional_access'] = 202628;
+var __ZTSSt19bad_optional_access = Module['__ZTSSt19bad_optional_access'] = 202604;
+var __ZTVNSt12experimental19bad_optional_accessE = Module['__ZTVNSt12experimental19bad_optional_accessE'] = 202640;
+var __ZTINSt12experimental19bad_optional_accessE = Module['__ZTINSt12experimental19bad_optional_accessE'] = 202700;
+var __ZTSNSt12experimental19bad_optional_accessE = Module['__ZTSNSt12experimental19bad_optional_accessE'] = 202660;
+var __ZTVNSt3__211regex_errorE = Module['__ZTVNSt3__211regex_errorE'] = 202788;
+var __ZTINSt3__211regex_errorE = Module['__ZTINSt3__211regex_errorE'] = 203856;
+var __ZTSNSt3__211regex_errorE = Module['__ZTSNSt3__211regex_errorE'] = 203832;
+var __ZTISt13runtime_error = Module['__ZTISt13runtime_error'] = 221992;
+var __ZTVSt11logic_error = Module['__ZTVSt11logic_error'] = 221656;
+var __ZTVSt9exception = Module['__ZTVSt9exception'] = 221492;
+var __ZTVSt13runtime_error = Module['__ZTVSt13runtime_error'] = 221676;
+var __ZNSt3__212basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4nposE = Module['__ZNSt3__212basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4nposE'] = 205812;
+var __ZNSt3__212basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE4nposE = Module['__ZNSt3__212basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE4nposE'] = 205816;
+var __ZTVNSt3__212strstreambufE = Module['__ZTVNSt3__212strstreambufE'] = 206240;
+var __ZTTNSt3__210istrstreamE = Module['__ZTTNSt3__210istrstreamE'] = 206344;
+var __ZTTNSt3__210ostrstreamE = Module['__ZTTNSt3__210ostrstreamE'] = 206400;
+var __ZTTNSt3__29strstreamE = Module['__ZTTNSt3__29strstreamE'] = 206476;
+var __ZTINSt3__212strstreambufE = Module['__ZTINSt3__212strstreambufE'] = 206540;
+var __ZTVNSt3__210istrstreamE = Module['__ZTVNSt3__210istrstreamE'] = 206304;
+var __ZTINSt3__210istrstreamE = Module['__ZTINSt3__210istrstreamE'] = 206616;
+var __ZTCNSt3__210istrstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__210istrstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE'] = 206552;
+var __ZTVNSt3__210ostrstreamE = Module['__ZTVNSt3__210ostrstreamE'] = 206360;
+var __ZTINSt3__210ostrstreamE = Module['__ZTINSt3__210ostrstreamE'] = 206692;
+var __ZTCNSt3__210ostrstreamE0_NS_13basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__210ostrstreamE0_NS_13basic_ostreamIcNS_11char_traitsIcEEEE'] = 206628;
+var __ZTVNSt3__29strstreamE = Module['__ZTVNSt3__29strstreamE'] = 206416;
+var __ZTINSt3__29strstreamE = Module['__ZTINSt3__29strstreamE'] = 206864;
+var __ZTCNSt3__29strstreamE0_NS_14basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__29strstreamE0_NS_14basic_iostreamIcNS_11char_traitsIcEEEE'] = 206704;
+var __ZTCNSt3__29strstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__29strstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE'] = 206764;
+var __ZTCNSt3__29strstreamE8_NS_13basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__29strstreamE8_NS_13basic_ostreamIcNS_11char_traitsIcEEEE'] = 206804;
+var __ZTSNSt3__212strstreambufE = Module['__ZTSNSt3__212strstreambufE'] = 206516;
+var __ZTSNSt3__210istrstreamE = Module['__ZTSNSt3__210istrstreamE'] = 206592;
+var __ZTSNSt3__210ostrstreamE = Module['__ZTSNSt3__210ostrstreamE'] = 206668;
+var __ZTSNSt3__29strstreamE = Module['__ZTSNSt3__29strstreamE'] = 206844;
+var __ZTVNSt3__212system_errorE = Module['__ZTVNSt3__212system_errorE'] = 207056;
+var __ZTVNSt3__224__generic_error_categoryE = Module['__ZTVNSt3__224__generic_error_categoryE'] = 206924;
+var __ZTINSt3__224__generic_error_categoryE = Module['__ZTINSt3__224__generic_error_categoryE'] = 207260;
+var __ZTVNSt3__223__system_error_categoryE = Module['__ZTVNSt3__223__system_error_categoryE'] = 207012;
+var __ZTINSt3__223__system_error_categoryE = Module['__ZTINSt3__223__system_error_categoryE'] = 207308;
+var __ZTVNSt3__214error_categoryE = Module['__ZTVNSt3__214error_categoryE'] = 207080;
+var __ZTINSt3__214error_categoryE = Module['__ZTINSt3__214error_categoryE'] = 207144;
+var __ZTSNSt3__214error_categoryE = Module['__ZTSNSt3__214error_categoryE'] = 207116;
+var __ZTVNSt3__212__do_messageE = Module['__ZTVNSt3__212__do_messageE'] = 207152;
+var __ZTSNSt3__212__do_messageE = Module['__ZTSNSt3__212__do_messageE'] = 207188;
+var __ZTSNSt3__224__generic_error_categoryE = Module['__ZTSNSt3__224__generic_error_categoryE'] = 207224;
+var __ZTSNSt3__223__system_error_categoryE = Module['__ZTSNSt3__223__system_error_categoryE'] = 207272;
+var __ZTSNSt3__212system_errorE = Module['__ZTSNSt3__212system_errorE'] = 207320;
+var __ZNSt3__219piecewise_constructE = Module['__ZNSt3__219piecewise_constructE'] = 207466;
+var __ZTVSt18bad_variant_access = Module['__ZTVSt18bad_variant_access'] = 207488;
+var __ZTISt18bad_variant_access = Module['__ZTISt18bad_variant_access'] = 207532;
+var __ZTSSt18bad_variant_access = Module['__ZTSSt18bad_variant_access'] = 207508;
+var __ZTVNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE = Module['__ZTVNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE'] = 207552;
+var __ZTINSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE = Module['__ZTINSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE'] = 207756;
+var __ZTVNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE = Module['__ZTVNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE'] = 207580;
+var __ZTINSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE = Module['__ZTINSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE'] = 207836;
+var __ZTSNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE = Module['__ZTSNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE'] = 207616;
+var __ZTSNSt12experimental15fundamentals_v13pmr15memory_resourceE = Module['__ZTSNSt12experimental15fundamentals_v13pmr15memory_resourceE'] = 207690;
+var __ZTINSt12experimental15fundamentals_v13pmr15memory_resourceE = Module['__ZTINSt12experimental15fundamentals_v13pmr15memory_resourceE'] = 207748;
+var __ZTSNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE = Module['__ZTSNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE'] = 207768;
+var __ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE = Module['__ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE'] = 208120;
+var __ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE = Module['__ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE'] = 208256;
+var __ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE = Module['__ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE'] = 208236;
+var __ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE = Module['__ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE'] = 208148;
+var __ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE = Module['__ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE'] = 208404;
+var __ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE = Module['__ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE'] = 208284;
+var __ZTVNSt3__24__fs10filesystem16filesystem_errorE = Module['__ZTVNSt3__24__fs10filesystem16filesystem_errorE'] = 208456;
+var __ZTVNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209224;
+var __ZTTNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209264;
+var __ZTVNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209540;
+var __ZTTNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209580;
+var __ZTVNSt3__213basic_filebufIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__213basic_filebufIcNS_11char_traitsIcEEEE'] = 209380;
+var __ZNSt3__24__fs10filesystem16_FilesystemClock9is_steadyE = Module['__ZNSt3__24__fs10filesystem16_FilesystemClock9is_steadyE'] = 208416;
+var __ZTINSt3__24__fs10filesystem16filesystem_errorE = Module['__ZTINSt3__24__fs10filesystem16filesystem_errorE'] = 208988;
+var __ZNSt3__24__fs10filesystem4path19preferred_separatorE = Module['__ZNSt3__24__fs10filesystem4path19preferred_separatorE'] = 208940;
+var __ZTSNSt3__24__fs10filesystem16filesystem_errorE = Module['__ZTSNSt3__24__fs10filesystem16filesystem_errorE'] = 208944;
+var __ZTINSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209368;
+var __ZTCNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE = Module['__ZTCNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE'] = 209280;
+var __ZTSNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209320;
+var __ZTINSt3__213basic_filebufIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__213basic_filebufIcNS_11char_traitsIcEEEE'] = 209492;
+var __ZTSNSt3__213basic_filebufIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__213basic_filebufIcNS_11char_traitsIcEEEE'] = 209444;
+var __ZTINSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209684;
+var __ZTCNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE0_NS_13basic_ostreamIcS2_EE = Module['__ZTCNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE0_NS_13basic_ostreamIcS2_EE'] = 209596;
+var __ZTSNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209636;
+var ___cxa_unexpected_handler = Module['___cxa_unexpected_handler'] = 209724;
+var ___cxa_terminate_handler = Module['___cxa_terminate_handler'] = 209720;
+var ___cxa_new_handler = Module['___cxa_new_handler'] = 220788;
+var __ZTVSt9bad_alloc = Module['__ZTVSt9bad_alloc'] = 221412;
+var __ZTVSt20bad_array_new_length = Module['__ZTVSt20bad_array_new_length'] = 221448;
+var __ZTISt9bad_alloc = Module['__ZTISt9bad_alloc'] = 221604;
+var __ZTISt20bad_array_new_length = Module['__ZTISt20bad_array_new_length'] = 221644;
+var __ZTSSt9exception = Module['__ZTSSt9exception'] = 221512;
+var __ZTVSt13bad_exception = Module['__ZTVSt13bad_exception'] = 221536;
+var __ZTISt13bad_exception = Module['__ZTISt13bad_exception'] = 221576;
+var __ZTSSt13bad_exception = Module['__ZTSSt13bad_exception'] = 221556;
+var __ZTSSt9bad_alloc = Module['__ZTSSt9bad_alloc'] = 221588;
+var __ZTSSt20bad_array_new_length = Module['__ZTSSt20bad_array_new_length'] = 221616;
+var __ZTVSt12domain_error = Module['__ZTVSt12domain_error'] = 221696;
+var __ZTISt12domain_error = Module['__ZTISt12domain_error'] = 221764;
+var __ZTSSt12domain_error = Module['__ZTSSt12domain_error'] = 221716;
+var __ZTSSt11logic_error = Module['__ZTSSt11logic_error'] = 221733;
+var __ZTVSt16invalid_argument = Module['__ZTVSt16invalid_argument'] = 221776;
+var __ZTISt16invalid_argument = Module['__ZTISt16invalid_argument'] = 221820;
+var __ZTSSt16invalid_argument = Module['__ZTSSt16invalid_argument'] = 221796;
+var __ZTVSt12length_error = Module['__ZTVSt12length_error'] = 221832;
+var __ZTISt12length_error = Module['__ZTISt12length_error'] = 221872;
+var __ZTSSt12length_error = Module['__ZTSSt12length_error'] = 221852;
+var __ZTVSt12out_of_range = Module['__ZTVSt12out_of_range'] = 221884;
+var __ZTISt12out_of_range = Module['__ZTISt12out_of_range'] = 221924;
+var __ZTSSt12out_of_range = Module['__ZTSSt12out_of_range'] = 221904;
+var __ZTVSt11range_error = Module['__ZTVSt11range_error'] = 221936;
+var __ZTISt11range_error = Module['__ZTISt11range_error'] = 222004;
+var __ZTSSt11range_error = Module['__ZTSSt11range_error'] = 221956;
+var __ZTSSt13runtime_error = Module['__ZTSSt13runtime_error'] = 221972;
+var __ZTVSt14overflow_error = Module['__ZTVSt14overflow_error'] = 222016;
+var __ZTISt14overflow_error = Module['__ZTISt14overflow_error'] = 222056;
+var __ZTSSt14overflow_error = Module['__ZTSSt14overflow_error'] = 222036;
+var __ZTVSt15underflow_error = Module['__ZTVSt15underflow_error'] = 222068;
+var __ZTISt15underflow_error = Module['__ZTISt15underflow_error'] = 222108;
+var __ZTSSt15underflow_error = Module['__ZTSSt15underflow_error'] = 222088;
+var __ZTVSt8bad_cast = Module['__ZTVSt8bad_cast'] = 222120;
+var __ZTVSt10bad_typeid = Module['__ZTVSt10bad_typeid'] = 222156;
+var __ZTISt10bad_typeid = Module['__ZTISt10bad_typeid'] = 222272;
+var __ZTVSt9type_info = Module['__ZTVSt9type_info'] = 222192;
+var __ZTISt9type_info = Module['__ZTISt9type_info'] = 222224;
+var __ZTSSt9type_info = Module['__ZTSSt9type_info'] = 222208;
+var __ZTSSt8bad_cast = Module['__ZTSSt8bad_cast'] = 222232;
+var __ZTSSt10bad_typeid = Module['__ZTSSt10bad_typeid'] = 222256;
+var __ZTIN10__cxxabiv117__class_type_infoE = Module['__ZTIN10__cxxabiv117__class_type_infoE'] = 222368;
+var __ZTIN10__cxxabiv116__shim_type_infoE = Module['__ZTIN10__cxxabiv116__shim_type_infoE'] = 222320;
+var __ZTIN10__cxxabiv117__pbase_type_infoE = Module['__ZTIN10__cxxabiv117__pbase_type_infoE'] = 222416;
+var __ZTIDn = Module['__ZTIDn'] = 222764;
+var __ZTIN10__cxxabiv119__pointer_type_infoE = Module['__ZTIN10__cxxabiv119__pointer_type_infoE'] = 222464;
+var __ZTIv = Module['__ZTIv'] = 222712;
+var __ZTIN10__cxxabiv120__function_type_infoE = Module['__ZTIN10__cxxabiv120__function_type_infoE'] = 222516;
+var __ZTIN10__cxxabiv129__pointer_to_member_type_infoE = Module['__ZTIN10__cxxabiv129__pointer_to_member_type_infoE'] = 222576;
+var __ZTSN10__cxxabiv116__shim_type_infoE = Module['__ZTSN10__cxxabiv116__shim_type_infoE'] = 222284;
+var __ZTSN10__cxxabiv117__class_type_infoE = Module['__ZTSN10__cxxabiv117__class_type_infoE'] = 222332;
+var __ZTSN10__cxxabiv117__pbase_type_infoE = Module['__ZTSN10__cxxabiv117__pbase_type_infoE'] = 222380;
+var __ZTSN10__cxxabiv119__pointer_type_infoE = Module['__ZTSN10__cxxabiv119__pointer_type_infoE'] = 222428;
+var __ZTSN10__cxxabiv120__function_type_infoE = Module['__ZTSN10__cxxabiv120__function_type_infoE'] = 222476;
+var __ZTSN10__cxxabiv129__pointer_to_member_type_infoE = Module['__ZTSN10__cxxabiv129__pointer_to_member_type_infoE'] = 222528;
+var __ZTVN10__cxxabiv116__shim_type_infoE = Module['__ZTVN10__cxxabiv116__shim_type_infoE'] = 222600;
+var __ZTVN10__cxxabiv123__fundamental_type_infoE = Module['__ZTVN10__cxxabiv123__fundamental_type_infoE'] = 222628;
+var __ZTIN10__cxxabiv123__fundamental_type_infoE = Module['__ZTIN10__cxxabiv123__fundamental_type_infoE'] = 222696;
+var __ZTSN10__cxxabiv123__fundamental_type_infoE = Module['__ZTSN10__cxxabiv123__fundamental_type_infoE'] = 222656;
+var __ZTSv = Module['__ZTSv'] = 222708;
+var __ZTSPv = Module['__ZTSPv'] = 222720;
+var __ZTIPv = Module['__ZTIPv'] = 222724;
+var __ZTVN10__cxxabiv119__pointer_type_infoE = Module['__ZTVN10__cxxabiv119__pointer_type_infoE'] = 224460;
+var __ZTSPKv = Module['__ZTSPKv'] = 222740;
+var __ZTIPKv = Module['__ZTIPKv'] = 222744;
+var __ZTSDn = Module['__ZTSDn'] = 222760;
+var __ZTSPDn = Module['__ZTSPDn'] = 222772;
+var __ZTIPDn = Module['__ZTIPDn'] = 222776;
+var __ZTSPKDn = Module['__ZTSPKDn'] = 222792;
+var __ZTIPKDn = Module['__ZTIPKDn'] = 222800;
+var __ZTSb = Module['__ZTSb'] = 222816;
+var __ZTIb = Module['__ZTIb'] = 222820;
+var __ZTSPb = Module['__ZTSPb'] = 222828;
+var __ZTIPb = Module['__ZTIPb'] = 222832;
+var __ZTSPKb = Module['__ZTSPKb'] = 222848;
+var __ZTIPKb = Module['__ZTIPKb'] = 222852;
+var __ZTSw = Module['__ZTSw'] = 222868;
+var __ZTIw = Module['__ZTIw'] = 222872;
+var __ZTSPw = Module['__ZTSPw'] = 222880;
+var __ZTIPw = Module['__ZTIPw'] = 222884;
+var __ZTSPKw = Module['__ZTSPKw'] = 222900;
+var __ZTIPKw = Module['__ZTIPKw'] = 222904;
+var __ZTSc = Module['__ZTSc'] = 222920;
+var __ZTIc = Module['__ZTIc'] = 222924;
+var __ZTSPc = Module['__ZTSPc'] = 222932;
+var __ZTIPc = Module['__ZTIPc'] = 222936;
+var __ZTSPKc = Module['__ZTSPKc'] = 222952;
+var __ZTIPKc = Module['__ZTIPKc'] = 222956;
+var __ZTSh = Module['__ZTSh'] = 222972;
+var __ZTIh = Module['__ZTIh'] = 222976;
+var __ZTSPh = Module['__ZTSPh'] = 222984;
+var __ZTIPh = Module['__ZTIPh'] = 222988;
+var __ZTSPKh = Module['__ZTSPKh'] = 223004;
+var __ZTIPKh = Module['__ZTIPKh'] = 223008;
+var __ZTSa = Module['__ZTSa'] = 223024;
+var __ZTIa = Module['__ZTIa'] = 223028;
+var __ZTSPa = Module['__ZTSPa'] = 223036;
+var __ZTIPa = Module['__ZTIPa'] = 223040;
+var __ZTSPKa = Module['__ZTSPKa'] = 223056;
+var __ZTIPKa = Module['__ZTIPKa'] = 223060;
+var __ZTSs = Module['__ZTSs'] = 223076;
+var __ZTIs = Module['__ZTIs'] = 223080;
+var __ZTSPs = Module['__ZTSPs'] = 223088;
+var __ZTIPs = Module['__ZTIPs'] = 223092;
+var __ZTSPKs = Module['__ZTSPKs'] = 223108;
+var __ZTIPKs = Module['__ZTIPKs'] = 223112;
+var __ZTSt = Module['__ZTSt'] = 223128;
+var __ZTIt = Module['__ZTIt'] = 223132;
+var __ZTSPt = Module['__ZTSPt'] = 223140;
+var __ZTIPt = Module['__ZTIPt'] = 223144;
+var __ZTSPKt = Module['__ZTSPKt'] = 223160;
+var __ZTIPKt = Module['__ZTIPKt'] = 223164;
+var __ZTSi = Module['__ZTSi'] = 223180;
+var __ZTIi = Module['__ZTIi'] = 223184;
+var __ZTSPi = Module['__ZTSPi'] = 223192;
+var __ZTIPi = Module['__ZTIPi'] = 223196;
+var __ZTSPKi = Module['__ZTSPKi'] = 223212;
+var __ZTIPKi = Module['__ZTIPKi'] = 223216;
+var __ZTSj = Module['__ZTSj'] = 223232;
+var __ZTIj = Module['__ZTIj'] = 223236;
+var __ZTSPj = Module['__ZTSPj'] = 223244;
+var __ZTIPj = Module['__ZTIPj'] = 223248;
+var __ZTSPKj = Module['__ZTSPKj'] = 223264;
+var __ZTIPKj = Module['__ZTIPKj'] = 223268;
+var __ZTSl = Module['__ZTSl'] = 223284;
+var __ZTIl = Module['__ZTIl'] = 223288;
+var __ZTSPl = Module['__ZTSPl'] = 223296;
+var __ZTIPl = Module['__ZTIPl'] = 223300;
+var __ZTSPKl = Module['__ZTSPKl'] = 223316;
+var __ZTIPKl = Module['__ZTIPKl'] = 223320;
+var __ZTSm = Module['__ZTSm'] = 223336;
+var __ZTIm = Module['__ZTIm'] = 223340;
+var __ZTSPm = Module['__ZTSPm'] = 223348;
+var __ZTIPm = Module['__ZTIPm'] = 223352;
+var __ZTSPKm = Module['__ZTSPKm'] = 223368;
+var __ZTIPKm = Module['__ZTIPKm'] = 223372;
+var __ZTSx = Module['__ZTSx'] = 223388;
+var __ZTIx = Module['__ZTIx'] = 223392;
+var __ZTSPx = Module['__ZTSPx'] = 223400;
+var __ZTIPx = Module['__ZTIPx'] = 223404;
+var __ZTSPKx = Module['__ZTSPKx'] = 223420;
+var __ZTIPKx = Module['__ZTIPKx'] = 223424;
+var __ZTSy = Module['__ZTSy'] = 223440;
+var __ZTIy = Module['__ZTIy'] = 223444;
+var __ZTSPy = Module['__ZTSPy'] = 223452;
+var __ZTIPy = Module['__ZTIPy'] = 223456;
+var __ZTSPKy = Module['__ZTSPKy'] = 223472;
+var __ZTIPKy = Module['__ZTIPKy'] = 223476;
+var __ZTSn = Module['__ZTSn'] = 223492;
+var __ZTIn = Module['__ZTIn'] = 223496;
+var __ZTSPn = Module['__ZTSPn'] = 223504;
+var __ZTIPn = Module['__ZTIPn'] = 223508;
+var __ZTSPKn = Module['__ZTSPKn'] = 223524;
+var __ZTIPKn = Module['__ZTIPKn'] = 223528;
+var __ZTSo = Module['__ZTSo'] = 223544;
+var __ZTIo = Module['__ZTIo'] = 223548;
+var __ZTSPo = Module['__ZTSPo'] = 223556;
+var __ZTIPo = Module['__ZTIPo'] = 223560;
+var __ZTSPKo = Module['__ZTSPKo'] = 223576;
+var __ZTIPKo = Module['__ZTIPKo'] = 223580;
+var __ZTSDh = Module['__ZTSDh'] = 223596;
+var __ZTIDh = Module['__ZTIDh'] = 223600;
+var __ZTSPDh = Module['__ZTSPDh'] = 223608;
+var __ZTIPDh = Module['__ZTIPDh'] = 223612;
+var __ZTSPKDh = Module['__ZTSPKDh'] = 223628;
+var __ZTIPKDh = Module['__ZTIPKDh'] = 223636;
+var __ZTSf = Module['__ZTSf'] = 223652;
+var __ZTIf = Module['__ZTIf'] = 223656;
+var __ZTSPf = Module['__ZTSPf'] = 223664;
+var __ZTIPf = Module['__ZTIPf'] = 223668;
+var __ZTSPKf = Module['__ZTSPKf'] = 223684;
+var __ZTIPKf = Module['__ZTIPKf'] = 223688;
+var __ZTSd = Module['__ZTSd'] = 223704;
+var __ZTId = Module['__ZTId'] = 223708;
+var __ZTSPd = Module['__ZTSPd'] = 223716;
+var __ZTIPd = Module['__ZTIPd'] = 223720;
+var __ZTSPKd = Module['__ZTSPKd'] = 223736;
+var __ZTIPKd = Module['__ZTIPKd'] = 223740;
+var __ZTSe = Module['__ZTSe'] = 223756;
+var __ZTIe = Module['__ZTIe'] = 223760;
+var __ZTSPe = Module['__ZTSPe'] = 223768;
+var __ZTIPe = Module['__ZTIPe'] = 223772;
+var __ZTSPKe = Module['__ZTSPKe'] = 223788;
+var __ZTIPKe = Module['__ZTIPKe'] = 223792;
+var __ZTSg = Module['__ZTSg'] = 223808;
+var __ZTIg = Module['__ZTIg'] = 223812;
+var __ZTSPg = Module['__ZTSPg'] = 223820;
+var __ZTIPg = Module['__ZTIPg'] = 223824;
+var __ZTSPKg = Module['__ZTSPKg'] = 223840;
+var __ZTIPKg = Module['__ZTIPKg'] = 223844;
+var __ZTSDu = Module['__ZTSDu'] = 223860;
+var __ZTIDu = Module['__ZTIDu'] = 223864;
+var __ZTSPDu = Module['__ZTSPDu'] = 223872;
+var __ZTIPDu = Module['__ZTIPDu'] = 223876;
+var __ZTSPKDu = Module['__ZTSPKDu'] = 223892;
+var __ZTIPKDu = Module['__ZTIPKDu'] = 223900;
+var __ZTSDs = Module['__ZTSDs'] = 223916;
+var __ZTIDs = Module['__ZTIDs'] = 223920;
+var __ZTSPDs = Module['__ZTSPDs'] = 223928;
+var __ZTIPDs = Module['__ZTIPDs'] = 223932;
+var __ZTSPKDs = Module['__ZTSPKDs'] = 223948;
+var __ZTIPKDs = Module['__ZTIPKDs'] = 223956;
+var __ZTSDi = Module['__ZTSDi'] = 223972;
+var __ZTIDi = Module['__ZTIDi'] = 223976;
+var __ZTSPDi = Module['__ZTSPDi'] = 223984;
+var __ZTIPDi = Module['__ZTIPDi'] = 223988;
+var __ZTSPKDi = Module['__ZTSPKDi'] = 224004;
+var __ZTIPKDi = Module['__ZTIPKDi'] = 224012;
+var __ZTVN10__cxxabiv117__array_type_infoE = Module['__ZTVN10__cxxabiv117__array_type_infoE'] = 224028;
+var __ZTIN10__cxxabiv117__array_type_infoE = Module['__ZTIN10__cxxabiv117__array_type_infoE'] = 224092;
+var __ZTSN10__cxxabiv117__array_type_infoE = Module['__ZTSN10__cxxabiv117__array_type_infoE'] = 224056;
+var __ZTVN10__cxxabiv120__function_type_infoE = Module['__ZTVN10__cxxabiv120__function_type_infoE'] = 224104;
+var __ZTVN10__cxxabiv116__enum_type_infoE = Module['__ZTVN10__cxxabiv116__enum_type_infoE'] = 224132;
+var __ZTIN10__cxxabiv116__enum_type_infoE = Module['__ZTIN10__cxxabiv116__enum_type_infoE'] = 224196;
+var __ZTSN10__cxxabiv116__enum_type_infoE = Module['__ZTSN10__cxxabiv116__enum_type_infoE'] = 224160;
+var __ZTIN10__cxxabiv120__si_class_type_infoE = Module['__ZTIN10__cxxabiv120__si_class_type_infoE'] = 224328;
+var __ZTSN10__cxxabiv120__si_class_type_infoE = Module['__ZTSN10__cxxabiv120__si_class_type_infoE'] = 224288;
+var __ZTIN10__cxxabiv121__vmi_class_type_infoE = Module['__ZTIN10__cxxabiv121__vmi_class_type_infoE'] = 224420;
+var __ZTSN10__cxxabiv121__vmi_class_type_infoE = Module['__ZTSN10__cxxabiv121__vmi_class_type_infoE'] = 224380;
+var __ZTVN10__cxxabiv117__pbase_type_infoE = Module['__ZTVN10__cxxabiv117__pbase_type_infoE'] = 224432;
+var __ZTVN10__cxxabiv129__pointer_to_member_type_infoE = Module['__ZTVN10__cxxabiv129__pointer_to_member_type_infoE'] = 224488;
+var _in6addr_any = Module['_in6addr_any'] = 229564;
+var _in6addr_loopback = Module['_in6addr_loopback'] = 229580;
+var ___data_end = Module['___data_end'] = 229596;
+for (var name in ['__progname','__progname_full','__libc','__hwcap','__sysinfo','program_invocation_short_name','program_invocation_name','__c_dot_utf8','__c_locale','__c_dot_utf8_locale','__pio2_hi','__pio2_lo','atanlo','atanhi','aT','__signgam','signgam','stderr','__optreset','optind','__optpos','optarg','optopt','opterr','optreset','__fsmu8','h_errno','_ns_flagdata','__seed48','__environ','__stdout_used','stdin','stdout','__stderr_used','__stdin_used','___environ','_environ','environ','__env_map','tzname','daylight','timezone','__THREW__','__threwValue','_ZNSt3__212__rs_default4__c_E','_ZTVSt12bad_any_cast','_ZTISt12bad_any_cast','_ZTSSt12bad_any_cast','_ZTVN10__cxxabiv120__si_class_type_infoE','_ZTISt8bad_cast','_ZTVNSt12experimental15fundamentals_v112bad_any_castE','_ZTINSt12experimental15fundamentals_v112bad_any_castE','_ZTSNSt12experimental15fundamentals_v112bad_any_castE','_ZNSt3__212placeholders2_1E','_ZNSt3__212placeholders2_2E','_ZNSt3__212placeholders2_3E','_ZNSt3__212placeholders2_4E','_ZNSt3__212placeholders2_5E','_ZNSt3__212placeholders2_6E','_ZNSt3__212placeholders2_7E','_ZNSt3__212placeholders2_8E','_ZNSt3__212placeholders2_9E','_ZNSt3__212placeholders3_10E','_ZNSt3__26chrono12system_clock9is_steadyE','_ZNSt3__26chrono12steady_clock9is_steadyE','_ZNSt3__223__libcpp_debug_functionE','_ZTVNSt3__28__c_nodeE','_ZTINSt3__28__c_nodeE','_ZTSNSt3__28__c_nodeE','_ZTVN10__cxxabiv117__class_type_infoE','_ZTVSt16nested_exception','_ZTISt16nested_exception','_ZTSSt16nested_exception','_ZTVNSt3__217bad_function_callE','_ZTINSt3__217bad_function_callE','_ZTSNSt3__217bad_function_callE','_ZTISt9exception','__dso_handle','_ZTVNSt3__212future_errorE','_ZTVNSt3__217__assoc_sub_stateE','_ZTVNSt3__214__shared_countE','_ZTVNSt3__223__future_error_categoryE','_ZTINSt3__223__future_error_categoryE','_ZTINSt3__212future_errorE','_ZTINSt3__217__assoc_sub_stateE','_ZTSNSt3__217__assoc_sub_stateE','_ZTINSt3__214__shared_countE','_ZTSNSt3__223__future_error_categoryE','_ZTINSt3__212__do_messageE','_ZTSNSt3__212future_errorE','_ZTISt11logic_error','_ZTVNSt3__28ios_baseE','_ZTVNSt3__215basic_streambufIcNS_11char_traitsIcEEEE','_ZTVNSt3__215basic_streambufIwNS_11char_traitsIwEEEE','_ZTTNSt3__213basic_istreamIcNS_11char_traitsIcEEEE','_ZNSt3__25ctypeIcE2idE','_ZTTNSt3__213basic_istreamIwNS_11char_traitsIwEEEE','_ZNSt3__25ctypeIwE2idE','_ZTTNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE','_ZNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZTTNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE','_ZNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZTTNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__28ios_base7failureE','_ZNSt3__28ios_base9__xindex_E','_ZNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZTINSt3__215basic_streambufIcNS_11char_traitsIcEEEE','_ZTINSt3__215basic_streambufIwNS_11char_traitsIwEEEE','_ZTVNSt3__213basic_istreamIcNS_11char_traitsIcEEEE','_ZTINSt3__213basic_istreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__213basic_istreamIwNS_11char_traitsIwEEEE','_ZTINSt3__213basic_istreamIwNS_11char_traitsIwEEEE','_ZTVNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE','_ZTINSt3__213basic_ostreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE','_ZTINSt3__213basic_ostreamIwNS_11char_traitsIwEEEE','_ZTVNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE','_ZTINSt3__214basic_iostreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE','_ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE8_NS_13basic_ostreamIcS2_EE','_ZTVNSt3__219__iostream_categoryE','_ZTINSt3__219__iostream_categoryE','_ZTINSt3__28ios_base7failureE','_ZNSt3__28ios_base9boolalphaE','_ZNSt3__28ios_base3decE','_ZNSt3__28ios_base5fixedE','_ZNSt3__28ios_base3hexE','_ZNSt3__28ios_base8internalE','_ZNSt3__28ios_base4leftE','_ZNSt3__28ios_base3octE','_ZNSt3__28ios_base5rightE','_ZNSt3__28ios_base10scientificE','_ZNSt3__28ios_base8showbaseE','_ZNSt3__28ios_base9showpointE','_ZNSt3__28ios_base7showposE','_ZNSt3__28ios_base6skipwsE','_ZNSt3__28ios_base7unitbufE','_ZNSt3__28ios_base9uppercaseE','_ZNSt3__28ios_base11adjustfieldE','_ZNSt3__28ios_base9basefieldE','_ZNSt3__28ios_base10floatfieldE','_ZNSt3__28ios_base6badbitE','_ZNSt3__28ios_base6eofbitE','_ZNSt3__28ios_base7failbitE','_ZNSt3__28ios_base7goodbitE','_ZNSt3__28ios_base3appE','_ZNSt3__28ios_base3ateE','_ZNSt3__28ios_base6binaryE','_ZNSt3__28ios_base2inE','_ZNSt3__28ios_base3outE','_ZNSt3__28ios_base5truncE','_ZTINSt3__28ios_baseE','_ZTSNSt3__28ios_baseE','_ZTVNSt3__29basic_iosIcNS_11char_traitsIcEEEE','_ZTINSt3__29basic_iosIcNS_11char_traitsIcEEEE','_ZTSNSt3__29basic_iosIcNS_11char_traitsIcEEEE','_ZTVNSt3__29basic_iosIwNS_11char_traitsIwEEEE','_ZTINSt3__29basic_iosIwNS_11char_traitsIwEEEE','_ZTSNSt3__29basic_iosIwNS_11char_traitsIwEEEE','_ZTSNSt3__215basic_streambufIcNS_11char_traitsIcEEEE','_ZTSNSt3__215basic_streambufIwNS_11char_traitsIwEEEE','_ZTSNSt3__213basic_istreamIcNS_11char_traitsIcEEEE','_ZTVN10__cxxabiv121__vmi_class_type_infoE','_ZTSNSt3__213basic_istreamIwNS_11char_traitsIwEEEE','_ZTSNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE','_ZTSNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE','_ZTSNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE','_ZTSNSt3__219__iostream_categoryE','_ZTSNSt3__28ios_base7failureE','_ZTINSt3__212system_errorE','_ZNSt3__219__start_std_streamsE','_ZNSt3__23cinE','_ZNSt3__24wcinE','_ZNSt3__24coutE','_ZNSt3__25wcoutE','_ZNSt3__24cerrE','_ZNSt3__24clogE','_ZNSt3__25wcerrE','_ZNSt3__25wclogE','_ZTVNSt3__210__stdinbufIcEE','_ZTVNSt3__210__stdinbufIwEE','_ZTVNSt3__211__stdoutbufIcEE','_ZTVNSt3__211__stdoutbufIwEE','_ZNSt3__27codecvtIcc11__mbstate_tE2idE','_ZNSt3__27codecvtIwc11__mbstate_tE2idE','_ZTINSt3__210__stdinbufIcEE','_ZTSNSt3__210__stdinbufIcEE','_ZTINSt3__210__stdinbufIwEE','_ZTSNSt3__210__stdinbufIwEE','_ZTINSt3__211__stdoutbufIcEE','_ZTSNSt3__211__stdoutbufIcEE','_ZTINSt3__211__stdoutbufIwEE','_ZTSNSt3__211__stdoutbufIwEE','_ZNSt3__28numpunctIcE2idE','_ZNSt3__214__num_get_base5__srcE','_ZNSt3__28numpunctIwE2idE','_ZNSt3__210moneypunctIcLb1EE2idE','_ZNSt3__210moneypunctIcLb0EE2idE','_ZNSt3__210moneypunctIwLb1EE2idE','_ZNSt3__210moneypunctIwLb0EE2idE','_ZTVNSt3__216__narrow_to_utf8ILm32EEE','_ZTVNSt3__217__widen_from_utf8ILm32EEE','_ZTVNSt3__26locale5__impE','_ZTVNSt3__26locale5facetE','_ZNSt3__27collateIcE2idE','_ZNSt3__27collateIwE2idE','_ZNSt3__27codecvtIDsc11__mbstate_tE2idE','_ZNSt3__27codecvtIDic11__mbstate_tE2idE','_ZNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZNSt3__28messagesIcE2idE','_ZNSt3__28messagesIwE2idE','_ZTVNSt3__214codecvt_bynameIcc11__mbstate_tEE','_ZTVNSt3__214codecvt_bynameIwc11__mbstate_tEE','_ZTVNSt3__214codecvt_bynameIDsc11__mbstate_tEE','_ZTVNSt3__214codecvt_bynameIDic11__mbstate_tEE','_ZTVNSt3__217moneypunct_bynameIcLb0EEE','_ZTVNSt3__217moneypunct_bynameIcLb1EEE','_ZTVNSt3__217moneypunct_bynameIwLb0EEE','_ZTVNSt3__217moneypunct_bynameIwLb1EEE','_ZTVNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__215messages_bynameIcEE','_ZTVNSt3__215messages_bynameIwEE','_ZNSt3__26locale2id9__next_idE','_ZTVNSt3__214collate_bynameIcEE','_ZTVNSt3__214collate_bynameIwEE','_ZTVNSt3__25ctypeIcEE','_ZTVNSt3__212ctype_bynameIcEE','_ZTVNSt3__212ctype_bynameIwEE','_ZTVNSt3__27codecvtIwc11__mbstate_tEE','_ZTVNSt3__28numpunctIcEE','_ZTVNSt3__28numpunctIwEE','_ZTVNSt3__215numpunct_bynameIcEE','_ZTVNSt3__215numpunct_bynameIwEE','_ZTVNSt3__215__time_get_tempIcEE','_ZTVNSt3__215__time_get_tempIwEE','_ZTVNSt3__27collateIcEE','_ZTVNSt3__27collateIwEE','_ZTVNSt3__25ctypeIwEE','_ZTVNSt3__27codecvtIcc11__mbstate_tEE','_ZTVNSt3__27codecvtIDsc11__mbstate_tEE','_ZTVNSt3__27codecvtIDic11__mbstate_tEE','_ZTVNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__210moneypunctIcLb0EEE','_ZTVNSt3__210moneypunctIcLb1EEE','_ZTVNSt3__210moneypunctIwLb0EEE','_ZTVNSt3__210moneypunctIwLb1EEE','_ZTVNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__220__time_get_c_storageIcEE','_ZTVNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__220__time_get_c_storageIwEE','_ZTVNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__28messagesIcEE','_ZTVNSt3__28messagesIwEE','_ZNSt3__210moneypunctIcLb0EE4intlE','_ZNSt3__210moneypunctIcLb1EE4intlE','_ZNSt3__210moneypunctIwLb0EE4intlE','_ZNSt3__210moneypunctIwLb1EE4intlE','_ZNSt3__26locale4noneE','_ZNSt3__26locale7collateE','_ZNSt3__26locale5ctypeE','_ZNSt3__26locale8monetaryE','_ZNSt3__26locale7numericE','_ZNSt3__26locale4timeE','_ZNSt3__26locale8messagesE','_ZNSt3__26locale3allE','_ZTINSt3__26locale5__impE','_ZTINSt3__214collate_bynameIcEE','_ZTINSt3__214collate_bynameIwEE','_ZNSt3__210ctype_base5spaceE','_ZNSt3__210ctype_base5printE','_ZNSt3__210ctype_base5cntrlE','_ZNSt3__210ctype_base5upperE','_ZNSt3__210ctype_base5lowerE','_ZNSt3__210ctype_base5alphaE','_ZNSt3__210ctype_base5digitE','_ZNSt3__210ctype_base5punctE','_ZNSt3__210ctype_base6xdigitE','_ZNSt3__210ctype_base5blankE','_ZNSt3__210ctype_base5alnumE','_ZNSt3__210ctype_base5graphE','_ZTINSt3__25ctypeIcEE','_ZTINSt3__212ctype_bynameIcEE','_ZTINSt3__212ctype_bynameIwEE','_ZTINSt3__27codecvtIwc11__mbstate_tEE','_ZTINSt3__28numpunctIcEE','_ZTINSt3__28numpunctIwEE','_ZTINSt3__215numpunct_bynameIcEE','_ZTINSt3__215numpunct_bynameIwEE','_ZTINSt3__26locale5facetE','_ZTSNSt3__26locale5facetE','_ZTINSt3__25ctypeIwEE','_ZTSNSt3__25ctypeIwEE','_ZTSNSt3__210ctype_baseE','_ZTINSt3__210ctype_baseE','_ZTINSt3__27codecvtIcc11__mbstate_tEE','_ZTSNSt3__27codecvtIcc11__mbstate_tEE','_ZTSNSt3__212codecvt_baseE','_ZTINSt3__212codecvt_baseE','_ZTINSt3__27codecvtIDsc11__mbstate_tEE','_ZTSNSt3__27codecvtIDsc11__mbstate_tEE','_ZTINSt3__27codecvtIDic11__mbstate_tEE','_ZTSNSt3__27codecvtIDic11__mbstate_tEE','_ZTVNSt3__216__narrow_to_utf8ILm16EEE','_ZTINSt3__216__narrow_to_utf8ILm16EEE','_ZTSNSt3__216__narrow_to_utf8ILm16EEE','_ZTINSt3__216__narrow_to_utf8ILm32EEE','_ZTSNSt3__216__narrow_to_utf8ILm32EEE','_ZTVNSt3__217__widen_from_utf8ILm16EEE','_ZTINSt3__217__widen_from_utf8ILm16EEE','_ZTSNSt3__217__widen_from_utf8ILm16EEE','_ZTINSt3__217__widen_from_utf8ILm32EEE','_ZTSNSt3__217__widen_from_utf8ILm32EEE','_ZTVNSt3__214__codecvt_utf8IwEE','_ZTINSt3__214__codecvt_utf8IwEE','_ZTSNSt3__214__codecvt_utf8IwEE','_ZTSNSt3__27codecvtIwc11__mbstate_tEE','_ZTVNSt3__214__codecvt_utf8IDsEE','_ZTINSt3__214__codecvt_utf8IDsEE','_ZTSNSt3__214__codecvt_utf8IDsEE','_ZTVNSt3__214__codecvt_utf8IDiEE','_ZTINSt3__214__codecvt_utf8IDiEE','_ZTSNSt3__214__codecvt_utf8IDiEE','_ZTVNSt3__215__codecvt_utf16IwLb0EEE','_ZTINSt3__215__codecvt_utf16IwLb0EEE','_ZTSNSt3__215__codecvt_utf16IwLb0EEE','_ZTVNSt3__215__codecvt_utf16IwLb1EEE','_ZTINSt3__215__codecvt_utf16IwLb1EEE','_ZTSNSt3__215__codecvt_utf16IwLb1EEE','_ZTVNSt3__215__codecvt_utf16IDsLb0EEE','_ZTINSt3__215__codecvt_utf16IDsLb0EEE','_ZTSNSt3__215__codecvt_utf16IDsLb0EEE','_ZTVNSt3__215__codecvt_utf16IDsLb1EEE','_ZTINSt3__215__codecvt_utf16IDsLb1EEE','_ZTSNSt3__215__codecvt_utf16IDsLb1EEE','_ZTVNSt3__215__codecvt_utf16IDiLb0EEE','_ZTINSt3__215__codecvt_utf16IDiLb0EEE','_ZTSNSt3__215__codecvt_utf16IDiLb0EEE','_ZTVNSt3__215__codecvt_utf16IDiLb1EEE','_ZTINSt3__215__codecvt_utf16IDiLb1EEE','_ZTSNSt3__215__codecvt_utf16IDiLb1EEE','_ZTVNSt3__220__codecvt_utf8_utf16IwEE','_ZTINSt3__220__codecvt_utf8_utf16IwEE','_ZTSNSt3__220__codecvt_utf8_utf16IwEE','_ZTVNSt3__220__codecvt_utf8_utf16IDiEE','_ZTINSt3__220__codecvt_utf8_utf16IDiEE','_ZTSNSt3__220__codecvt_utf8_utf16IDiEE','_ZTVNSt3__220__codecvt_utf8_utf16IDsEE','_ZTINSt3__220__codecvt_utf8_utf16IDsEE','_ZTSNSt3__220__codecvt_utf8_utf16IDsEE','_ZTSNSt3__26locale5__impE','_ZTSNSt3__214collate_bynameIcEE','_ZTSNSt3__27collateIcEE','_ZTINSt3__27collateIcEE','_ZTSNSt3__214collate_bynameIwEE','_ZTSNSt3__27collateIwEE','_ZTINSt3__27collateIwEE','_ZTSNSt3__25ctypeIcEE','_ZTSNSt3__212ctype_bynameIcEE','_ZTSNSt3__212ctype_bynameIwEE','_ZTSNSt3__28numpunctIcEE','_ZTSNSt3__28numpunctIwEE','_ZTSNSt3__215numpunct_bynameIcEE','_ZTSNSt3__215numpunct_bynameIwEE','_ZTINSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29__num_getIcEE','_ZTSNSt3__214__num_get_baseE','_ZTINSt3__214__num_get_baseE','_ZTINSt3__29__num_getIcEE','_ZTINSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__29__num_getIwEE','_ZTINSt3__29__num_getIwEE','_ZTINSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29__num_putIcEE','_ZTSNSt3__214__num_put_baseE','_ZTINSt3__214__num_put_baseE','_ZTINSt3__29__num_putIcEE','_ZTINSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__29__num_putIwEE','_ZTINSt3__29__num_putIwEE','_ZTINSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29time_baseE','_ZTINSt3__29time_baseE','_ZTSNSt3__220__time_get_c_storageIcEE','_ZTINSt3__220__time_get_c_storageIcEE','_ZTINSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__220__time_get_c_storageIwEE','_ZTINSt3__220__time_get_c_storageIwEE','_ZTINSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__218__time_get_storageIcEE','_ZTSNSt3__210__time_getE','_ZTINSt3__210__time_getE','_ZTINSt3__218__time_get_storageIcEE','_ZTINSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__218__time_get_storageIwEE','_ZTINSt3__218__time_get_storageIwEE','_ZTINSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__210__time_putE','_ZTINSt3__210__time_putE','_ZTINSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTINSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTINSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTINSt3__210moneypunctIcLb0EEE','_ZTSNSt3__210moneypunctIcLb0EEE','_ZTSNSt3__210money_baseE','_ZTINSt3__210money_baseE','_ZTINSt3__210moneypunctIcLb1EEE','_ZTSNSt3__210moneypunctIcLb1EEE','_ZTINSt3__210moneypunctIwLb0EEE','_ZTSNSt3__210moneypunctIwLb0EEE','_ZTINSt3__210moneypunctIwLb1EEE','_ZTSNSt3__210moneypunctIwLb1EEE','_ZTINSt3__217moneypunct_bynameIcLb0EEE','_ZTSNSt3__217moneypunct_bynameIcLb0EEE','_ZTINSt3__217moneypunct_bynameIcLb1EEE','_ZTSNSt3__217moneypunct_bynameIcLb1EEE','_ZTINSt3__217moneypunct_bynameIwLb0EEE','_ZTSNSt3__217moneypunct_bynameIwLb0EEE','_ZTINSt3__217moneypunct_bynameIwLb1EEE','_ZTSNSt3__217moneypunct_bynameIwLb1EEE','_ZTINSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__211__money_getIcEE','_ZTINSt3__211__money_getIcEE','_ZTINSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__211__money_getIwEE','_ZTINSt3__211__money_getIwEE','_ZTINSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__211__money_putIcEE','_ZTINSt3__211__money_putIcEE','_ZTINSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__211__money_putIwEE','_ZTINSt3__211__money_putIwEE','_ZTINSt3__28messagesIcEE','_ZTSNSt3__28messagesIcEE','_ZTSNSt3__213messages_baseE','_ZTINSt3__213messages_baseE','_ZTINSt3__28messagesIwEE','_ZTSNSt3__28messagesIwEE','_ZTINSt3__215messages_bynameIcEE','_ZTSNSt3__215messages_bynameIcEE','_ZTINSt3__215messages_bynameIwEE','_ZTSNSt3__215messages_bynameIwEE','_ZTINSt3__214codecvt_bynameIcc11__mbstate_tEE','_ZTSNSt3__214codecvt_bynameIcc11__mbstate_tEE','_ZTINSt3__214codecvt_bynameIwc11__mbstate_tEE','_ZTSNSt3__214codecvt_bynameIwc11__mbstate_tEE','_ZTINSt3__214codecvt_bynameIDsc11__mbstate_tEE','_ZTSNSt3__214codecvt_bynameIDsc11__mbstate_tEE','_ZTINSt3__214codecvt_bynameIDic11__mbstate_tEE','_ZTSNSt3__214codecvt_bynameIDic11__mbstate_tEE','_ZTINSt3__215__time_get_tempIcEE','_ZTSNSt3__215__time_get_tempIcEE','_ZTINSt3__215__time_get_tempIwEE','_ZTSNSt3__215__time_get_tempIwEE','_ZNSt3__213allocator_argE','_ZTSNSt3__214__shared_countE','_ZTVNSt3__219__shared_weak_countE','_ZTINSt3__219__shared_weak_countE','_ZTSNSt3__219__shared_weak_countE','_ZTVNSt3__212bad_weak_ptrE','_ZTINSt3__212bad_weak_ptrE','_ZTSNSt3__212bad_weak_ptrE','_ZNSt3__210defer_lockE','_ZNSt3__211try_to_lockE','_ZNSt3__210adopt_lockE','_ZSt7nothrow','_ZTVSt19bad_optional_access','_ZTISt19bad_optional_access','_ZTSSt19bad_optional_access','_ZTVNSt12experimental19bad_optional_accessE','_ZTINSt12experimental19bad_optional_accessE','_ZTSNSt12experimental19bad_optional_accessE','_ZTVNSt3__211regex_errorE','_ZTINSt3__211regex_errorE','_ZTSNSt3__211regex_errorE','_ZTISt13runtime_error','_ZTVSt11logic_error','_ZTVSt9exception','_ZTVSt13runtime_error','_ZNSt3__212basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4nposE','_ZNSt3__212basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE4nposE','_ZTVNSt3__212strstreambufE','_ZTTNSt3__210istrstreamE','_ZTTNSt3__210ostrstreamE','_ZTTNSt3__29strstreamE','_ZTINSt3__212strstreambufE','_ZTVNSt3__210istrstreamE','_ZTINSt3__210istrstreamE','_ZTCNSt3__210istrstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__210ostrstreamE','_ZTINSt3__210ostrstreamE','_ZTCNSt3__210ostrstreamE0_NS_13basic_ostreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__29strstreamE','_ZTINSt3__29strstreamE','_ZTCNSt3__29strstreamE0_NS_14basic_iostreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__29strstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__29strstreamE8_NS_13basic_ostreamIcNS_11char_traitsIcEEEE','_ZTSNSt3__212strstreambufE','_ZTSNSt3__210istrstreamE','_ZTSNSt3__210ostrstreamE','_ZTSNSt3__29strstreamE','_ZTVNSt3__212system_errorE','_ZTVNSt3__224__generic_error_categoryE','_ZTINSt3__224__generic_error_categoryE','_ZTVNSt3__223__system_error_categoryE','_ZTINSt3__223__system_error_categoryE','_ZTVNSt3__214error_categoryE','_ZTINSt3__214error_categoryE','_ZTSNSt3__214error_categoryE','_ZTVNSt3__212__do_messageE','_ZTSNSt3__212__do_messageE','_ZTSNSt3__224__generic_error_categoryE','_ZTSNSt3__223__system_error_categoryE','_ZTSNSt3__212system_errorE','_ZNSt3__219piecewise_constructE','_ZTVSt18bad_variant_access','_ZTISt18bad_variant_access','_ZTSSt18bad_variant_access','_ZTVNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE','_ZTINSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE','_ZTVNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE','_ZTINSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE','_ZTSNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE','_ZTSNSt12experimental15fundamentals_v13pmr15memory_resourceE','_ZTINSt12experimental15fundamentals_v13pmr15memory_resourceE','_ZTSNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE','_ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE','_ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE','_ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE','_ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE','_ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE','_ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE','_ZTVNSt3__24__fs10filesystem16filesystem_errorE','_ZTVNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE','_ZTTNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE','_ZTTNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__213basic_filebufIcNS_11char_traitsIcEEEE','_ZNSt3__24__fs10filesystem16_FilesystemClock9is_steadyE','_ZTINSt3__24__fs10filesystem16filesystem_errorE','_ZNSt3__24__fs10filesystem4path19preferred_separatorE','_ZTSNSt3__24__fs10filesystem16filesystem_errorE','_ZTINSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE','_ZTSNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE','_ZTINSt3__213basic_filebufIcNS_11char_traitsIcEEEE','_ZTSNSt3__213basic_filebufIcNS_11char_traitsIcEEEE','_ZTINSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE0_NS_13basic_ostreamIcS2_EE','_ZTSNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE','__cxa_unexpected_handler','__cxa_terminate_handler','__cxa_new_handler','_ZTVSt9bad_alloc','_ZTVSt20bad_array_new_length','_ZTISt9bad_alloc','_ZTISt20bad_array_new_length','_ZTSSt9exception','_ZTVSt13bad_exception','_ZTISt13bad_exception','_ZTSSt13bad_exception','_ZTSSt9bad_alloc','_ZTSSt20bad_array_new_length','_ZTVSt12domain_error','_ZTISt12domain_error','_ZTSSt12domain_error','_ZTSSt11logic_error','_ZTVSt16invalid_argument','_ZTISt16invalid_argument','_ZTSSt16invalid_argument','_ZTVSt12length_error','_ZTISt12length_error','_ZTSSt12length_error','_ZTVSt12out_of_range','_ZTISt12out_of_range','_ZTSSt12out_of_range','_ZTVSt11range_error','_ZTISt11range_error','_ZTSSt11range_error','_ZTSSt13runtime_error','_ZTVSt14overflow_error','_ZTISt14overflow_error','_ZTSSt14overflow_error','_ZTVSt15underflow_error','_ZTISt15underflow_error','_ZTSSt15underflow_error','_ZTVSt8bad_cast','_ZTVSt10bad_typeid','_ZTISt10bad_typeid','_ZTVSt9type_info','_ZTISt9type_info','_ZTSSt9type_info','_ZTSSt8bad_cast','_ZTSSt10bad_typeid','_ZTIN10__cxxabiv117__class_type_infoE','_ZTIN10__cxxabiv116__shim_type_infoE','_ZTIN10__cxxabiv117__pbase_type_infoE','_ZTIDn','_ZTIN10__cxxabiv119__pointer_type_infoE','_ZTIv','_ZTIN10__cxxabiv120__function_type_infoE','_ZTIN10__cxxabiv129__pointer_to_member_type_infoE','_ZTSN10__cxxabiv116__shim_type_infoE','_ZTSN10__cxxabiv117__class_type_infoE','_ZTSN10__cxxabiv117__pbase_type_infoE','_ZTSN10__cxxabiv119__pointer_type_infoE','_ZTSN10__cxxabiv120__function_type_infoE','_ZTSN10__cxxabiv129__pointer_to_member_type_infoE','_ZTVN10__cxxabiv116__shim_type_infoE','_ZTVN10__cxxabiv123__fundamental_type_infoE','_ZTIN10__cxxabiv123__fundamental_type_infoE','_ZTSN10__cxxabiv123__fundamental_type_infoE','_ZTSv','_ZTSPv','_ZTIPv','_ZTVN10__cxxabiv119__pointer_type_infoE','_ZTSPKv','_ZTIPKv','_ZTSDn','_ZTSPDn','_ZTIPDn','_ZTSPKDn','_ZTIPKDn','_ZTSb','_ZTIb','_ZTSPb','_ZTIPb','_ZTSPKb','_ZTIPKb','_ZTSw','_ZTIw','_ZTSPw','_ZTIPw','_ZTSPKw','_ZTIPKw','_ZTSc','_ZTIc','_ZTSPc','_ZTIPc','_ZTSPKc','_ZTIPKc','_ZTSh','_ZTIh','_ZTSPh','_ZTIPh','_ZTSPKh','_ZTIPKh','_ZTSa','_ZTIa','_ZTSPa','_ZTIPa','_ZTSPKa','_ZTIPKa','_ZTSs','_ZTIs','_ZTSPs','_ZTIPs','_ZTSPKs','_ZTIPKs','_ZTSt','_ZTIt','_ZTSPt','_ZTIPt','_ZTSPKt','_ZTIPKt','_ZTSi','_ZTIi','_ZTSPi','_ZTIPi','_ZTSPKi','_ZTIPKi','_ZTSj','_ZTIj','_ZTSPj','_ZTIPj','_ZTSPKj','_ZTIPKj','_ZTSl','_ZTIl','_ZTSPl','_ZTIPl','_ZTSPKl','_ZTIPKl','_ZTSm','_ZTIm','_ZTSPm','_ZTIPm','_ZTSPKm','_ZTIPKm','_ZTSx','_ZTIx','_ZTSPx','_ZTIPx','_ZTSPKx','_ZTIPKx','_ZTSy','_ZTIy','_ZTSPy','_ZTIPy','_ZTSPKy','_ZTIPKy','_ZTSn','_ZTIn','_ZTSPn','_ZTIPn','_ZTSPKn','_ZTIPKn','_ZTSo','_ZTIo','_ZTSPo','_ZTIPo','_ZTSPKo','_ZTIPKo','_ZTSDh','_ZTIDh','_ZTSPDh','_ZTIPDh','_ZTSPKDh','_ZTIPKDh','_ZTSf','_ZTIf','_ZTSPf','_ZTIPf','_ZTSPKf','_ZTIPKf','_ZTSd','_ZTId','_ZTSPd','_ZTIPd','_ZTSPKd','_ZTIPKd','_ZTSe','_ZTIe','_ZTSPe','_ZTIPe','_ZTSPKe','_ZTIPKe','_ZTSg','_ZTIg','_ZTSPg','_ZTIPg','_ZTSPKg','_ZTIPKg','_ZTSDu','_ZTIDu','_ZTSPDu','_ZTIPDu','_ZTSPKDu','_ZTIPKDu','_ZTSDs','_ZTIDs','_ZTSPDs','_ZTIPDs','_ZTSPKDs','_ZTIPKDs','_ZTSDi','_ZTIDi','_ZTSPDi','_ZTIPDi','_ZTSPKDi','_ZTIPKDi','_ZTVN10__cxxabiv117__array_type_infoE','_ZTIN10__cxxabiv117__array_type_infoE','_ZTSN10__cxxabiv117__array_type_infoE','_ZTVN10__cxxabiv120__function_type_infoE','_ZTVN10__cxxabiv116__enum_type_infoE','_ZTIN10__cxxabiv116__enum_type_infoE','_ZTSN10__cxxabiv116__enum_type_infoE','_ZTIN10__cxxabiv120__si_class_type_infoE','_ZTSN10__cxxabiv120__si_class_type_infoE','_ZTIN10__cxxabiv121__vmi_class_type_infoE','_ZTSN10__cxxabiv121__vmi_class_type_infoE','_ZTVN10__cxxabiv117__pbase_type_infoE','_ZTVN10__cxxabiv129__pointer_to_member_type_infoE','in6addr_any','in6addr_loopback','__data_end']) {
+  (function(name) {
+    Module['g$' + name] = function() { return Module[name]; };
+  })(name);
 }
 
 
 
 
 // === Auto-generated postamble setup entry stuff ===
-
 
 if (!Object.getOwnPropertyDescriptor(Module, "intArrayFromString")) Module["intArrayFromString"] = function() { abort("'intArrayFromString' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "intArrayToString")) Module["intArrayToString"] = function() { abort("'intArrayToString' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -49330,7 +48636,6 @@ if (!Object.getOwnPropertyDescriptor(Module, "cwrap")) Module["cwrap"] = functio
 if (!Object.getOwnPropertyDescriptor(Module, "setValue")) Module["setValue"] = function() { abort("'setValue' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "getValue")) Module["getValue"] = function() { abort("'getValue' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 Module["allocate"] = allocate;
-Module["getMemory"] = getMemory;
 if (!Object.getOwnPropertyDescriptor(Module, "UTF8ArrayToString")) Module["UTF8ArrayToString"] = function() { abort("'UTF8ArrayToString' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "UTF8ToString")) Module["UTF8ToString"] = function() { abort("'UTF8ToString' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "stringToUTF8Array")) Module["stringToUTF8Array"] = function() { abort("'stringToUTF8Array' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -49347,17 +48652,14 @@ if (!Object.getOwnPropertyDescriptor(Module, "writeArrayToMemory")) Module["writ
 if (!Object.getOwnPropertyDescriptor(Module, "writeAsciiToMemory")) Module["writeAsciiToMemory"] = function() { abort("'writeAsciiToMemory' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "addRunDependency")) Module["addRunDependency"] = function() { abort("'addRunDependency' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
 if (!Object.getOwnPropertyDescriptor(Module, "removeRunDependency")) Module["removeRunDependency"] = function() { abort("'removeRunDependency' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
-if (!Object.getOwnPropertyDescriptor(Module, "FS_createFolder")) Module["FS_createFolder"] = function() { abort("'FS_createFolder' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
+if (!Object.getOwnPropertyDescriptor(Module, "FS_createFolder")) Module["FS_createFolder"] = function() { abort("'FS_createFolder' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "FS_createPath")) Module["FS_createPath"] = function() { abort("'FS_createPath' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
 if (!Object.getOwnPropertyDescriptor(Module, "FS_createDataFile")) Module["FS_createDataFile"] = function() { abort("'FS_createDataFile' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
 if (!Object.getOwnPropertyDescriptor(Module, "FS_createPreloadedFile")) Module["FS_createPreloadedFile"] = function() { abort("'FS_createPreloadedFile' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
 if (!Object.getOwnPropertyDescriptor(Module, "FS_createLazyFile")) Module["FS_createLazyFile"] = function() { abort("'FS_createLazyFile' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
-if (!Object.getOwnPropertyDescriptor(Module, "FS_createLink")) Module["FS_createLink"] = function() { abort("'FS_createLink' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
+if (!Object.getOwnPropertyDescriptor(Module, "FS_createLink")) Module["FS_createLink"] = function() { abort("'FS_createLink' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "FS_createDevice")) Module["FS_createDevice"] = function() { abort("'FS_createDevice' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
 if (!Object.getOwnPropertyDescriptor(Module, "FS_unlink")) Module["FS_unlink"] = function() { abort("'FS_unlink' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ). Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you") };
-if (!Object.getOwnPropertyDescriptor(Module, "dynamicAlloc")) Module["dynamicAlloc"] = function() { abort("'dynamicAlloc' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "loadDynamicLibrary")) Module["loadDynamicLibrary"] = function() { abort("'loadDynamicLibrary' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "loadWebAssemblyModule")) Module["loadWebAssemblyModule"] = function() { abort("'loadWebAssemblyModule' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "getLEB")) Module["getLEB"] = function() { abort("'getLEB' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "getFunctionTables")) Module["getFunctionTables"] = function() { abort("'getFunctionTables' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "alignFunctionTables")) Module["alignFunctionTables"] = function() { abort("'alignFunctionTables' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -49379,26 +48681,34 @@ if (!Object.getOwnPropertyDescriptor(Module, "stringToNewUTF8")) Module["stringT
 if (!Object.getOwnPropertyDescriptor(Module, "abortOnCannotGrowMemory")) Module["abortOnCannotGrowMemory"] = function() { abort("'abortOnCannotGrowMemory' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "emscripten_realloc_buffer")) Module["emscripten_realloc_buffer"] = function() { abort("'emscripten_realloc_buffer' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "ENV")) Module["ENV"] = function() { abort("'ENV' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "DLFCN")) Module["DLFCN"] = function() { abort("'DLFCN' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "ERRNO_CODES")) Module["ERRNO_CODES"] = function() { abort("'ERRNO_CODES' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "ERRNO_MESSAGES")) Module["ERRNO_MESSAGES"] = function() { abort("'ERRNO_MESSAGES' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "setErrNo")) Module["setErrNo"] = function() { abort("'setErrNo' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "DNS")) Module["DNS"] = function() { abort("'DNS' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "getHostByName")) Module["getHostByName"] = function() { abort("'getHostByName' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "GAI_ERRNO_MESSAGES")) Module["GAI_ERRNO_MESSAGES"] = function() { abort("'GAI_ERRNO_MESSAGES' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "Protocols")) Module["Protocols"] = function() { abort("'Protocols' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "Sockets")) Module["Sockets"] = function() { abort("'Sockets' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "getRandomDevice")) Module["getRandomDevice"] = function() { abort("'getRandomDevice' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "traverseStack")) Module["traverseStack"] = function() { abort("'traverseStack' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "UNWIND_CACHE")) Module["UNWIND_CACHE"] = function() { abort("'UNWIND_CACHE' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "withBuiltinMalloc")) Module["withBuiltinMalloc"] = function() { abort("'withBuiltinMalloc' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "readAsmConstArgsArray")) Module["readAsmConstArgsArray"] = function() { abort("'readAsmConstArgsArray' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "readAsmConstArgs")) Module["readAsmConstArgs"] = function() { abort("'readAsmConstArgs' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "mainThreadEM_ASM")) Module["mainThreadEM_ASM"] = function() { abort("'mainThreadEM_ASM' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "jstoi_q")) Module["jstoi_q"] = function() { abort("'jstoi_q' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "jstoi_s")) Module["jstoi_s"] = function() { abort("'jstoi_s' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "getExecutableName")) Module["getExecutableName"] = function() { abort("'getExecutableName' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "listenOnce")) Module["listenOnce"] = function() { abort("'listenOnce' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "autoResumeAudioContext")) Module["autoResumeAudioContext"] = function() { abort("'autoResumeAudioContext' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "dynCallLegacy")) Module["dynCallLegacy"] = function() { abort("'dynCallLegacy' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "getDynCaller")) Module["getDynCaller"] = function() { abort("'getDynCaller' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "dynCall")) Module["dynCall"] = function() { abort("'dynCall' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "callRuntimeCallbacks")) Module["callRuntimeCallbacks"] = function() { abort("'callRuntimeCallbacks' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "abortStackOverflow")) Module["abortStackOverflow"] = function() { abort("'abortStackOverflow' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "reallyNegative")) Module["reallyNegative"] = function() { abort("'reallyNegative' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "unSign")) Module["unSign"] = function() { abort("'unSign' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "reSign")) Module["reSign"] = function() { abort("'reSign' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "formatString")) Module["formatString"] = function() { abort("'formatString' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "PATH")) Module["PATH"] = function() { abort("'PATH' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "PATH_FS")) Module["PATH_FS"] = function() { abort("'PATH_FS' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -49426,6 +48736,17 @@ if (!Object.getOwnPropertyDescriptor(Module, "readI53FromI64")) Module["readI53F
 if (!Object.getOwnPropertyDescriptor(Module, "readI53FromU64")) Module["readI53FromU64"] = function() { abort("'readI53FromU64' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "convertI32PairToI53")) Module["convertI32PairToI53"] = function() { abort("'convertI32PairToI53' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "convertU32PairToI53")) Module["convertU32PairToI53"] = function() { abort("'convertU32PairToI53' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "relocateExports")) Module["relocateExports"] = function() { abort("'relocateExports' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "DLFCN")) Module["DLFCN"] = function() { abort("'DLFCN' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "LDSO")) Module["LDSO"] = function() { abort("'LDSO' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "createInvokeFunction")) Module["createInvokeFunction"] = function() { abort("'createInvokeFunction' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "getMemory")) Module["getMemory"] = function() { abort("'getMemory' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "fetchBinary")) Module["fetchBinary"] = function() { abort("'fetchBinary' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "asmjsMangle")) Module["asmjsMangle"] = function() { abort("'asmjsMangle' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "resolveGlobalSymbol")) Module["resolveGlobalSymbol"] = function() { abort("'resolveGlobalSymbol' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "loadSideModule")) Module["loadSideModule"] = function() { abort("'loadSideModule' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "loadDynamicLibrary")) Module["loadDynamicLibrary"] = function() { abort("'loadDynamicLibrary' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "preloadDylibs")) Module["preloadDylibs"] = function() { abort("'preloadDylibs' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionLast")) Module["exceptionLast"] = function() { abort("'exceptionLast' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionCaught")) Module["exceptionCaught"] = function() { abort("'exceptionCaught' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "ExceptionInfoAttrs")) Module["ExceptionInfoAttrs"] = function() { abort("'ExceptionInfoAttrs' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -49434,7 +48755,11 @@ if (!Object.getOwnPropertyDescriptor(Module, "CatchInfo")) Module["CatchInfo"] =
 if (!Object.getOwnPropertyDescriptor(Module, "exception_addRef")) Module["exception_addRef"] = function() { abort("'exception_addRef' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exception_decRef")) Module["exception_decRef"] = function() { abort("'exception_decRef' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "Browser")) Module["Browser"] = function() { abort("'Browser' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "funcWrappers")) Module["funcWrappers"] = function() { abort("'funcWrappers' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "getFuncWrapper")) Module["getFuncWrapper"] = function() { abort("'getFuncWrapper' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "setMainLoop")) Module["setMainLoop"] = function() { abort("'setMainLoop' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "FS")) Module["FS"] = function() { abort("'FS' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "mmapAlloc")) Module["mmapAlloc"] = function() { abort("'mmapAlloc' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "MEMFS")) Module["MEMFS"] = function() { abort("'MEMFS' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "TTY")) Module["TTY"] = function() { abort("'TTY' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "PIPEFS")) Module["PIPEFS"] = function() { abort("'PIPEFS' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -49478,12 +48803,9 @@ if (!Object.getOwnPropertyDescriptor(Module, "lengthBytesUTF32")) Module["length
 if (!Object.getOwnPropertyDescriptor(Module, "allocateUTF8")) Module["allocateUTF8"] = function() { abort("'allocateUTF8' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "allocateUTF8OnStack")) Module["allocateUTF8OnStack"] = function() { abort("'allocateUTF8OnStack' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 Module["writeStackCookie"] = writeStackCookie;
-Module["checkStackCookie"] = checkStackCookie;if (!Object.getOwnPropertyDescriptor(Module, "ALLOC_NORMAL")) Object.defineProperty(Module, "ALLOC_NORMAL", { configurable: true, get: function() { abort("'ALLOC_NORMAL' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") } });
+Module["checkStackCookie"] = checkStackCookie;
+if (!Object.getOwnPropertyDescriptor(Module, "ALLOC_NORMAL")) Object.defineProperty(Module, "ALLOC_NORMAL", { configurable: true, get: function() { abort("'ALLOC_NORMAL' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") } });
 if (!Object.getOwnPropertyDescriptor(Module, "ALLOC_STACK")) Object.defineProperty(Module, "ALLOC_STACK", { configurable: true, get: function() { abort("'ALLOC_STACK' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") } });
-if (!Object.getOwnPropertyDescriptor(Module, "ALLOC_DYNAMIC")) Object.defineProperty(Module, "ALLOC_DYNAMIC", { configurable: true, get: function() { abort("'ALLOC_DYNAMIC' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") } });
-if (!Object.getOwnPropertyDescriptor(Module, "ALLOC_NONE")) Object.defineProperty(Module, "ALLOC_NONE", { configurable: true, get: function() { abort("'ALLOC_NONE' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") } });
-
-
 
 var calledRun;
 
@@ -49498,7 +48820,6 @@ function ExitStatus(status) {
 }
 
 var calledMain = false;
-
 
 dependenciesFulfilled = function runCaller() {
   // If run has never been called, and we should call run (INVOKE_RUN is true, and Module.noInitialRun is not false)
@@ -49528,10 +48849,7 @@ function callMain(args) {
 
   try {
 
-    Module['___set_stack_limit'](STACK_MAX);
-
     var ret = entryFunction(argc, argv);
-
 
     // In PROXY_TO_PTHREAD builds, we should never exit the runtime below, as execution is asynchronously handed
     // off to a pthread.
@@ -49557,11 +48875,9 @@ function callMain(args) {
     }
   } finally {
     calledMain = true;
+
   }
 }
-
-
-
 
 /** @type {function(Array=)} */
 function run(args) {
@@ -49673,12 +48989,13 @@ function exit(status, implicit) {
     }
   } else {
 
-    ABORT = true;
     EXITSTATUS = status;
 
     exitRuntime();
 
     if (Module['onExit']) Module['onExit'](status);
+
+    ABORT = true;
   }
 
   quit_(status, new ExitStatus(status));
@@ -49696,17 +49013,11 @@ var shouldRunNow = true;
 
 if (Module['noInitialRun']) shouldRunNow = false;
 
-
   noExitRuntime = true;
 
 run();
 
 
-
-
-
-
-// {{MODULE_ADDITIONS}}
 
 
 

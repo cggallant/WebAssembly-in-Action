@@ -12,6 +12,11 @@
   ...
   ```
 
+  - The Emscripten command line has been adjusted:
+    - It no longer includes the _-s SIDE\_MODULE=2_ flag.
+    - The _--no-entry_ flag was included because there's no _main_ function defined. Including this flag prevents a compilation error.
+
+
 ### The _D.3.2_ folder
   
   No changes were needed for this folder.
@@ -63,7 +68,7 @@
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.0_.
+To compile the code in the _updated-code_ folder requires _Emscripten 2.0.8_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 

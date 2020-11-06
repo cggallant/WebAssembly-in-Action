@@ -1,1 +1,1 @@
-emcc em_asm_int.c -s EXTRA_EXPORTED_RUNTIME_METHODS=['lengthBytesUTF8','stringToUTF8'] -o em_asm_int.html
+emcc em_asm_int.c -s EXTRA_EXPORTED_RUNTIME_METHODS=['lengthBytesUTF8','stringToUTF8'] -s EXPORTED_FUNCTIONS=['_main','_malloc','_free'] -o em_asm_int.html

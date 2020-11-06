@@ -1,6 +1,7 @@
 ### The _4.1 js\_plumbing_ folder
 
-No changes were needed for this folder.
+- The Emscripten command line has been adjusted:
+  - As of Emscripten 2.0.4, _malloc_ and _free_ are no longer exported by default. They now need to be included via the _EXPORTED\_FUNCTIONS command line array if needed.
 
 <p>&nbsp;</p>
 
@@ -28,8 +29,7 @@ The changes I've made for this section's code are:
   - It no longer includes the _side\_module\_system\_functions.cpp_ file or the _-s STANDALONE\_WASM=1_ flag.
   - You could include the _-s STANDALONE\_WASM=1_ flag but it's inferred by specifying the _.wasm_ extension for the output file.
   - The _--no-entry_ flag was included because there's no _main_ function defined. Including this flag prevents a compilation error.
-
-
+  
 - A few changes were made to the _editproduct.js_ file:
   - In the _initializePage_ function:
     - The _moduleMemory = new WebAssembly.Memory({initial: 256});_ line of code has been deleted
@@ -44,7 +44,7 @@ The changes I've made for this section's code are:
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.0_.
+To compile the code in the _updated-code_ folder requires _Emscripten 2.0.8_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 
