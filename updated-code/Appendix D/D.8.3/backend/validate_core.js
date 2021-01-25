@@ -42,6 +42,24 @@ Module['ready'] = new Promise(function(resolve, reject) {
       }
     
 
+      if (!Object.getOwnPropertyDescriptor(Module['ready'], '_emscripten_stack_get_end')) {
+        Object.defineProperty(Module['ready'], '_emscripten_stack_get_end', { configurable: true, get: function() { abort('You are getting _emscripten_stack_get_end on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+        Object.defineProperty(Module['ready'], '_emscripten_stack_get_end', { configurable: true, set: function() { abort('You are setting _emscripten_stack_get_end on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+      }
+    
+
+      if (!Object.getOwnPropertyDescriptor(Module['ready'], '_emscripten_stack_get_free')) {
+        Object.defineProperty(Module['ready'], '_emscripten_stack_get_free', { configurable: true, get: function() { abort('You are getting _emscripten_stack_get_free on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+        Object.defineProperty(Module['ready'], '_emscripten_stack_get_free', { configurable: true, set: function() { abort('You are setting _emscripten_stack_get_free on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+      }
+    
+
+      if (!Object.getOwnPropertyDescriptor(Module['ready'], '_emscripten_stack_set_limits')) {
+        Object.defineProperty(Module['ready'], '_emscripten_stack_set_limits', { configurable: true, get: function() { abort('You are getting _emscripten_stack_set_limits on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+        Object.defineProperty(Module['ready'], '_emscripten_stack_set_limits', { configurable: true, set: function() { abort('You are setting _emscripten_stack_set_limits on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+      }
+    
+
       if (!Object.getOwnPropertyDescriptor(Module['ready'], '_stackSave')) {
         Object.defineProperty(Module['ready'], '_stackSave', { configurable: true, get: function() { abort('You are getting _stackSave on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
         Object.defineProperty(Module['ready'], '_stackSave', { configurable: true, set: function() { abort('You are setting _stackSave on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
@@ -57,12 +75,6 @@ Module['ready'] = new Promise(function(resolve, reject) {
       if (!Object.getOwnPropertyDescriptor(Module['ready'], '_stackAlloc')) {
         Object.defineProperty(Module['ready'], '_stackAlloc', { configurable: true, get: function() { abort('You are getting _stackAlloc on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
         Object.defineProperty(Module['ready'], '_stackAlloc', { configurable: true, set: function() { abort('You are setting _stackAlloc on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
-      }
-    
-
-      if (!Object.getOwnPropertyDescriptor(Module['ready'], '___data_end')) {
-        Object.defineProperty(Module['ready'], '___data_end', { configurable: true, get: function() { abort('You are getting ___data_end on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
-        Object.defineProperty(Module['ready'], '___data_end', { configurable: true, set: function() { abort('You are setting ___data_end on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
       }
     
 
@@ -670,7 +682,7 @@ var ABORT = false;
 // set by exit() and abort().  Passed to 'onExit' handler.
 // NOTE: This is also used as the process return code code in shell environments
 // but only when noExitRuntime is false.
-var EXITSTATUS = 0;
+var EXITSTATUS;
 
 /** @type {function(*, string=)} */
 function assert(condition, text) {
@@ -981,16 +993,18 @@ function UTF16ToString(ptr, maxBytesToRead) {
   if (endPtr - ptr > 32 && UTF16Decoder) {
     return UTF16Decoder.decode(HEAPU8.subarray(ptr, endPtr));
   } else {
-    var i = 0;
-
     var str = '';
-    while (1) {
+
+    // If maxBytesToRead is not passed explicitly, it will be undefined, and the for-loop's condition
+    // will always evaluate to true. The loop is then terminated on the first null char.
+    for (var i = 0; !(i >= maxBytesToRead / 2); ++i) {
       var codeUnit = HEAP16[(((ptr)+(i*2))>>1)];
-      if (codeUnit == 0 || i == maxBytesToRead / 2) return str;
-      ++i;
+      if (codeUnit == 0) break;
       // fromCharCode constructs a character from a UTF-16 code unit, so we can pass the UTF16 string right through.
       str += String.fromCharCode(codeUnit);
     }
+
+    return str;
   }
 }
 
@@ -1165,9 +1179,6 @@ function writeAsciiToMemory(str, buffer, dontAddNull) {
 // end include: runtime_strings_extra.js
 // Memory management
 
-var PAGE_SIZE = 16384;
-var WASM_PAGE_SIZE = 65536;
-
 function alignUp(x, multiple) {
   if (x % multiple > 0) {
     x += multiple - (x % multiple);
@@ -1207,13 +1218,7 @@ function updateGlobalBufferAndViews(buf) {
   Module['HEAPF64'] = HEAPF64 = new Float64Array(buf);
 }
 
-var STACK_BASE = 5244432,
-    STACKTOP = STACK_BASE,
-    STACK_MAX = 1552;
-
-assert(STACK_BASE % 16 === 0, 'stack must start aligned');
-
-var __stack_pointer = new WebAssembly.Global({value: 'i32', mutable: true}, STACK_BASE);
+var __stack_pointer = new WebAssembly.Global({value: 'i32', mutable: true}, 5244432);
 
 // To support such allocations during startup, track them on __heap_base and
 // then when the main module is loaded it reads that value and uses it to
@@ -1225,9 +1230,9 @@ Module['___heap_base'] = 5244432;
 var TOTAL_STACK = 5242880;
 if (Module['TOTAL_STACK']) assert(TOTAL_STACK === Module['TOTAL_STACK'], 'the stack size can no longer be determined at runtime')
 
-var INITIAL_INITIAL_MEMORY = Module['INITIAL_MEMORY'] || 16777216;if (!Object.getOwnPropertyDescriptor(Module, 'INITIAL_MEMORY')) Object.defineProperty(Module, 'INITIAL_MEMORY', { configurable: true, get: function() { abort('Module.INITIAL_MEMORY has been replaced with plain INITIAL_INITIAL_MEMORY (the initial value can be provided on Module, but after startup the value is only looked for on a local variable of that name)') } });
+var INITIAL_MEMORY = Module['INITIAL_MEMORY'] || 16777216;if (!Object.getOwnPropertyDescriptor(Module, 'INITIAL_MEMORY')) Object.defineProperty(Module, 'INITIAL_MEMORY', { configurable: true, get: function() { abort('Module.INITIAL_MEMORY has been replaced with plain INITIAL_MEMORY (the initial value can be provided on Module, but after startup the value is only looked for on a local variable of that name)') } });
 
-assert(INITIAL_INITIAL_MEMORY >= TOTAL_STACK, 'INITIAL_MEMORY should be larger than TOTAL_STACK, was ' + INITIAL_INITIAL_MEMORY + '! (TOTAL_STACK=' + TOTAL_STACK + ')');
+assert(INITIAL_MEMORY >= TOTAL_STACK, 'INITIAL_MEMORY should be larger than TOTAL_STACK, was ' + INITIAL_MEMORY + '! (TOTAL_STACK=' + TOTAL_STACK + ')');
 
 // check for full engine support (use string 'subarray' to avoid closure compiler confusion)
 assert(typeof Int32Array !== 'undefined' && typeof Float64Array !== 'undefined' && Int32Array.prototype.subarray !== undefined && Int32Array.prototype.set !== undefined,
@@ -1237,17 +1242,16 @@ assert(typeof Int32Array !== 'undefined' && typeof Float64Array !== 'undefined' 
 // include: runtime_init_memory.js
 
 
-// Create the main memory. (Note: this isn't used in STANDALONE_WASM mode since the wasm
-// memory is created in the wasm, not in JS.)
+// Create the wasm memory. (Note: this only applies if IMPORTED_MEMORY is defined)
 
   if (Module['wasmMemory']) {
     wasmMemory = Module['wasmMemory'];
   } else
   {
     wasmMemory = new WebAssembly.Memory({
-      'initial': INITIAL_INITIAL_MEMORY / WASM_PAGE_SIZE
+      'initial': INITIAL_MEMORY / 65536
       ,
-      'maximum': INITIAL_INITIAL_MEMORY / WASM_PAGE_SIZE
+      'maximum': INITIAL_MEMORY / 65536
     });
   }
 
@@ -1257,8 +1261,8 @@ if (wasmMemory) {
 
 // If the user provides an incorrect length, just use that length instead rather than providing the user to
 // specifically provide the memory length with Module['INITIAL_MEMORY'].
-INITIAL_INITIAL_MEMORY = buffer.byteLength;
-assert(INITIAL_INITIAL_MEMORY % WASM_PAGE_SIZE === 0);
+INITIAL_MEMORY = buffer.byteLength;
+assert(INITIAL_MEMORY % 65536 === 0);
 updateGlobalBufferAndViews(buffer);
 
 // end include: runtime_init_memory.js
@@ -1276,18 +1280,20 @@ var wasmTable = new WebAssembly.Table({
 
 // Initializes the stack cookie. Called at the startup of main and at the startup of each thread in pthreads mode.
 function writeStackCookie() {
-  assert((STACK_MAX & 3) == 0);
+  var max = _emscripten_stack_get_end();
+  assert((max & 3) == 0);
   // The stack grows downwards
-  HEAPU32[(STACK_MAX >> 2)+1] = 0x2135467;
-  HEAPU32[(STACK_MAX >> 2)+2] = 0x89BACDFE;
+  HEAPU32[(max >> 2)+1] = 0x2135467;
+  HEAPU32[(max >> 2)+2] = 0x89BACDFE;
   // Also test the global address 0 for integrity.
   HEAP32[0] = 0x63736d65; /* 'emsc' */
 }
 
 function checkStackCookie() {
   if (ABORT) return;
-  var cookie1 = HEAPU32[(STACK_MAX >> 2)+1];
-  var cookie2 = HEAPU32[(STACK_MAX >> 2)+2];
+  var max = _emscripten_stack_get_end();
+  var cookie1 = HEAPU32[(max >> 2)+1];
+  var cookie2 = HEAPU32[(max >> 2)+2];
   if (cookie1 != 0x2135467 || cookie2 != 0x89BACDFE) {
     abort('Stack overflow! Stack cookie has been overwritten, expected hex dwords 0x89BACDFE and 0x2135467, but received 0x' + cookie2.toString(16) + ' ' + cookie1.toString(16));
   }
@@ -1587,14 +1593,13 @@ if (!isDataURI(wasmBinaryFile)) {
   wasmBinaryFile = locateFile(wasmBinaryFile);
 }
 
-function getBinary() {
+function getBinary(file) {
   try {
-    if (wasmBinary) {
+    if (file == wasmBinaryFile && wasmBinary) {
       return new Uint8Array(wasmBinary);
     }
-
     if (readBinary) {
-      return readBinary(wasmBinaryFile);
+      return readBinary(file);
     } else {
       throw "both async and sync fetching of the wasm failed";
     }
@@ -1617,11 +1622,11 @@ function getBinaryPromise() {
       }
       return response['arrayBuffer']();
     }).catch(function () {
-      return getBinary();
+      return getBinary(wasmBinaryFile);
     });
   }
   // Otherwise, getBinary should be able to get it synchronously
-  return Promise.resolve().then(getBinary);
+  return Promise.resolve().then(function() { return getBinary(wasmBinaryFile); });
 }
 
 // Create the wasm instance.
@@ -1630,7 +1635,9 @@ function createWasm() {
   // prepare imports
   var info = {
     'env': asmLibraryArg,
-    'wasi_snapshot_preview1': asmLibraryArg
+    'wasi_snapshot_preview1': asmLibraryArg,
+    'GOT.mem': new Proxy(asmLibraryArg, GOTHandler),
+    'GOT.func': new Proxy(asmLibraryArg, GOTHandler),
   };
   // Load the wasm module and create an instance of using native support in the JS engine.
   // handle a generated wasm instance, receiving its exports and
@@ -1694,6 +1701,7 @@ function createWasm() {
       return instantiateArrayBuffer(receiveInstantiatedSource);
     }
   }
+
   // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
   // to manually instantiate the Wasm module themselves. This allows pages to run the instantiation parallel
   // to any other async startup actions they are performing.
@@ -1727,8 +1735,16 @@ var ASM_CONSTS = {
 
 
 
+  var GOT={};
+  var GOTHandler={get:function(obj, symName) {
+        if (!GOT[symName]) {
+          GOT[symName] = new WebAssembly.Global({value: 'i32', mutable: true});
+        }
+        return GOT[symName]
+      }};
+
   function abortStackOverflow(allocSize) {
-      abort('Stack overflow! Attempted to allocate ' + allocSize + ' bytes on the stack, but stack has only ' + (STACK_MAX - stackSave() + allocSize) + ' bytes available!');
+      abort('Stack overflow! Attempted to allocate ' + allocSize + ' bytes on the stack, but stack has only ' + (_emscripten_stack_get_free() + allocSize) + ' bytes available!');
     }
 
   function callRuntimeCallbacks(callbacks) {
@@ -1764,30 +1780,6 @@ var ASM_CONSTS = {
           var y = demangle(x);
           return x === y ? x : (y + ' [' + x + ']');
         });
-    }
-
-  function dynCallLegacy(sig, ptr, args) {
-      assert(('dynCall_' + sig) in Module, 'bad function pointer type - no table for sig \'' + sig + '\'');
-      if (args && args.length) {
-        // j (64-bit integer) must be passed in as two numbers [low 32, high 32].
-        assert(args.length === sig.substring(1).replace(/j/g, '--').length);
-      } else {
-        assert(sig.length == 1);
-      }
-      if (args && args.length) {
-        return Module['dynCall_' + sig].apply(null, [ptr].concat(args));
-      }
-      return Module['dynCall_' + sig].call(null, ptr);
-    }
-  function dynCall(sig, ptr, args) {
-      // Without WASM_BIGINT support we cannot directly call function with i64 as
-      // part of thier signature, so we rely the dynCall functions generated by
-      // wasm-emscripten-finalize
-      if (sig.indexOf('j') != -1) {
-        return dynCallLegacy(sig, ptr, args);
-      }
-      assert(wasmTable.get(ptr), 'missing table entry in dynCall: ' + ptr);
-      return wasmTable.get(ptr).apply(null, args)
     }
 
   function jsStackTrace() {
@@ -1830,9 +1822,37 @@ var ASM_CONSTS = {
       var end = (ret + size + 15) & -16;
       assert(end <= HEAP8.length, 'failure to getMemory - memory growth etc. is not supported there, call malloc/sbrk directly or increase INITIAL_MEMORY');
       Module['___heap_base'] = end;
+      GOT['__heap_base'].value = end;
       return ret;
     }
   
+  function updateGOT(exports) {
+      for (var symName in exports) {
+        if (symName == '__cpp_exception' || symName == '__dso_handle' || symName == '__wasm_apply_relocs') {
+          continue;
+        }
+  
+        var replace = false;
+        var value = exports[symName];
+        if (symName.indexOf('orig$') == 0) {
+          symName = symName.split('$')[1];
+          replace = true;
+        }
+  
+        if (!GOT[symName]) {
+          GOT[symName] = new WebAssembly.Global({value: 'i32', mutable: true});
+        }
+        if (replace || GOT[symName].value == 0) {
+          if (typeof value === 'function') {
+            GOT[symName].value = addFunctionWasm(value);
+          } else if (typeof value === 'number') {
+            GOT[symName].value = value;
+          } else {
+            err("unhandled export type for `" + symName + "`: " + (typeof value));
+          }
+        }
+      }
+    }
   function relocateExports(exports, memoryBase) {
       var relocated = {};
   
@@ -1848,6 +1868,7 @@ var ASM_CONSTS = {
         }
         relocated[e] = value;
       }
+      updateGOT(relocated);
       return relocated;
     }
   
@@ -1855,35 +1876,35 @@ var ASM_CONSTS = {
       var unmangledSymbols = ['setTempRet0','getTempRet0','stackAlloc','stackSave','stackRestore'];
       return x.indexOf('dynCall_') == 0 || unmangledSymbols.indexOf(x) != -1 ? x : '_' + x;
     }
-  
-  function resolveGlobalSymbol(sym, legalized) {
-      // In case the function was legalized, look for the original export first.
-      // We always want to return the original wasm function here since this
-      // function is used in the internal linking only.
-      if (!legalized) {
-        var orig = Module['asm']['orig$' + sym];
-        if (orig) {
-          return orig;
-        }
+  function resolveGlobalSymbol(symName, direct) {
+      var sym;
+      if (direct) {
+        // First look for the orig$ symbol which is the symbols without
+        // any legalization performed.   Here we look on the 'asm' object
+        // to avoid any JS wrapping of the symbol.
+        sym = Module['asm']['orig$' + symName];
+      }
+      // Then look for the unmangled name itself.
+      if (!sym) {
+        sym = Module['asm'][symName];
+      }
+      // fall back to the mangled name on the module object which could include
+      // JavaScript functions and wrapped native functions.
+      if (!sym && direct) {
+        sym = Module['_orig$' + symName];
       }
   
-      var resolved = Module['asm'][sym];
-      if (!resolved) {
-        if (!legalized) {
-          orig = Module['_orig$' + sym];
-          if (orig) {
-            return orig;
-          }
-       }
-        resolved = Module[asmjsMangle(sym)];
+      if (!sym) {
+        sym = Module[asmjsMangle(symName)];
       }
   
-      if (!resolved && sym.startsWith('invoke_')) {
-        resolved = createInvokeFunction(sym.split('_')[1]);
+      if (!sym && symName.indexOf('invoke_') == 0) {
+        sym = createInvokeFunction(symName.split('_')[1]);
       }
-      return resolved;
+  
+      return sym;
     }
-  function loadSideModule(binary, flags) {
+  function loadWebAssemblyModule(binary, flags) {
       var int32View = new Uint32Array(new Uint8Array(binary.subarray(0, 24)).buffer);
       assert(int32View[0] == 0x6d736100, 'need to see wasm magic number'); // \0asm
       // we should see the dylink section right after the magic number and wasm version
@@ -1966,16 +1987,12 @@ var ASM_CONSTS = {
         // b) Symbols from side modules are not always added to the global namespace.
         var moduleExports;
   
-        function resolveSymbol(sym, type, legalized) {
-          var resolved = resolveGlobalSymbol(sym, legalized);
-          if (!resolved && !legalized) {
-            // In case the function was legalized, look for the original export first.
-            resolved = moduleExports['orig$' + sym];
-          }
+        function resolveSymbol(sym) {
+          var resolved = resolveGlobalSymbol(sym, false);
           if (!resolved) {
             resolved = moduleExports[sym];
           }
-          assert(resolved, 'missing linked ' + type + ' `' + sym + '`. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment');
+          assert(resolved, 'undefined symbol `' + sym + '`. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment');
           return resolved;
         }
   
@@ -2006,66 +2023,37 @@ var ASM_CONSTS = {
               case '__table_base':
                 return tableBase;
             }
-  
             if (prop in obj) {
               return obj[prop]; // already present
             }
-            if (prop.startsWith('g$')) {
-              // a global. the g$ function returns the global address.
-              var name = prop.substr(2); // without g$ prefix
-              return obj[prop] = function() {
-                return resolveSymbol(name, 'global');
-              };
-            }
-            if (prop.startsWith('fp$')) {
-              // the fp$ function returns the address (table index) of the function
-              var parts = prop.split('$');
-              assert(parts.length == 3)
-              var name = parts[1];
-              var sig = parts[2];
-              var fp = 0;
-              return obj[prop] = function() {
-                if (!fp) {
-                  var f = resolveSymbol(name, 'function');
-                  fp = addFunction(f, sig);
-                }
-                return fp;
-              };
-            }
             // otherwise this is regular function import - call it indirectly
+            var resolved;
             return obj[prop] = function() {
-              return resolveSymbol(prop, 'function', true).apply(null, arguments);
+              if (!resolved) resolved = resolveSymbol(prop, true);
+              return resolved.apply(null, arguments);
             };
           }
         };
         var proxy = new Proxy(env, proxyHandler);
         var info = {
-          global: {
-            'NaN': NaN,
-            'Infinity': Infinity,
-          },
-          'global.Math': Math,
-          env: proxy,
+          'GOT.mem': new Proxy(asmLibraryArg, GOTHandler),
+          'GOT.func': new Proxy(asmLibraryArg, GOTHandler),
+          'env': proxy,
           wasi_snapshot_preview1: proxy,
         };
-        var oldTable = [];
-        for (var i = 0; i < tableBase; i++) {
-          oldTable.push(table.get(i));
-        }
   
         function postInstantiation(instance) {
           // the table should be unchanged
           assert(table === originalTable);
           assert(table === wasmTable);
-          // the old part of the table should be unchanged
-          for (var i = 0; i < tableBase; i++) {
-            assert(table.get(i) === oldTable[i], 'old table entries must remain the same');
-          }
           // verify that the new table region was filled in
           for (var i = 0; i < tableSize; i++) {
             assert(table.get(tableBase + i) !== undefined, 'table entry was not filled in');
           }
           moduleExports = relocateExports(instance.exports, memoryBase);
+          if (!flags.allowUndefined) {
+            reportUndefinedSymbols();
+          }
           // initialize the module
           var init = moduleExports['__post_instantiate'];
           if (init) {
@@ -2168,7 +2156,7 @@ var ASM_CONSTS = {
         if (flags.fs) {
           var libData = flags.fs.readFile(libFile, {encoding: 'binary'});
           if (!(libData instanceof Uint8Array)) {
-            libData = new Uint8Array(lib_data);
+            libData = new Uint8Array(libData);
           }
           return flags.loadAsync ? Promise.resolve(libData) : libData;
         }
@@ -2192,11 +2180,11 @@ var ASM_CONSTS = {
         // module not preloaded - load lib data and create new module from it
         if (flags.loadAsync) {
           return loadLibData(lib).then(function(libData) {
-            return loadSideModule(libData, flags);
+            return loadWebAssemblyModule(libData, flags);
           });
         }
   
-        return loadSideModule(loadLibData(lib), flags);
+        return loadWebAssemblyModule(loadLibData(lib), flags);
       }
   
       // Module.symbols <- libModule.symbols (flags.global handler)
@@ -2210,7 +2198,8 @@ var ASM_CONSTS = {
           // When RTLD_GLOBAL is enable, the symbols defined by this shared object will be made
           // available for symbol resolution of subsequently loaded shared objects.
           //
-          // We should copy the symbols (which include methods and variables) from SIDE_MODULE to MAIN_MODULE.
+          // We should copy the symbols (which include methods and variables) from
+          // SIDE_MODULE to MAIN_MODULE.
   
           var module_sym = asmjsMangle(sym);
   
@@ -2238,31 +2227,53 @@ var ASM_CONSTS = {
       moduleLoaded(getLibModule());
       return handle;
     }
+  
+  function reportUndefinedSymbols() {
+      for (var symName in GOT) {
+        if (GOT[symName].value == 0) {
+          var value = resolveGlobalSymbol(symName, true)
+          assert(value, 'undefined symbol `' + symName + '`. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment');
+          if (typeof value === 'function') {
+            GOT[symName].value = addFunctionWasm(value, value.sig);
+          } else if (typeof value === 'number') {
+            GOT[symName].value = value;
+          } else {
+            assert(false, 'bad export type for `' + symName + '`: ' + (typeof value));
+          }
+        }
+      }
+    }
   function preloadDylibs() {
       var libs = [];
       if (Module['dynamicLibraries']) {
         libs = libs.concat(Module['dynamicLibraries'])
       }
       if (!libs.length) {
+        reportUndefinedSymbols();
         return;
       }
+  
       // if we can load dynamic libraries synchronously, do so, otherwise, preload
       if (!readBinary) {
         // we can't read binary data synchronously, so preload
         addRunDependency('preloadDylibs');
         Promise.all(libs.map(function(lib) {
-          return loadDynamicLibrary(lib, {loadAsync: true, global: true, nodelete: true});
+          return loadDynamicLibrary(lib, {loadAsync: true, global: true, nodelete: true, allowUndefined: true});
         })).then(function() {
           // we got them all, wonderful
           removeRunDependency('preloadDylibs');
+          reportUndefinedSymbols();
         });
         return;
       }
+  
       libs.forEach(function(lib) {
         // libraries linked to main never go away
-        loadDynamicLibrary(lib, {global: true, nodelete: true});
+        loadDynamicLibrary(lib, {global: true, nodelete: true, allowUndefined: true});
       });
+      reportUndefinedSymbols();
     }
+
 
 
   function stackTrace() {
@@ -2287,28 +2298,28 @@ var ASM_CONSTS = {
       abortOnCannotGrowMemory(requestedSize);
     }
 
-  function _g$__heap_base(
-  ) {
-  if (!Module['___heap_base']) abort("external global '__heap_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
-  return Module['___heap_base'];
-  }
-
   function ___stack_pointer(
   ) {
-  if (!Module['___stack_pointer']) abort("external function '__stack_pointer' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['___stack_pointer']) abort("external symbol '__stack_pointer' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['___stack_pointer'].apply(null, arguments);
   }
 
   function ___memory_base(
   ) {
-  if (!Module['___memory_base']) abort("external function '__memory_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['___memory_base']) abort("external symbol '__memory_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['___memory_base'].apply(null, arguments);
   }
 
   function ___table_base(
   ) {
-  if (!Module['___table_base']) abort("external function '__table_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['___table_base']) abort("external symbol '__table_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['___table_base'].apply(null, arguments);
+  }
+
+  function ___heap_base(
+  ) {
+  if (!Module['___heap_base']) abort("external symbol '__heap_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  return Module['___heap_base'].apply(null, arguments);
   }
 var ASSERTIONS = true;
 
@@ -2340,7 +2351,7 @@ function intArrayToString(array) {
 
 
 
-__ATINIT__.push({ func: function() { ___assign_got_enties() } }, { func: function() { ___wasm_call_ctors() } });
+__ATINIT__.push({ func: function() { ___wasm_call_ctors() } });
 var asmLibraryArg = {
   "UpdateHostAboutError": _UpdateHostAboutError,
   "__indirect_function_table": wasmTable,
@@ -2348,7 +2359,6 @@ var asmLibraryArg = {
   "__stack_pointer": __stack_pointer,
   "__table_base": 1,
   "emscripten_resize_heap": _emscripten_resize_heap,
-  "g$__heap_base": _g$__heap_base,
   "memory": wasmMemory
 };
 var asm = createWasm();
@@ -2380,6 +2390,21 @@ var stackRestore = Module["stackRestore"] = createExportWrapper("stackRestore");
 var stackAlloc = Module["stackAlloc"] = createExportWrapper("stackAlloc");
 
 /** @type {function(...*):?} */
+var _emscripten_stack_set_limits = Module["_emscripten_stack_set_limits"] = function() {
+  return (_emscripten_stack_set_limits = Module["_emscripten_stack_set_limits"] = Module["asm"]["emscripten_stack_set_limits"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_stack_get_free = Module["_emscripten_stack_get_free"] = function() {
+  return (_emscripten_stack_get_free = Module["_emscripten_stack_get_free"] = Module["asm"]["emscripten_stack_get_free"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_stack_get_end = Module["_emscripten_stack_get_end"] = function() {
+  return (_emscripten_stack_get_end = Module["_emscripten_stack_get_end"] = Module["asm"]["emscripten_stack_get_end"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
 var _malloc = Module["_malloc"] = createExportWrapper("malloc");
 
 /** @type {function(...*):?} */
@@ -2388,17 +2413,8 @@ var _free = Module["_free"] = createExportWrapper("free");
 /** @type {function(...*):?} */
 var _strlen = Module["_strlen"] = createExportWrapper("strlen");
 
-/** @type {function(...*):?} */
-var ___assign_got_enties = Module["___assign_got_enties"] = createExportWrapper("__assign_got_enties");
-
 var ___stdout_used = Module['___stdout_used'] = 1036;
 var ___data_end = Module['___data_end'] = 1544;
-for (var name in ['__stdout_used','__data_end']) {
-  (function(name) {
-    Module['g$' + name] = function() { return Module[name]; };
-  })(name);
-}
-
 
 
 
@@ -2453,6 +2469,7 @@ if (!Object.getOwnPropertyDescriptor(Module, "setTempRet0")) Module["setTempRet0
 if (!Object.getOwnPropertyDescriptor(Module, "callMain")) Module["callMain"] = function() { abort("'callMain' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "abort")) Module["abort"] = function() { abort("'abort' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "stringToNewUTF8")) Module["stringToNewUTF8"] = function() { abort("'stringToNewUTF8' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "setFileTime")) Module["setFileTime"] = function() { abort("'setFileTime' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "abortOnCannotGrowMemory")) Module["abortOnCannotGrowMemory"] = function() { abort("'abortOnCannotGrowMemory' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "emscripten_realloc_buffer")) Module["emscripten_realloc_buffer"] = function() { abort("'emscripten_realloc_buffer' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "ENV")) Module["ENV"] = function() { abort("'ENV' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -2511,17 +2528,22 @@ if (!Object.getOwnPropertyDescriptor(Module, "readI53FromI64")) Module["readI53F
 if (!Object.getOwnPropertyDescriptor(Module, "readI53FromU64")) Module["readI53FromU64"] = function() { abort("'readI53FromU64' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "convertI32PairToI53")) Module["convertI32PairToI53"] = function() { abort("'convertI32PairToI53' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "convertU32PairToI53")) Module["convertU32PairToI53"] = function() { abort("'convertU32PairToI53' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "asmjsMangle")) Module["asmjsMangle"] = function() { abort("'asmjsMangle' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "resolveGlobalSymbol")) Module["resolveGlobalSymbol"] = function() { abort("'resolveGlobalSymbol' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "GOT")) Module["GOT"] = function() { abort("'GOT' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "GOTHandler")) Module["GOTHandler"] = function() { abort("'GOTHandler' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "updateGOT")) Module["updateGOT"] = function() { abort("'updateGOT' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "relocateExports")) Module["relocateExports"] = function() { abort("'relocateExports' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "reportUndefinedSymbols")) Module["reportUndefinedSymbols"] = function() { abort("'reportUndefinedSymbols' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "DLFCN")) Module["DLFCN"] = function() { abort("'DLFCN' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "LDSO")) Module["LDSO"] = function() { abort("'LDSO' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "createInvokeFunction")) Module["createInvokeFunction"] = function() { abort("'createInvokeFunction' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "getMemory")) Module["getMemory"] = function() { abort("'getMemory' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "fetchBinary")) Module["fetchBinary"] = function() { abort("'fetchBinary' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "asmjsMangle")) Module["asmjsMangle"] = function() { abort("'asmjsMangle' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "resolveGlobalSymbol")) Module["resolveGlobalSymbol"] = function() { abort("'resolveGlobalSymbol' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "loadSideModule")) Module["loadSideModule"] = function() { abort("'loadSideModule' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "loadWebAssemblyModule")) Module["loadWebAssemblyModule"] = function() { abort("'loadWebAssemblyModule' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "loadDynamicLibrary")) Module["loadDynamicLibrary"] = function() { abort("'loadDynamicLibrary' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "preloadDylibs")) Module["preloadDylibs"] = function() { abort("'preloadDylibs' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "uncaughtExceptionCount")) Module["uncaughtExceptionCount"] = function() { abort("'uncaughtExceptionCount' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionLast")) Module["exceptionLast"] = function() { abort("'exceptionLast' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionCaught")) Module["exceptionCaught"] = function() { abort("'exceptionCaught' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "ExceptionInfoAttrs")) Module["ExceptionInfoAttrs"] = function() { abort("'ExceptionInfoAttrs' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -2619,9 +2641,9 @@ function callMain(args) {
 
     var ret = entryFunction(argc, argv);
 
-    // In PROXY_TO_PTHREAD builds, we should never exit the runtime below, as execution is asynchronously handed
-    // off to a pthread.
-    // if we're not running an evented main loop, it's time to exit
+    // In PROXY_TO_PTHREAD builds, we should never exit the runtime below, as
+    // execution is asynchronously handed off to a pthread.
+      // if we're not running an evented main loop, it's time to exit
       exit(ret, /* implicit = */ true);
   }
   catch(e) {
@@ -2655,6 +2677,11 @@ function run(args) {
     return;
   }
 
+  // This is normally called automatically during __wasm_call_ctors but need to
+  // get these values before even running any of the ctors so we call it redundantly
+  // here.
+  // TODO(sbc): Move writeStackCookie to native to to avoid this.
+  _emscripten_stack_set_limits(5244432, 1552);
   writeStackCookie();
 
   preRun();
@@ -2710,8 +2737,8 @@ function checkUnflushedContent() {
   // How we flush the streams depends on whether we are in SYSCALLS_REQUIRE_FILESYSTEM=0
   // mode (which has its own special function for this; otherwise, all
   // the code is inside libc)
-  var print = out;
-  var printErr = err;
+  var oldOut = out;
+  var oldErr = err;
   var has = false;
   out = err = function(x) {
     has = true;
@@ -2720,8 +2747,8 @@ function checkUnflushedContent() {
     var flush = Module['_fflush'];
     if (flush) flush(0);
   } catch(e) {}
-  out = print;
-  err = printErr;
+  out = oldOut;
+  err = oldErr;
   if (has) {
     warnOnce('stdio streams had content in them that was not flushed. you should set EXIT_RUNTIME to 1 (see the FAQ), or make sure to emit a newline when you printf etc.');
   }
@@ -2772,7 +2799,7 @@ var shouldRunNow = true;
 
 if (Module['noInitialRun']) shouldRunNow = false;
 
-  noExitRuntime = true;
+noExitRuntime = true;
 
 run();
 
@@ -2787,9 +2814,8 @@ run();
 );
 })();
 if (typeof exports === 'object' && typeof module === 'object')
-      module.exports = Module;
-    else if (typeof define === 'function' && define['amd'])
-      define([], function() { return Module; });
-    else if (typeof exports === 'object')
-      exports["Module"] = Module;
-    
+  module.exports = Module;
+else if (typeof define === 'function' && define['amd'])
+  define([], function() { return Module; });
+else if (typeof exports === 'object')
+  exports["Module"] = Module;

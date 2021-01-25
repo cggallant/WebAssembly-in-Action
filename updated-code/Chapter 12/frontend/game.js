@@ -3,13 +3,13 @@ let moduleExports = null;
 
 var Module = {
   instantiateWasm: function(importObject, successCallback) {
-    moduleMemory = importObject.env.memory;
     let mainInstance = null;
 
     // Instantiate the module
     WebAssembly.instantiateStreaming(fetch("main.wasm"), importObject)
     .then(result => {
       mainInstance = result.instance;
+      moduleMemory = mainInstance.exports.memory;
       
       const sideImportObject = {    
         env: {
