@@ -65,8 +65,7 @@ var ENVIRONMENT_IS_PTHREAD = Module['ENVIRONMENT_IS_PTHREAD'] || false;
 if (ENVIRONMENT_IS_PTHREAD) {
   // Grab imports from the pthread to local scope.
   buffer = Module['buffer'];
-  // Note that not all runtime fields are imported above. Values for STACK_BASE, STACKTOP and STACK_MAX are not yet known at worker.js load time.
-  // These will be filled in at pthread startup time (the 'run' message for a pthread - pthread start establishes the stack frame)
+  // Note that not all runtime fields are imported above
 }
 
 // end include: shell_pthreads.js
@@ -617,11 +616,6 @@ var wasmMemory;
 
 // For sending to workers.
 var wasmModule;
-// Only workers actually use these field, but we refer to them from
-// library_pthread (which exists on all threads) so this definition is useful
-// to avoid accessing the global scope.
-var threadInfoStruct = 0;
-var selfThreadId = 0;
 
 //========================================
 // Runtime essentials
@@ -634,7 +628,7 @@ var ABORT = false;
 // set by exit() and abort().  Passed to 'onExit' handler.
 // NOTE: This is also used as the process return code code in shell environments
 // but only when noExitRuntime is false.
-var EXITSTATUS = 0;
+var EXITSTATUS;
 
 /** @type {function(*, string=)} */
 function assert(condition, text) {
@@ -919,16 +913,18 @@ function stringToAscii(str, outPtr) {
 // a copy of that string as a Javascript String object.
 
 function UTF16ToString(ptr, maxBytesToRead) {
-    var i = 0;
-
     var str = '';
-    while (1) {
+
+    // If maxBytesToRead is not passed explicitly, it will be undefined, and the for-loop's condition
+    // will always evaluate to true. The loop is then terminated on the first null char.
+    for (var i = 0; !(i >= maxBytesToRead / 2); ++i) {
       var codeUnit = HEAP16[(((ptr)+(i*2))>>1)];
-      if (codeUnit == 0 || i == maxBytesToRead / 2) return str;
-      ++i;
+      if (codeUnit == 0) break;
       // fromCharCode constructs a character from a UTF-16 code unit, so we can pass the UTF16 string right through.
       str += String.fromCharCode(codeUnit);
     }
+
+    return str;
 }
 
 // Copies the given Javascript String object 'str' to the emscripten HEAP at address 'outPtr',
@@ -1095,9 +1091,6 @@ function writeAsciiToMemory(str, buffer, dontAddNull) {
 // end include: runtime_strings_extra.js
 // Memory management
 
-var PAGE_SIZE = 16384;
-var WASM_PAGE_SIZE = 65536;
-
 function alignUp(x, multiple) {
   if (x % multiple > 0) {
     x += multiple - (x % multiple);
@@ -1137,27 +1130,16 @@ function updateGlobalBufferAndViews(buf) {
   Module['HEAPF64'] = HEAPF64 = new Float64Array(buf);
 }
 
-var STACK_BASE = 5250208,
-    STACKTOP = STACK_BASE,
-    STACK_MAX = 7328;
-
-if (ENVIRONMENT_IS_PTHREAD) {
-  // At the 'load' stage of Worker startup, we are just loading this script
-  // but not ready to run yet. At 'run' we receive proper values for the stack
-  // etc. and can launch a pthread. Set some fake values there meanwhile to
-  // catch bugs, then set the real values in establishStackSpace later.
-}
-
 var TOTAL_STACK = 5242880;
 
-var INITIAL_INITIAL_MEMORY = Module['INITIAL_MEMORY'] || 16777216;
+var INITIAL_MEMORY = Module['INITIAL_MEMORY'] || 16777216;
 
 // In non-standalone/normal mode, we create the memory here.
 // include: runtime_init_memory.js
 
 
-// Create the main memory. (Note: this isn't used in STANDALONE_WASM mode since the wasm
-// memory is created in the wasm, not in JS.)
+// Create the wasm memory. (Note: this only applies if IMPORTED_MEMORY is defined)
+
 if (ENVIRONMENT_IS_PTHREAD) {
   wasmMemory = Module['wasmMemory'];
   buffer = Module['buffer'];
@@ -1168,9 +1150,9 @@ if (ENVIRONMENT_IS_PTHREAD) {
   } else
   {
     wasmMemory = new WebAssembly.Memory({
-      'initial': INITIAL_INITIAL_MEMORY / WASM_PAGE_SIZE
+      'initial': INITIAL_MEMORY / 65536
       ,
-      'maximum': INITIAL_INITIAL_MEMORY / WASM_PAGE_SIZE
+      'maximum': INITIAL_MEMORY / 65536
       ,
       'shared': true
     });
@@ -1191,11 +1173,8 @@ if (wasmMemory) {
 
 // If the user provides an incorrect length, just use that length instead rather than providing the user to
 // specifically provide the memory length with Module['INITIAL_MEMORY'].
-INITIAL_INITIAL_MEMORY = buffer.byteLength;
+INITIAL_MEMORY = buffer.byteLength;
 updateGlobalBufferAndViews(buffer);
-
-if (!ENVIRONMENT_IS_PTHREAD) { // Pthreads have already initialized these variables in src/worker.js, where they were passed to the thread worker at startup time
-}
 
 // end include: runtime_init_memory.js
 
@@ -1411,14 +1390,13 @@ if (!isDataURI(wasmBinaryFile)) {
   wasmBinaryFile = locateFile(wasmBinaryFile);
 }
 
-function getBinary() {
+function getBinary(file) {
   try {
-    if (wasmBinary) {
+    if (file == wasmBinaryFile && wasmBinary) {
       return new Uint8Array(wasmBinary);
     }
-
     if (readBinary) {
-      return readBinary(wasmBinaryFile);
+      return readBinary(file);
     } else {
       throw "both async and sync fetching of the wasm failed";
     }
@@ -1441,11 +1419,11 @@ function getBinaryPromise() {
       }
       return response['arrayBuffer']();
     }).catch(function () {
-      return getBinary();
+      return getBinary(wasmBinaryFile);
     });
   }
   // Otherwise, getBinary should be able to get it synchronously
-  return Promise.resolve().then(getBinary);
+  return Promise.resolve().then(function() { return getBinary(wasmBinaryFile); });
 }
 
 // Create the wasm instance.
@@ -1454,7 +1432,7 @@ function createWasm() {
   // prepare imports
   var info = {
     'env': asmLibraryArg,
-    'wasi_snapshot_preview1': asmLibraryArg
+    'wasi_snapshot_preview1': asmLibraryArg,
   };
   // Load the wasm module and create an instance of using native support in the JS engine.
   // handle a generated wasm instance, receiving its exports and
@@ -1520,6 +1498,7 @@ function createWasm() {
       return instantiateArrayBuffer(receiveInstantiatedSource);
     }
   }
+
   // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
   // to manually instantiate the Wasm module themselves. This allows pages to run the instantiation parallel
   // to any other async startup actions they are performing.
@@ -1544,7 +1523,7 @@ var tempI64;
 // === Body ===
 
 var ASM_CONSTS = {
-  4472: function($0, $1) {setTimeout(function() { _do_emscripten_dispatch_to_thread($0, $1); }, 0);}
+  3942: function($0, $1) {setTimeout(function() { __emscripten_do_dispatch_to_thread($0, $1); }, 0);}
 };
 function initPthreadsJS(){ PThread.initRuntime(); }
 
@@ -1586,38 +1565,6 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         });
     }
 
-  function dynCallLegacy(sig, ptr, args) {
-      if (args && args.length) {
-        return Module['dynCall_' + sig].apply(null, [ptr].concat(args));
-      }
-      return Module['dynCall_' + sig].call(null, ptr);
-    }
-  function dynCall(sig, ptr, args) {
-      // Without WASM_BIGINT support we cannot directly call function with i64 as
-      // part of thier signature, so we rely the dynCall functions generated by
-      // wasm-emscripten-finalize
-      if (sig.indexOf('j') != -1) {
-        return dynCallLegacy(sig, ptr, args);
-      }
-      return wasmTable.get(ptr).apply(null, args)
-    }
-  Module["dynCall"] = dynCall;
-
-  var __pthread_ptr=0;
-  
-  var __pthread_is_main_runtime_thread=0;
-  
-  var __pthread_is_main_browser_thread=0;
-  function registerPthreadPtr(pthreadPtr, isMainBrowserThread, isMainRuntimeThread) {
-      pthreadPtr = pthreadPtr|0;
-      isMainBrowserThread = isMainBrowserThread|0;
-      isMainRuntimeThread = isMainRuntimeThread|0;
-      __pthread_ptr = pthreadPtr;
-      __pthread_is_main_browser_thread = isMainBrowserThread;
-      __pthread_is_main_runtime_thread = isMainRuntimeThread;
-    }
-  Module["registerPthreadPtr"] = registerPthreadPtr;
-  
   var ERRNO_CODES={EPERM:63,ENOENT:44,ESRCH:71,EINTR:27,EIO:29,ENXIO:60,E2BIG:1,ENOEXEC:45,EBADF:8,ECHILD:12,EAGAIN:6,EWOULDBLOCK:6,ENOMEM:48,EACCES:2,EFAULT:21,ENOTBLK:105,EBUSY:10,EEXIST:20,EXDEV:75,ENODEV:43,ENOTDIR:54,EISDIR:31,EINVAL:28,ENFILE:41,EMFILE:33,ENOTTY:59,ETXTBSY:74,EFBIG:22,ENOSPC:51,ESPIPE:70,EROFS:69,EMLINK:34,EPIPE:64,EDOM:18,ERANGE:68,ENOMSG:49,EIDRM:24,ECHRNG:106,EL2NSYNC:156,EL3HLT:107,EL3RST:108,ELNRNG:109,EUNATCH:110,ENOCSI:111,EL2HLT:112,EDEADLK:16,ENOLCK:46,EBADE:113,EBADR:114,EXFULL:115,ENOANO:104,EBADRQC:103,EBADSLT:102,EDEADLOCK:16,EBFONT:101,ENOSTR:100,ENODATA:116,ETIME:117,ENOSR:118,ENONET:119,ENOPKG:120,EREMOTE:121,ENOLINK:47,EADV:122,ESRMNT:123,ECOMM:124,EPROTO:65,EMULTIHOP:36,EDOTDOT:125,EBADMSG:9,ENOTUNIQ:126,EBADFD:127,EREMCHG:128,ELIBACC:129,ELIBBAD:130,ELIBSCN:131,ELIBMAX:132,ELIBEXEC:133,ENOSYS:52,ENOTEMPTY:55,ENAMETOOLONG:37,ELOOP:32,EOPNOTSUPP:138,EPFNOSUPPORT:139,ECONNRESET:15,ENOBUFS:42,EAFNOSUPPORT:5,EPROTOTYPE:67,ENOTSOCK:57,ENOPROTOOPT:50,ESHUTDOWN:140,ECONNREFUSED:14,EADDRINUSE:3,ECONNABORTED:13,ENETUNREACH:40,ENETDOWN:38,ETIMEDOUT:73,EHOSTDOWN:142,EHOSTUNREACH:23,EINPROGRESS:26,EALREADY:7,EDESTADDRREQ:17,EMSGSIZE:35,EPROTONOSUPPORT:66,ESOCKTNOSUPPORT:137,EADDRNOTAVAIL:4,ENETRESET:39,EISCONN:30,ENOTCONN:53,ETOOMANYREFS:141,EUSERS:136,EDQUOT:19,ESTALE:72,ENOTSUP:138,ENOMEDIUM:148,EILSEQ:25,EOVERFLOW:61,ECANCELED:11,ENOTRECOVERABLE:56,EOWNERDEAD:62,ESTRPIPE:135};
   
   function _emscripten_futex_wake(addr, count) {
@@ -1630,10 +1577,10 @@ function initPthreadsJS(){ PThread.initRuntime(); }
       // See if main thread is waiting on this address? If so, wake it up by resetting its wake location to zero.
       // Note that this is not a fair procedure, since we always wake main thread first before any workers, so
       // this scheme does not adhere to real queue-based waiting.
-      var mainThreadWaitAddress = Atomics.load(HEAP32, PThread.mainThreadFutex >> 2);
+      var mainThreadWaitAddress = Atomics.load(HEAP32, __emscripten_main_thread_futex >> 2);
       var mainThreadWoken = 0;
       if (mainThreadWaitAddress == addr) {
-        var loadedAddr = Atomics.compareExchange(HEAP32, PThread.mainThreadFutex >> 2, mainThreadWaitAddress, 0);
+        var loadedAddr = Atomics.compareExchange(HEAP32, __emscripten_main_thread_futex >> 2, mainThreadWaitAddress, 0);
         if (loadedAddr == mainThreadWaitAddress) {
           --count;
           mainThreadWoken = 1;
@@ -1678,7 +1625,7 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         PThread.returnWorkerToPool(worker);
       }
     }
-  var PThread={MAIN_THREAD_ID:1,mainThreadInfo:{schedPolicy:0,schedPrio:0},unusedWorkers:[],runningWorkers:[],initMainThreadBlock:function() {
+  var PThread={unusedWorkers:[],runningWorkers:[],initMainThreadBlock:function() {
   
         var pthreadPoolSize = 3;
         // Start loading up the Worker pool, if requested.
@@ -1687,61 +1634,55 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         }
       },initRuntime:function() {
   
-        PThread.mainThreadBlock = _malloc(232);
+        var tb = _malloc(228);
   
-        for (var i = 0; i < 232/4; ++i) HEAPU32[PThread.mainThreadBlock/4+i] = 0;
+        for (var i = 0; i < 228/4; ++i) HEAPU32[tb/4+i] = 0;
   
         // The pthread struct has a field that points to itself - this is used as
           // a magic ID to detect whether the pthread_t structure is 'alive'.
-        HEAP32[(((PThread.mainThreadBlock)+(12))>>2)]=PThread.mainThreadBlock;
+        HEAP32[(((tb)+(12))>>2)]=tb;
   
         // pthread struct robust_list head should point to itself.
-        var headPtr = PThread.mainThreadBlock + 156;
+        var headPtr = tb + 152;
         HEAP32[((headPtr)>>2)]=headPtr;
   
         // Allocate memory for thread-local storage.
         var tlsMemory = _malloc(512);
         for (var i = 0; i < 128; ++i) HEAPU32[tlsMemory/4+i] = 0;
-        Atomics.store(HEAPU32, (PThread.mainThreadBlock + 104 ) >> 2, tlsMemory); // Init thread-local-storage memory array.
-        Atomics.store(HEAPU32, (PThread.mainThreadBlock + 40 ) >> 2, PThread.mainThreadBlock); // Main thread ID.
-        Atomics.store(HEAPU32, (PThread.mainThreadBlock + 44 ) >> 2, 42); // Process ID.
+        Atomics.store(HEAPU32, (tb + 100 ) >> 2, tlsMemory); // Init thread-local-storage memory array.
+        Atomics.store(HEAPU32, (tb + 40 ) >> 2, tb); // Main thread ID.
   
-        PThread.initShared();
-  
-        // Pass the thread address inside the asm.js scope to store it for fast
-        // access that avoids the need for a FFI out.  Global constructors trying
+        // Pass the thread address to the native code where they stored in wasm
+        // globals which act as a form of TLS. Global constructors trying
         // to access this value will read the wrong value, but that is UB anyway.
-        registerPthreadPtr(PThread.mainThreadBlock, /*isMainBrowserThread=*/!ENVIRONMENT_IS_WORKER, /*isMainRuntimeThread=*/1);
-        _emscripten_register_main_browser_thread_id(PThread.mainThreadBlock);
-      },initWorker:function() {
-        PThread.initShared();
+        __emscripten_thread_init(tb, /*isMainBrowserThread=*/!ENVIRONMENT_IS_WORKER, /*isMainRuntimeThread=*/1);
+        _emscripten_register_main_browser_thread_id(tb);
   
-      },initShared:function() {
-        PThread.mainThreadFutex = _main_thread_futex;
+      },initWorker:function() {
+  
       },pthreads:{},threadExitHandlers:[],setThreadStatus:function() {},runExitHandlers:function() {
         while (PThread.threadExitHandlers.length > 0) {
           PThread.threadExitHandlers.pop()();
         }
   
         // Call into the musl function that runs destructors of all thread-specific data.
-        if (ENVIRONMENT_IS_PTHREAD && threadInfoStruct) ___pthread_tsd_run_dtors();
+        if (ENVIRONMENT_IS_PTHREAD && _pthread_self()) ___pthread_tsd_run_dtors();
       },threadExit:function(exitCode) {
         var tb = _pthread_self();
         if (tb) { // If we haven't yet exited?
           Atomics.store(HEAPU32, (tb + 4 ) >> 2, exitCode);
           // When we publish this, the main thread is free to deallocate the thread object and we are done.
-          // Therefore set threadInfoStruct = 0; above to 'release' the object in this worker thread.
+          // Therefore set _pthread_self = 0; above to 'release' the object in this worker thread.
           Atomics.store(HEAPU32, (tb + 0 ) >> 2, 1);
   
           // Disable all cancellation so that executing the cleanup handlers won't trigger another JS
           // canceled exception to be thrown.
-          Atomics.store(HEAPU32, (tb + 60 ) >> 2, 1/*PTHREAD_CANCEL_DISABLE*/);
-          Atomics.store(HEAPU32, (tb + 64 ) >> 2, 0/*PTHREAD_CANCEL_DEFERRED*/);
+          Atomics.store(HEAPU32, (tb + 56 ) >> 2, 1/*PTHREAD_CANCEL_DISABLE*/);
+          Atomics.store(HEAPU32, (tb + 60 ) >> 2, 0/*PTHREAD_CANCEL_DEFERRED*/);
           PThread.runExitHandlers();
   
           _emscripten_futex_wake(tb + 0, 2147483647);
-          registerPthreadPtr(0, 0, 0); // Unregister the thread block also inside the asm.js scope.
-          threadInfoStruct = 0;
+          __emscripten_thread_init(0, 0, 0); // Unregister the thread block also inside the asm.js scope.
           if (ENVIRONMENT_IS_PTHREAD) {
             // Note: in theory we would like to return any offscreen canvases back to the main thread,
             // but if we ever fetched a rendering context for them that would not be valid, so we don't try.
@@ -1750,11 +1691,12 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         }
       },threadCancel:function() {
         PThread.runExitHandlers();
-        Atomics.store(HEAPU32, (threadInfoStruct + 4 ) >> 2, -1/*PTHREAD_CANCELED*/);
-        Atomics.store(HEAPU32, (threadInfoStruct + 0 ) >> 2, 1); // Mark the thread as no longer running.
-        _emscripten_futex_wake(threadInfoStruct + 0, 2147483647); // wake all threads
-        threadInfoStruct = selfThreadId = 0; // Not hosting a pthread anymore in this worker, reset the info structures to null.
-        registerPthreadPtr(0, 0, 0); // Unregister the thread block also inside the asm.js scope.
+        var tb = _pthread_self();
+        Atomics.store(HEAPU32, (tb + 4 ) >> 2, -1/*PTHREAD_CANCELED*/);
+        Atomics.store(HEAPU32, (tb + 0 ) >> 2, 1); // Mark the thread as no longer running.
+        _emscripten_futex_wake(tb + 0, 2147483647); // wake all threads
+        // Not hosting a pthread anymore in this worker, reset the info structures to null.
+        __emscripten_thread_init(0, 0, 0); // Unregister the thread block also inside the asm.js scope.
         postMessage({ 'cmd': 'cancelDone' });
       },terminateAllThreads:function() {
         for (var t in PThread.pthreads) {
@@ -1781,8 +1723,8 @@ function initPthreadsJS(){ PThread.initRuntime(); }
       },freeThreadData:function(pthread) {
         if (!pthread) return;
         if (pthread.threadInfoStruct) {
-          var tlsMemory = HEAP32[(((pthread.threadInfoStruct)+(104))>>2)];
-          HEAP32[(((pthread.threadInfoStruct)+(104))>>2)]=0;
+          var tlsMemory = HEAP32[(((pthread.threadInfoStruct)+(100))>>2)];
+          HEAP32[(((pthread.threadInfoStruct)+(100))>>2)]=0;
           _free(tlsMemory);
           _free(pthread.threadInfoStruct);
         }
@@ -1847,9 +1789,17 @@ function initPthreadsJS(){ PThread.initRuntime(); }
           } else if (cmd === 'alert') {
             alert('Thread ' + d['threadId'] + ': ' + d['text']);
           } else if (cmd === 'exit') {
-            var detached = worker.pthread && Atomics.load(HEAPU32, (worker.pthread.thread + 68) >> 2);
+            var detached = worker.pthread && Atomics.load(HEAPU32, (worker.pthread.thread + 64) >> 2);
             if (detached) {
               PThread.returnWorkerToPool(worker);
+            }
+          } else if (cmd === 'exitProcess') {
+            // A pthread has requested to exit the whole application process (runtime).
+            try {
+              exit(d['returnCode']);
+            } catch (e) {
+              if (e instanceof ExitStatus) return;
+              throw e;
             }
           } else if (cmd === 'cancelDone') {
             PThread.returnWorkerToPool(worker);
@@ -1912,8 +1862,7 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         }
       }};
   function establishStackSpace(stackTop, stackMax) {
-      STACK_BASE = STACKTOP = stackTop;
-      STACK_MAX = stackMax;
+      _emscripten_stack_set_limits(stackTop, stackMax);
   
       // Call inside wasm module to set up the stack frame for this pthread in asm.js/wasm module scope
       stackRestore(stackTop);
@@ -1925,6 +1874,11 @@ function initPthreadsJS(){ PThread.initRuntime(); }
       return noExitRuntime;
     }
   Module["getNoExitRuntime"] = getNoExitRuntime;
+
+  function invokeEntryPoint(ptr, arg) {
+      return wasmTable.get(ptr)(arg);
+    }
+  Module["invokeEntryPoint"] = invokeEntryPoint;
 
   function jsStackTrace() {
       var error = new Error();
@@ -2061,19 +2015,13 @@ function initPthreadsJS(){ PThread.initRuntime(); }
   
   var exceptionLast=0;
   
-  function __ZSt18uncaught_exceptionv() { // std::uncaught_exception()
-      return __ZSt18uncaught_exceptionv.uncaught_exceptions > 0;
-    }
+  var uncaughtExceptionCount=0;
   function ___cxa_throw(ptr, type, destructor) {
       var info = new ExceptionInfo(ptr);
       // Initialize ExceptionInfo content after it was allocated in __cxa_allocate_exception.
       info.init(type, destructor);
       exceptionLast = ptr;
-      if (!("uncaught_exception" in __ZSt18uncaught_exceptionv)) {
-        __ZSt18uncaught_exceptionv.uncaught_exceptions = 1;
-      } else {
-        __ZSt18uncaught_exceptionv.uncaught_exceptions++;
-      }
+      uncaughtExceptionCount++;
       throw ptr;
     }
 
@@ -2106,8 +2054,6 @@ function initPthreadsJS(){ PThread.initRuntime(); }
   function _emscripten_conditional_set_current_thread_status_js(expectedStatus, newStatus) {
     }
   function _emscripten_conditional_set_current_thread_status(expectedStatus, newStatus) {
-      expectedStatus = expectedStatus|0;
-      newStatus = newStatus|0;
     }
 
   function _emscripten_futex_wait(addr, val, timeout) {
@@ -2131,24 +2077,24 @@ function initPthreadsJS(){ PThread.initRuntime(); }
   
         // Register globally which address the main thread is simulating to be
         // waiting on. When zero, the main thread is not waiting on anything, and on
-        // nonzero, the contents of the address pointed by PThread.mainThreadFutex
+        // nonzero, the contents of the address pointed by __emscripten_main_thread_futex
         // tell which address the main thread is simulating its wait on.
         // We need to be careful of recursion here: If we wait on a futex, and
         // then call _emscripten_main_thread_process_queued_calls() below, that
         // will call code that takes the proxying mutex - which can once more
         // reach this code in a nested call. To avoid interference between the
-        // two (there is just a single mainThreadFutex at a time), unmark
+        // two (there is just a single __emscripten_main_thread_futex at a time), unmark
         // ourselves before calling the potentially-recursive call. See below for
         // how we handle the case of our futex being notified during the time in
-        // between when we are not set as the value of mainThreadFutex.
-        var lastAddr = Atomics.exchange(HEAP32, PThread.mainThreadFutex >> 2, addr);
+        // between when we are not set as the value of __emscripten_main_thread_futex.
+        var lastAddr = Atomics.exchange(HEAP32, __emscripten_main_thread_futex >> 2, addr);
   
         while (1) {
           // Check for a timeout.
           tNow = performance.now();
           if (tNow > tEnd) {
             // We timed out, so stop marking ourselves as waiting.
-            lastAddr = Atomics.exchange(HEAP32, PThread.mainThreadFutex >> 2, 0);
+            lastAddr = Atomics.exchange(HEAP32, __emscripten_main_thread_futex >> 2, 0);
             return -73;
           }
           // We are performing a blocking loop here, so we must handle proxied
@@ -2156,7 +2102,7 @@ function initPthreadsJS(){ PThread.initRuntime(); }
           // Note that we have to do so carefully, as we may take a lock while
           // doing so, which can recurse into this function; stop marking
           // ourselves as waiting while we do so.
-          lastAddr = Atomics.exchange(HEAP32, PThread.mainThreadFutex >> 2, 0);
+          lastAddr = Atomics.exchange(HEAP32, __emscripten_main_thread_futex >> 2, 0);
           if (lastAddr == 0) {
             // We were told to stop waiting, so stop.
             break;
@@ -2168,20 +2114,20 @@ function initPthreadsJS(){ PThread.initRuntime(); }
           //
           //  * wait on futex A
           //  * recurse into emscripten_main_thread_process_queued_calls(),
-          //    which waits on futex B. that sets the mainThreadFutex address to
+          //    which waits on futex B. that sets the __emscripten_main_thread_futex address to
           //    futex B, and there is no longer any mention of futex A.
-          //  * a worker is done with futex A. it checks mainThreadFutex but does
+          //  * a worker is done with futex A. it checks __emscripten_main_thread_futex but does
           //    not see A, so it does nothing special for the main thread.
           //  * a worker is done with futex B. it flips mainThreadMutex from B
           //    to 0, ending the wait on futex B.
-          //  * we return to the wait on futex A. mainThreadFutex is 0, but that
+          //  * we return to the wait on futex A. __emscripten_main_thread_futex is 0, but that
           //    is because of futex B being done - we can't tell from
-          //    mainThreadFutex whether A is done or not. therefore, check the
+          //    __emscripten_main_thread_futex whether A is done or not. therefore, check the
           //    memory value of the futex.
           //
           // That case motivates the design here. Given that, checking the memory
           // address is also necessary for other reasons: we unset and re-set our
-          // address in mainThreadFutex around calls to
+          // address in __emscripten_main_thread_futex around calls to
           // emscripten_main_thread_process_queued_calls(), and a worker could
           // attempt to wake us up right before/after such times.
           //
@@ -2202,23 +2148,13 @@ function initPthreadsJS(){ PThread.initRuntime(); }
           }
   
           // Mark us as waiting once more, and continue the loop.
-          lastAddr = Atomics.exchange(HEAP32, PThread.mainThreadFutex >> 2, addr);
+          lastAddr = Atomics.exchange(HEAP32, __emscripten_main_thread_futex >> 2, addr);
         }
         return 0;
       }
     }
 
 
-
-  function _emscripten_is_main_browser_thread() {
-      // Semantically the same as testing "!ENVIRONMENT_IS_WORKER" outside the asm.js scope
-      return __pthread_is_main_browser_thread|0;
-    }
-
-  function _emscripten_is_main_runtime_thread() {
-      // Semantically the same as testing "!ENVIRONMENT_IS_PTHREAD" outside the asm.js scope
-      return __pthread_is_main_runtime_thread|0;
-    }
 
   function _emscripten_memcpy_big(dest, src, num) {
       HEAPU8.copyWithin(dest, src, src + num);
@@ -2235,12 +2171,19 @@ function initPthreadsJS(){ PThread.initRuntime(); }
       // Allocate a buffer, which will be copied by the C code.
       var stack = stackSave();
       // First passed parameter specifies the number of arguments to the function.
-      var args = stackAlloc(numCallArgs * 8);
+      // When BigInt support is enabled, we must handle types in a more complex
+      // way, detecting at runtime if a value is a BigInt or not (as we have no
+      // type info here). To do that, add a "prefix" before each value that
+      // indicates if it is a BigInt, which effectively doubles the number of
+      // values we serialize for proxying. TODO: pack this?
+      var serializedNumCallArgs = numCallArgs ;
+      var args = stackAlloc(serializedNumCallArgs * 8);
       var b = args >> 3;
       for (var i = 0; i < numCallArgs; i++) {
-        HEAPF64[b + i] = arguments[2 + i];
+        var arg = arguments[2 + i];
+        HEAPF64[b + i] = arg;
       }
-      var ret = _emscripten_run_in_main_runtime_thread_js(index, numCallArgs, args, sync);
+      var ret = _emscripten_run_in_main_runtime_thread_js(index, serializedNumCallArgs, args, sync);
       stackRestore(stack);
       return ret;
     }
@@ -2506,7 +2449,6 @@ function initPthreadsJS(){ PThread.initRuntime(); }
   function _emscripten_set_current_thread_status_js(newStatus) {
     }
   function _emscripten_set_current_thread_status(newStatus) {
-      newStatus = newStatus|0;
     }
 
   function __webgl_enable_ANGLE_instanced_arrays(ctx) {
@@ -2626,41 +2568,13 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         GLctx.disjointTimerQueryExt = GLctx.getExtension("EXT_disjoint_timer_query");
         __webgl_enable_WEBGL_multi_draw(GLctx);
   
-        // These are the 'safe' feature-enabling extensions that don't add any performance impact related to e.g. debugging, and
-        // should be enabled by default so that client GLES2/GL code will not need to go through extra hoops to get its stuff working.
-        // As new extensions are ratified at http://www.khronos.org/registry/webgl/extensions/ , feel free to add your new extensions
-        // here, as long as they don't produce a performance impact for users that might not be using those extensions.
-        // E.g. debugging-related extensions should probably be off by default.
-        var automaticallyEnabledExtensions = [ // Khronos ratified WebGL extensions ordered by number (no debug extensions):
-                                               "OES_texture_float", "OES_texture_half_float", "OES_standard_derivatives",
-                                               "OES_vertex_array_object", "WEBGL_compressed_texture_s3tc", "WEBGL_depth_texture",
-                                               "OES_element_index_uint", "EXT_texture_filter_anisotropic", "EXT_frag_depth",
-                                               "WEBGL_draw_buffers", "ANGLE_instanced_arrays", "OES_texture_float_linear",
-                                               "OES_texture_half_float_linear", "EXT_blend_minmax", "EXT_shader_texture_lod",
-                                               "EXT_texture_norm16",
-                                               // Community approved WebGL extensions ordered by number:
-                                               "WEBGL_compressed_texture_pvrtc", "EXT_color_buffer_half_float", "WEBGL_color_buffer_float",
-                                               "EXT_sRGB", "WEBGL_compressed_texture_etc1", "EXT_disjoint_timer_query",
-                                               "WEBGL_compressed_texture_etc", "WEBGL_compressed_texture_astc", "EXT_color_buffer_float",
-                                               "WEBGL_compressed_texture_s3tc_srgb", "EXT_disjoint_timer_query_webgl2",
-                                               // Old style prefixed forms of extensions (but still currently used on e.g. iPhone Xs as
-                                               // tested on iOS 12.4.1):
-                                               "WEBKIT_WEBGL_compressed_texture_pvrtc"];
-  
-        function shouldEnableAutomatically(extension) {
-          var ret = false;
-          automaticallyEnabledExtensions.forEach(function(include) {
-            if (extension.indexOf(include) != -1) {
-              ret = true;
-            }
-          });
-          return ret;
-        }
-  
-        var exts = GLctx.getSupportedExtensions() || []; // .getSupportedExtensions() can return null if context is lost, so coerce to empty array.
+        // .getSupportedExtensions() can return null if context is lost, so coerce to empty array.
+        var exts = GLctx.getSupportedExtensions() || [];
         exts.forEach(function(ext) {
-          if (automaticallyEnabledExtensions.indexOf(ext) != -1) {
-            GLctx.getExtension(ext); // Calling .getExtension enables that extension permanently, no need to store the return value to be enabled.
+          // WEBGL_lose_context, WEBGL_debug_renderer_info and WEBGL_debug_shaders are not enabled by default.
+          if (ext.indexOf('lose_context') < 0 && ext.indexOf('debug') < 0) {
+            // Call .getExtension() to enable that extension permanently.
+            GLctx.getExtension(ext);
           }
         });
       },populateUniformTable:function(program) {
@@ -2710,23 +2624,25 @@ function initPthreadsJS(){ PThread.initRuntime(); }
   
   var __emscripten_webgl_power_preferences=['default', 'low-power', 'high-performance'];
   function _emscripten_webgl_do_create_context(target, attributes) {
-      var contextAttributes = {};
       var a = attributes >> 2;
-      contextAttributes['alpha'] = !!HEAP32[a + (0>>2)];
-      contextAttributes['depth'] = !!HEAP32[a + (4>>2)];
-      contextAttributes['stencil'] = !!HEAP32[a + (8>>2)];
-      contextAttributes['antialias'] = !!HEAP32[a + (12>>2)];
-      contextAttributes['premultipliedAlpha'] = !!HEAP32[a + (16>>2)];
-      contextAttributes['preserveDrawingBuffer'] = !!HEAP32[a + (20>>2)];
       var powerPreference = HEAP32[a + (24>>2)];
-      contextAttributes['powerPreference'] = __emscripten_webgl_power_preferences[powerPreference];
-      contextAttributes['failIfMajorPerformanceCaveat'] = !!HEAP32[a + (28>>2)];
-      contextAttributes.majorVersion = HEAP32[a + (32>>2)];
-      contextAttributes.minorVersion = HEAP32[a + (36>>2)];
-      contextAttributes.enableExtensionsByDefault = HEAP32[a + (40>>2)];
-      contextAttributes.explicitSwapControl = HEAP32[a + (44>>2)];
-      contextAttributes.proxyContextToMainThread = HEAP32[a + (48>>2)];
-      contextAttributes.renderViaOffscreenBackBuffer = HEAP32[a + (52>>2)];
+      var contextAttributes = {
+        'alpha': !!HEAP32[a + (0>>2)],
+        'depth': !!HEAP32[a + (4>>2)],
+        'stencil': !!HEAP32[a + (8>>2)],
+        'antialias': !!HEAP32[a + (12>>2)],
+        'premultipliedAlpha': !!HEAP32[a + (16>>2)],
+        'preserveDrawingBuffer': !!HEAP32[a + (20>>2)],
+        'powerPreference': __emscripten_webgl_power_preferences[powerPreference],
+        'failIfMajorPerformanceCaveat': !!HEAP32[a + (28>>2)],
+        // The following are not predefined WebGL context attributes in the WebGL specification, so the property names can be minified by Closure.
+        majorVersion: HEAP32[a + (32>>2)],
+        minorVersion: HEAP32[a + (36>>2)],
+        enableExtensionsByDefault: HEAP32[a + (40>>2)],
+        explicitSwapControl: HEAP32[a + (44>>2)],
+        proxyContextToMainThread: HEAP32[a + (48>>2)],
+        renderViaOffscreenBackBuffer: HEAP32[a + (52>>2)]
+      };
   
       var canvas = findCanvasEventTarget(target);
   
@@ -2837,23 +2753,21 @@ function initPthreadsJS(){ PThread.initRuntime(); }
       Atomics.store(HEAPU32, tis + (0 >> 2), 0); // threadStatus <- 0, meaning not yet exited.
       Atomics.store(HEAPU32, tis + (4 >> 2), 0); // threadExitCode <- 0.
       Atomics.store(HEAPU32, tis + (8 >> 2), 0); // profilerBlock <- 0.
-      Atomics.store(HEAPU32, tis + (68 >> 2), threadParams.detached);
-      Atomics.store(HEAPU32, tis + (104 >> 2), tlsMemory); // Init thread-local-storage memory array.
-      Atomics.store(HEAPU32, tis + (48 >> 2), 0); // Mark initial status to unused.
+      Atomics.store(HEAPU32, tis + (64 >> 2), threadParams.detached);
+      Atomics.store(HEAPU32, tis + (100 >> 2), tlsMemory); // Init thread-local-storage memory array.
+      Atomics.store(HEAPU32, tis + (44 >> 2), 0); // Mark initial status to unused.
       Atomics.store(HEAPU32, tis + (40 >> 2), pthread.threadInfoStruct); // Main thread ID.
-      Atomics.store(HEAPU32, tis + (44 >> 2), 42); // Process ID.
-  
-      Atomics.store(HEAPU32, tis + (108 >> 2), threadParams.stackSize);
-      Atomics.store(HEAPU32, tis + (84 >> 2), threadParams.stackSize);
-      Atomics.store(HEAPU32, tis + (80 >> 2), stackHigh);
-      Atomics.store(HEAPU32, tis + (108 + 8 >> 2), stackHigh);
-      Atomics.store(HEAPU32, tis + (108 + 12 >> 2), threadParams.detached);
-      Atomics.store(HEAPU32, tis + (108 + 20 >> 2), threadParams.schedPolicy);
-      Atomics.store(HEAPU32, tis + (108 + 24 >> 2), threadParams.schedPrio);
+      Atomics.store(HEAPU32, tis + (80 >> 2), threadParams.stackSize);
+      Atomics.store(HEAPU32, tis + (76 >> 2), stackHigh);
+      Atomics.store(HEAPU32, tis + (104 >> 2), threadParams.stackSize);
+      Atomics.store(HEAPU32, tis + (104 + 8 >> 2), stackHigh);
+      Atomics.store(HEAPU32, tis + (104 + 12 >> 2), threadParams.detached);
+      Atomics.store(HEAPU32, tis + (104 + 20 >> 2), threadParams.schedPolicy);
+      Atomics.store(HEAPU32, tis + (104 + 24 >> 2), threadParams.schedPrio);
   
       var global_libc = _emscripten_get_global_libc();
       var global_locale = global_libc + 40;
-      Atomics.store(HEAPU32, tis + (176 >> 2), global_locale);
+      Atomics.store(HEAPU32, tis + (172 >> 2), global_locale);
   
       worker.pthread = pthread;
       var msg = {
@@ -2861,8 +2775,6 @@ function initPthreadsJS(){ PThread.initRuntime(); }
           'start_routine': threadParams.startRoutine,
           'arg': threadParams.arg,
           'threadInfoStruct': threadParams.pthread_ptr,
-          'selfThreadId': threadParams.pthread_ptr, // TODO: Remove this since thread ID is now the same as the thread address.
-          'parentThreadId': threadParams.parent_pthread_ptr,
           'stackBase': threadParams.stackBase,
           'stackSize': threadParams.stackSize
       };
@@ -2890,18 +2802,13 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         return ERRNO_CODES.ESRCH;
       }
   
-      var schedPolicy = Atomics.load(HEAPU32, (thread + 108 + 20 ) >> 2);
-      var schedPrio = Atomics.load(HEAPU32, (thread + 108 + 24 ) >> 2);
+      var schedPolicy = Atomics.load(HEAPU32, (thread + 104 + 20 ) >> 2);
+      var schedPrio = Atomics.load(HEAPU32, (thread + 104 + 24 ) >> 2);
   
       if (policy) HEAP32[((policy)>>2)]=schedPolicy;
       if (schedparam) HEAP32[((schedparam)>>2)]=schedPrio;
       return 0;
     }
-  
-  function _pthread_self() {
-      return __pthread_ptr|0;
-    }
-  Module["_pthread_self"] = _pthread_self;
   
   function resetPrototype(constructor, attrs) {
       var object = Object.create(constructor.prototype);
@@ -2943,7 +2850,9 @@ function initPthreadsJS(){ PThread.initRuntime(); }
       var detached = 0;
       var schedPolicy = 0; /*SCHED_OTHER*/
       var schedPrio = 0;
-      if (attr) {
+      // When musl creates C11 threads it passes __ATTRP_C11_THREAD (-1) which
+      // treat as if it was NULL.
+      if (attr && attr != -1) {
         stackSize = HEAP32[((attr)>>2)];
         // Musl has a convention that the stack size that is stored to the pthread
         // attribute structure is always musl's #define DEFAULT_STACK_SIZE
@@ -2996,9 +2905,9 @@ function initPthreadsJS(){ PThread.initRuntime(); }
       }
   
       // Allocate thread block (pthread_t structure).
-      var threadInfoStruct = _malloc(232);
+      var threadInfoStruct = _malloc(228);
       // zero-initialize thread structure.
-      for (var i = 0; i < 232 >> 2; ++i) HEAPU32[(threadInfoStruct>>2) + i] = 0;
+      for (var i = 0; i < 228 >> 2; ++i) HEAPU32[(threadInfoStruct>>2) + i] = 0;
       HEAP32[((pthread_ptr)>>2)]=threadInfoStruct;
   
       // The pthread struct has a field that points to itself - this is used as a
@@ -3006,7 +2915,7 @@ function initPthreadsJS(){ PThread.initRuntime(); }
       HEAP32[(((threadInfoStruct)+(12))>>2)]=threadInfoStruct;
   
       // pthread struct robust_list head should point to itself.
-      var headPtr = threadInfoStruct + 156;
+      var headPtr = threadInfoStruct + 152;
       HEAP32[((headPtr)>>2)]=headPtr;
   
       var threadParams = {
@@ -3018,7 +2927,6 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         detached: detached,
         startRoutine: start_routine,
         pthread_ptr: threadInfoStruct,
-        parent_pthread_ptr: _pthread_self(),
         arg: arg,
         transferList: transferList
       };
@@ -3040,10 +2948,11 @@ function initPthreadsJS(){ PThread.initRuntime(); }
 
   function __pthread_testcancel_js() {
       if (!ENVIRONMENT_IS_PTHREAD) return;
-      if (!threadInfoStruct) return;
-      var cancelDisabled = Atomics.load(HEAPU32, (threadInfoStruct + 60 ) >> 2);
+      var tb = _pthread_self();
+      if (!tb) return;
+      var cancelDisabled = Atomics.load(HEAPU32, (tb + 56 ) >> 2);
       if (cancelDisabled) return;
-      var canceled = Atomics.load(HEAPU32, (threadInfoStruct + 0 ) >> 2);
+      var canceled = Atomics.load(HEAPU32, (tb + 0 ) >> 2);
       if (canceled == 2) throw 'Canceled!';
     }
   
@@ -3060,11 +2969,11 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         err('pthread_join attempted on a null thread pointer!');
         return ERRNO_CODES.ESRCH;
       }
-      if (ENVIRONMENT_IS_PTHREAD && selfThreadId == thread) {
+      if (ENVIRONMENT_IS_PTHREAD && _pthread_self() == thread) {
         err('PThread ' + thread + ' is attempting to join to itself!');
         return ERRNO_CODES.EDEADLK;
       }
-      else if (!ENVIRONMENT_IS_PTHREAD && PThread.mainThreadBlock == thread) {
+      else if (!ENVIRONMENT_IS_PTHREAD && _emscripten_main_browser_thread_id() == thread) {
         err('Main thread ' + thread + ' is attempting to join to itself!');
         return ERRNO_CODES.EDEADLK;
       }
@@ -3074,7 +2983,7 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         return ERRNO_CODES.ESRCH;
       }
   
-      var detached = Atomics.load(HEAPU32, (thread + 68 ) >> 2);
+      var detached = Atomics.load(HEAPU32, (thread + 64 ) >> 2);
       if (detached) {
         err('Attempted to join thread ' + thread + ', which was already detached!');
         return ERRNO_CODES.EINVAL; // The thread is already detached, can no longer join it!
@@ -3089,7 +2998,7 @@ function initPthreadsJS(){ PThread.initRuntime(); }
         if (threadStatus == 1) { // Exited?
           var threadExitCode = Atomics.load(HEAPU32, (thread + 4 ) >> 2);
           if (status) HEAP32[((status)>>2)]=threadExitCode;
-          Atomics.store(HEAPU32, (thread + 68 ) >> 2, 1); // Mark the thread as detached.
+          Atomics.store(HEAPU32, (thread + 64 ) >> 2, 1); // Mark the thread as detached.
   
           if (!ENVIRONMENT_IS_PTHREAD) cleanupThread(thread);
           else postMessage({ 'cmd': 'cleanupThread', 'thread': thread });
@@ -3111,7 +3020,6 @@ function initPthreadsJS(){ PThread.initRuntime(); }
   function _pthread_join(thread, status) {
       return __emscripten_do_pthread_join(thread, status, true);
     }
-
 
   function _setTempRet0($i) {
       setTempRet0(($i) | 0);
@@ -3168,8 +3076,6 @@ var asmLibraryArg = {
   "emscripten_futex_wait": _emscripten_futex_wait,
   "emscripten_futex_wake": _emscripten_futex_wake,
   "emscripten_get_now": _emscripten_get_now,
-  "emscripten_is_main_browser_thread": _emscripten_is_main_browser_thread,
-  "emscripten_is_main_runtime_thread": _emscripten_is_main_runtime_thread,
   "emscripten_memcpy_big": _emscripten_memcpy_big,
   "emscripten_receive_on_main_thread_js": _emscripten_receive_on_main_thread_js,
   "emscripten_resize_heap": _emscripten_resize_heap,
@@ -3184,7 +3090,6 @@ var asmLibraryArg = {
   "pthread_cleanup_push": _pthread_cleanup_push,
   "pthread_create": _pthread_create,
   "pthread_join": _pthread_join,
-  "pthread_self": _pthread_self,
   "setTempRet0": _setTempRet0
 };
 var asm = createWasm();
@@ -3219,6 +3124,66 @@ var ___emscripten_pthread_data_constructor = Module["___emscripten_pthread_data_
 };
 
 /** @type {function(...*):?} */
+var _pthread_self = Module["_pthread_self"] = function() {
+  return (_pthread_self = Module["_pthread_self"] = Module["asm"]["pthread_self"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var ___pthread_tsd_run_dtors = Module["___pthread_tsd_run_dtors"] = function() {
+  return (___pthread_tsd_run_dtors = Module["___pthread_tsd_run_dtors"] = Module["asm"]["__pthread_tsd_run_dtors"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_register_main_browser_thread_id = Module["_emscripten_register_main_browser_thread_id"] = function() {
+  return (_emscripten_register_main_browser_thread_id = Module["_emscripten_register_main_browser_thread_id"] = Module["asm"]["emscripten_register_main_browser_thread_id"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_main_browser_thread_id = Module["_emscripten_main_browser_thread_id"] = function() {
+  return (_emscripten_main_browser_thread_id = Module["_emscripten_main_browser_thread_id"] = Module["asm"]["emscripten_main_browser_thread_id"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var __emscripten_do_dispatch_to_thread = Module["__emscripten_do_dispatch_to_thread"] = function() {
+  return (__emscripten_do_dispatch_to_thread = Module["__emscripten_do_dispatch_to_thread"] = Module["asm"]["_emscripten_do_dispatch_to_thread"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_2 = Module["_emscripten_sync_run_in_main_thread_2"] = function() {
+  return (_emscripten_sync_run_in_main_thread_2 = Module["_emscripten_sync_run_in_main_thread_2"] = Module["asm"]["emscripten_sync_run_in_main_thread_2"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_sync_run_in_main_thread_4 = Module["_emscripten_sync_run_in_main_thread_4"] = function() {
+  return (_emscripten_sync_run_in_main_thread_4 = Module["_emscripten_sync_run_in_main_thread_4"] = Module["asm"]["emscripten_sync_run_in_main_thread_4"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_main_thread_process_queued_calls = Module["_emscripten_main_thread_process_queued_calls"] = function() {
+  return (_emscripten_main_thread_process_queued_calls = Module["_emscripten_main_thread_process_queued_calls"] = Module["asm"]["emscripten_main_thread_process_queued_calls"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_run_in_main_runtime_thread_js = Module["_emscripten_run_in_main_runtime_thread_js"] = function() {
+  return (_emscripten_run_in_main_runtime_thread_js = Module["_emscripten_run_in_main_runtime_thread_js"] = Module["asm"]["emscripten_run_in_main_runtime_thread_js"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var __emscripten_call_on_thread = Module["__emscripten_call_on_thread"] = function() {
+  return (__emscripten_call_on_thread = Module["__emscripten_call_on_thread"] = Module["asm"]["_emscripten_call_on_thread"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_tls_init = Module["_emscripten_tls_init"] = function() {
+  return (_emscripten_tls_init = Module["_emscripten_tls_init"] = Module["asm"]["emscripten_tls_init"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var __emscripten_thread_init = Module["__emscripten_thread_init"] = function() {
+  return (__emscripten_thread_init = Module["__emscripten_thread_init"] = Module["asm"]["_emscripten_thread_init"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
 var stackSave = Module["stackSave"] = function() {
   return (stackSave = Module["stackSave"] = Module["asm"]["stackSave"]).apply(null, arguments);
 };
@@ -3231,6 +3196,11 @@ var stackRestore = Module["stackRestore"] = function() {
 /** @type {function(...*):?} */
 var stackAlloc = Module["stackAlloc"] = function() {
   return (stackAlloc = Module["stackAlloc"] = Module["asm"]["stackAlloc"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_stack_set_limits = Module["_emscripten_stack_set_limits"] = function() {
+  return (_emscripten_stack_set_limits = Module["_emscripten_stack_set_limits"] = Module["asm"]["emscripten_stack_set_limits"]).apply(null, arguments);
 };
 
 /** @type {function(...*):?} */
@@ -3254,111 +3224,11 @@ var _memalign = Module["_memalign"] = function() {
 };
 
 /** @type {function(...*):?} */
-var _emscripten_main_browser_thread_id = Module["_emscripten_main_browser_thread_id"] = function() {
-  return (_emscripten_main_browser_thread_id = Module["_emscripten_main_browser_thread_id"] = Module["asm"]["emscripten_main_browser_thread_id"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var ___pthread_tsd_run_dtors = Module["___pthread_tsd_run_dtors"] = function() {
-  return (___pthread_tsd_run_dtors = Module["___pthread_tsd_run_dtors"] = Module["asm"]["__pthread_tsd_run_dtors"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_main_thread_process_queued_calls = Module["_emscripten_main_thread_process_queued_calls"] = function() {
-  return (_emscripten_main_thread_process_queued_calls = Module["_emscripten_main_thread_process_queued_calls"] = Module["asm"]["emscripten_main_thread_process_queued_calls"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_current_thread_process_queued_calls = Module["_emscripten_current_thread_process_queued_calls"] = function() {
-  return (_emscripten_current_thread_process_queued_calls = Module["_emscripten_current_thread_process_queued_calls"] = Module["asm"]["emscripten_current_thread_process_queued_calls"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_register_main_browser_thread_id = Module["_emscripten_register_main_browser_thread_id"] = function() {
-  return (_emscripten_register_main_browser_thread_id = Module["_emscripten_register_main_browser_thread_id"] = Module["asm"]["emscripten_register_main_browser_thread_id"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _do_emscripten_dispatch_to_thread = Module["_do_emscripten_dispatch_to_thread"] = function() {
-  return (_do_emscripten_dispatch_to_thread = Module["_do_emscripten_dispatch_to_thread"] = Module["asm"]["do_emscripten_dispatch_to_thread"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_async_run_in_main_thread = Module["_emscripten_async_run_in_main_thread"] = function() {
-  return (_emscripten_async_run_in_main_thread = Module["_emscripten_async_run_in_main_thread"] = Module["asm"]["emscripten_async_run_in_main_thread"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread = Module["_emscripten_sync_run_in_main_thread"] = function() {
-  return (_emscripten_sync_run_in_main_thread = Module["_emscripten_sync_run_in_main_thread"] = Module["asm"]["emscripten_sync_run_in_main_thread"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread_0 = Module["_emscripten_sync_run_in_main_thread_0"] = function() {
-  return (_emscripten_sync_run_in_main_thread_0 = Module["_emscripten_sync_run_in_main_thread_0"] = Module["asm"]["emscripten_sync_run_in_main_thread_0"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread_1 = Module["_emscripten_sync_run_in_main_thread_1"] = function() {
-  return (_emscripten_sync_run_in_main_thread_1 = Module["_emscripten_sync_run_in_main_thread_1"] = Module["asm"]["emscripten_sync_run_in_main_thread_1"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread_2 = Module["_emscripten_sync_run_in_main_thread_2"] = function() {
-  return (_emscripten_sync_run_in_main_thread_2 = Module["_emscripten_sync_run_in_main_thread_2"] = Module["asm"]["emscripten_sync_run_in_main_thread_2"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread_xprintf_varargs = Module["_emscripten_sync_run_in_main_thread_xprintf_varargs"] = function() {
-  return (_emscripten_sync_run_in_main_thread_xprintf_varargs = Module["_emscripten_sync_run_in_main_thread_xprintf_varargs"] = Module["asm"]["emscripten_sync_run_in_main_thread_xprintf_varargs"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread_3 = Module["_emscripten_sync_run_in_main_thread_3"] = function() {
-  return (_emscripten_sync_run_in_main_thread_3 = Module["_emscripten_sync_run_in_main_thread_3"] = Module["asm"]["emscripten_sync_run_in_main_thread_3"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread_4 = Module["_emscripten_sync_run_in_main_thread_4"] = function() {
-  return (_emscripten_sync_run_in_main_thread_4 = Module["_emscripten_sync_run_in_main_thread_4"] = Module["asm"]["emscripten_sync_run_in_main_thread_4"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread_5 = Module["_emscripten_sync_run_in_main_thread_5"] = function() {
-  return (_emscripten_sync_run_in_main_thread_5 = Module["_emscripten_sync_run_in_main_thread_5"] = Module["asm"]["emscripten_sync_run_in_main_thread_5"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread_6 = Module["_emscripten_sync_run_in_main_thread_6"] = function() {
-  return (_emscripten_sync_run_in_main_thread_6 = Module["_emscripten_sync_run_in_main_thread_6"] = Module["asm"]["emscripten_sync_run_in_main_thread_6"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_sync_run_in_main_thread_7 = Module["_emscripten_sync_run_in_main_thread_7"] = function() {
-  return (_emscripten_sync_run_in_main_thread_7 = Module["_emscripten_sync_run_in_main_thread_7"] = Module["asm"]["emscripten_sync_run_in_main_thread_7"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_run_in_main_runtime_thread_js = Module["_emscripten_run_in_main_runtime_thread_js"] = function() {
-  return (_emscripten_run_in_main_runtime_thread_js = Module["_emscripten_run_in_main_runtime_thread_js"] = Module["asm"]["emscripten_run_in_main_runtime_thread_js"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var __emscripten_call_on_thread = Module["__emscripten_call_on_thread"] = function() {
-  return (__emscripten_call_on_thread = Module["__emscripten_call_on_thread"] = Module["asm"]["_emscripten_call_on_thread"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
-var _emscripten_tls_init = Module["_emscripten_tls_init"] = function() {
-  return (_emscripten_tls_init = Module["_emscripten_tls_init"] = Module["asm"]["emscripten_tls_init"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
 var dynCall_jiji = Module["dynCall_jiji"] = function() {
   return (dynCall_jiji = Module["dynCall_jiji"] = Module["asm"]["dynCall_jiji"]).apply(null, arguments);
 };
 
-var _main_thread_futex = Module['_main_thread_futex'] = 6720;
+var __emscripten_main_thread_futex = Module['__emscripten_main_thread_futex'] = 6052;
 
 
 
@@ -3366,7 +3236,6 @@ var _main_thread_futex = Module['_main_thread_futex'] = 6720;
 
 Module["PThread"] = PThread;
 Module["PThread"] = PThread;
-Module["_pthread_self"] = _pthread_self;
 Module["wasmMemory"] = wasmMemory;
 Module["ExitStatus"] = ExitStatus;
 
@@ -3401,9 +3270,9 @@ function callMain(args) {
 
     var ret = entryFunction(argc, argv);
 
-    // In PROXY_TO_PTHREAD builds, we should never exit the runtime below, as execution is asynchronously handed
-    // off to a pthread.
-    // if we're not running an evented main loop, it's time to exit
+    // In PROXY_TO_PTHREAD builds, we should never exit the runtime below, as
+    // execution is asynchronously handed off to a pthread.
+      // if we're not running an evented main loop, it's time to exit
       exit(ret, /* implicit = */ true);
   }
   catch(e) {
@@ -3487,6 +3356,18 @@ function exit(status, implicit) {
     return;
   }
 
+  if (!implicit) {
+    if (ENVIRONMENT_IS_PTHREAD) {
+      // When running in a pthread we propagate the exit back to the main thread
+      // where it can decide if the whole process should be shut down or not.
+      // The pthread may have decided not to exit its own runtime, for example
+      // because it runs a main loop, but that doesn't affect the main thread.
+      postMessage({ 'cmd': 'exitProcess', 'returnCode': status });
+      throw new ExitStatus(status);
+    } else {
+    }
+  }
+
   if (noExitRuntime) {
   } else {
     PThread.terminateAllThreads();
@@ -3515,8 +3396,16 @@ var shouldRunNow = true;
 
 if (Module['noInitialRun']) shouldRunNow = false;
 
-if (!ENVIRONMENT_IS_PTHREAD) // EXIT_RUNTIME=0 only applies to default behavior of the main browser thread
-  noExitRuntime = true;
+// EXIT_RUNTIME=0 only applies to the default behavior of the main browser
+// thread.
+// The default behaviour for pthreads is always to exit once they return
+// from their entry point (or call pthread_exit).  If we set noExitRuntime
+// to true here on pthreads they would never complete and attempt to
+// pthread_join to them would block forever.
+// pthreads can still choose to set `noExitRuntime` explicitly, or
+// call emscripten_unwind_to_js_event_loop to extend their lifetime beyond
+// their main function.  See comment in src/worker.js for more.
+noExitRuntime = !ENVIRONMENT_IS_PTHREAD;
 
 if (!ENVIRONMENT_IS_PTHREAD) {
   run();

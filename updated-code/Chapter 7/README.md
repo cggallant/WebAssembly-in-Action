@@ -20,6 +20,7 @@ A few changes were needed in the _frontend_ folder's _main.js_ file:
 - The Emscripten command line has been adjusted:
   - It no longer includes the _-s SIDE\_MODULE=2_ flag.
   - The _--no-entry_ flag was included because there's no _main_ function defined. Including this flag prevents a compilation error.
+  - The _ERROR\_ON\_UNDEFINED\_SYMBOLS=0_ flag was included so that the imported functions _IsPrime_ and _LogPrime_ don't cause a compilation error.
 
 
 ---

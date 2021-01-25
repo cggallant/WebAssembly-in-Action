@@ -581,7 +581,7 @@ var ABORT = false;
 // set by exit() and abort().  Passed to 'onExit' handler.
 // NOTE: This is also used as the process return code code in shell environments
 // but only when noExitRuntime is false.
-var EXITSTATUS = 0;
+var EXITSTATUS;
 
 /** @type {function(*, string=)} */
 function assert(condition, text) {
@@ -892,16 +892,18 @@ function UTF16ToString(ptr, maxBytesToRead) {
   if (endPtr - ptr > 32 && UTF16Decoder) {
     return UTF16Decoder.decode(HEAPU8.subarray(ptr, endPtr));
   } else {
-    var i = 0;
-
     var str = '';
-    while (1) {
+
+    // If maxBytesToRead is not passed explicitly, it will be undefined, and the for-loop's condition
+    // will always evaluate to true. The loop is then terminated on the first null char.
+    for (var i = 0; !(i >= maxBytesToRead / 2); ++i) {
       var codeUnit = HEAP16[(((ptr)+(i*2))>>1)];
-      if (codeUnit == 0 || i == maxBytesToRead / 2) return str;
-      ++i;
+      if (codeUnit == 0) break;
       // fromCharCode constructs a character from a UTF-16 code unit, so we can pass the UTF16 string right through.
       str += String.fromCharCode(codeUnit);
     }
+
+    return str;
   }
 }
 
@@ -1076,9 +1078,6 @@ function writeAsciiToMemory(str, buffer, dontAddNull) {
 // end include: runtime_strings_extra.js
 // Memory management
 
-var PAGE_SIZE = 16384;
-var WASM_PAGE_SIZE = 65536;
-
 function alignUp(x, multiple) {
   if (x % multiple > 0) {
     x += multiple - (x % multiple);
@@ -1118,27 +1117,21 @@ function updateGlobalBufferAndViews(buf) {
   Module['HEAPF64'] = HEAPF64 = new Float64Array(buf);
 }
 
-var STACK_BASE = 5472480,
-    STACKTOP = STACK_BASE,
-    STACK_MAX = 229600;
-
-assert(STACK_BASE % 16 === 0, 'stack must start aligned');
-
-var __stack_pointer = new WebAssembly.Global({value: 'i32', mutable: true}, STACK_BASE);
+var __stack_pointer = new WebAssembly.Global({value: 'i32', mutable: true}, 5472496);
 
 // To support such allocations during startup, track them on __heap_base and
 // then when the main module is loaded it reads that value and uses it to
 // initialize sbrk (the main module is relocatable itself, and so it does not
 // have __heap_base hardcoded into it - it receives it from JS as an extern
 // global, basically).
-Module['___heap_base'] = 5472480;
+Module['___heap_base'] = 5472496;
 
 var TOTAL_STACK = 5242880;
 if (Module['TOTAL_STACK']) assert(TOTAL_STACK === Module['TOTAL_STACK'], 'the stack size can no longer be determined at runtime')
 
-var INITIAL_INITIAL_MEMORY = Module['INITIAL_MEMORY'] || 16777216;if (!Object.getOwnPropertyDescriptor(Module, 'INITIAL_MEMORY')) Object.defineProperty(Module, 'INITIAL_MEMORY', { configurable: true, get: function() { abort('Module.INITIAL_MEMORY has been replaced with plain INITIAL_INITIAL_MEMORY (the initial value can be provided on Module, but after startup the value is only looked for on a local variable of that name)') } });
+var INITIAL_MEMORY = Module['INITIAL_MEMORY'] || 16777216;if (!Object.getOwnPropertyDescriptor(Module, 'INITIAL_MEMORY')) Object.defineProperty(Module, 'INITIAL_MEMORY', { configurable: true, get: function() { abort('Module.INITIAL_MEMORY has been replaced with plain INITIAL_MEMORY (the initial value can be provided on Module, but after startup the value is only looked for on a local variable of that name)') } });
 
-assert(INITIAL_INITIAL_MEMORY >= TOTAL_STACK, 'INITIAL_MEMORY should be larger than TOTAL_STACK, was ' + INITIAL_INITIAL_MEMORY + '! (TOTAL_STACK=' + TOTAL_STACK + ')');
+assert(INITIAL_MEMORY >= TOTAL_STACK, 'INITIAL_MEMORY should be larger than TOTAL_STACK, was ' + INITIAL_MEMORY + '! (TOTAL_STACK=' + TOTAL_STACK + ')');
 
 // check for full engine support (use string 'subarray' to avoid closure compiler confusion)
 assert(typeof Int32Array !== 'undefined' && typeof Float64Array !== 'undefined' && Int32Array.prototype.subarray !== undefined && Int32Array.prototype.set !== undefined,
@@ -1148,17 +1141,16 @@ assert(typeof Int32Array !== 'undefined' && typeof Float64Array !== 'undefined' 
 // include: runtime_init_memory.js
 
 
-// Create the main memory. (Note: this isn't used in STANDALONE_WASM mode since the wasm
-// memory is created in the wasm, not in JS.)
+// Create the wasm memory. (Note: this only applies if IMPORTED_MEMORY is defined)
 
   if (Module['wasmMemory']) {
     wasmMemory = Module['wasmMemory'];
   } else
   {
     wasmMemory = new WebAssembly.Memory({
-      'initial': INITIAL_INITIAL_MEMORY / WASM_PAGE_SIZE
+      'initial': INITIAL_MEMORY / 65536
       ,
-      'maximum': INITIAL_INITIAL_MEMORY / WASM_PAGE_SIZE
+      'maximum': INITIAL_MEMORY / 65536
     });
   }
 
@@ -1168,8 +1160,8 @@ if (wasmMemory) {
 
 // If the user provides an incorrect length, just use that length instead rather than providing the user to
 // specifically provide the memory length with Module['INITIAL_MEMORY'].
-INITIAL_INITIAL_MEMORY = buffer.byteLength;
-assert(INITIAL_INITIAL_MEMORY % WASM_PAGE_SIZE === 0);
+INITIAL_MEMORY = buffer.byteLength;
+assert(INITIAL_MEMORY % 65536 === 0);
 updateGlobalBufferAndViews(buffer);
 
 // end include: runtime_init_memory.js
@@ -1187,18 +1179,20 @@ var wasmTable = new WebAssembly.Table({
 
 // Initializes the stack cookie. Called at the startup of main and at the startup of each thread in pthreads mode.
 function writeStackCookie() {
-  assert((STACK_MAX & 3) == 0);
+  var max = _emscripten_stack_get_end();
+  assert((max & 3) == 0);
   // The stack grows downwards
-  HEAPU32[(STACK_MAX >> 2)+1] = 0x2135467;
-  HEAPU32[(STACK_MAX >> 2)+2] = 0x89BACDFE;
+  HEAPU32[(max >> 2)+1] = 0x2135467;
+  HEAPU32[(max >> 2)+2] = 0x89BACDFE;
   // Also test the global address 0 for integrity.
   HEAP32[0] = 0x63736d65; /* 'emsc' */
 }
 
 function checkStackCookie() {
   if (ABORT) return;
-  var cookie1 = HEAPU32[(STACK_MAX >> 2)+1];
-  var cookie2 = HEAPU32[(STACK_MAX >> 2)+2];
+  var max = _emscripten_stack_get_end();
+  var cookie1 = HEAPU32[(max >> 2)+1];
+  var cookie2 = HEAPU32[(max >> 2)+2];
   if (cookie1 != 0x2135467 || cookie2 != 0x89BACDFE) {
     abort('Stack overflow! Stack cookie has been overwritten, expected hex dwords 0x89BACDFE and 0x2135467, but received 0x' + cookie2.toString(16) + ' ' + cookie1.toString(16));
   }
@@ -1480,14 +1474,13 @@ if (!isDataURI(wasmBinaryFile)) {
   wasmBinaryFile = locateFile(wasmBinaryFile);
 }
 
-function getBinary() {
+function getBinary(file) {
   try {
-    if (wasmBinary) {
+    if (file == wasmBinaryFile && wasmBinary) {
       return new Uint8Array(wasmBinary);
     }
-
     if (readBinary) {
-      return readBinary(wasmBinaryFile);
+      return readBinary(file);
     } else {
       throw "both async and sync fetching of the wasm failed";
     }
@@ -1510,11 +1503,11 @@ function getBinaryPromise() {
       }
       return response['arrayBuffer']();
     }).catch(function () {
-      return getBinary();
+      return getBinary(wasmBinaryFile);
     });
   }
   // Otherwise, getBinary should be able to get it synchronously
-  return Promise.resolve().then(getBinary);
+  return Promise.resolve().then(function() { return getBinary(wasmBinaryFile); });
 }
 
 // Create the wasm instance.
@@ -1523,7 +1516,9 @@ function createWasm() {
   // prepare imports
   var info = {
     'env': asmLibraryArg,
-    'wasi_snapshot_preview1': asmLibraryArg
+    'wasi_snapshot_preview1': asmLibraryArg,
+    'GOT.mem': new Proxy(asmLibraryArg, GOTHandler),
+    'GOT.func': new Proxy(asmLibraryArg, GOTHandler),
   };
   // Load the wasm module and create an instance of using native support in the JS engine.
   // handle a generated wasm instance, receiving its exports and
@@ -1587,6 +1582,7 @@ function createWasm() {
       return instantiateArrayBuffer(receiveInstantiatedSource);
     }
   }
+
   // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
   // to manually instantiate the Wasm module themselves. This allows pages to run the instantiation parallel
   // to any other async startup actions they are performing.
@@ -1619,8 +1615,18 @@ var ASM_CONSTS = {
 
 
 
+  var GOT={};
+  Module["GOT"] = GOT;
+  var GOTHandler={get:function(obj, symName) {
+        if (!GOT[symName]) {
+          GOT[symName] = new WebAssembly.Global({value: 'i32', mutable: true});
+        }
+        return GOT[symName]
+      }};
+  Module["GOTHandler"] = GOTHandler;
+
   function abortStackOverflow(allocSize) {
-      abort('Stack overflow! Attempted to allocate ' + allocSize + ' bytes on the stack, but stack has only ' + (STACK_MAX - stackSave() + allocSize) + ' bytes available!');
+      abort('Stack overflow! Attempted to allocate ' + allocSize + ' bytes on the stack, but stack has only ' + (_emscripten_stack_get_free() + allocSize) + ' bytes available!');
     }
   Module["abortStackOverflow"] = abortStackOverflow;
 
@@ -1661,32 +1667,6 @@ var ASM_CONSTS = {
         });
     }
   Module["demangleAll"] = demangleAll;
-
-  function dynCallLegacy(sig, ptr, args) {
-      assert(('dynCall_' + sig) in Module, 'bad function pointer type - no table for sig \'' + sig + '\'');
-      if (args && args.length) {
-        // j (64-bit integer) must be passed in as two numbers [low 32, high 32].
-        assert(args.length === sig.substring(1).replace(/j/g, '--').length);
-      } else {
-        assert(sig.length == 1);
-      }
-      if (args && args.length) {
-        return Module['dynCall_' + sig].apply(null, [ptr].concat(args));
-      }
-      return Module['dynCall_' + sig].call(null, ptr);
-    }
-  Module["dynCallLegacy"] = dynCallLegacy;
-  function dynCall(sig, ptr, args) {
-      // Without WASM_BIGINT support we cannot directly call function with i64 as
-      // part of thier signature, so we rely the dynCall functions generated by
-      // wasm-emscripten-finalize
-      if (sig.indexOf('j') != -1) {
-        return dynCallLegacy(sig, ptr, args);
-      }
-      assert(wasmTable.get(ptr), 'missing table entry in dynCall: ' + ptr);
-      return wasmTable.get(ptr).apply(null, args)
-    }
-  Module["dynCall"] = dynCall;
 
   function jsStackTrace() {
       var error = new Error();
@@ -1731,10 +1711,39 @@ var ASM_CONSTS = {
       var end = (ret + size + 15) & -16;
       assert(end <= HEAP8.length, 'failure to getMemory - memory growth etc. is not supported there, call malloc/sbrk directly or increase INITIAL_MEMORY');
       Module['___heap_base'] = end;
+      GOT['__heap_base'].value = end;
       return ret;
     }
   Module["getMemory"] = getMemory;
   
+  function updateGOT(exports) {
+      for (var symName in exports) {
+        if (symName == '__cpp_exception' || symName == '__dso_handle' || symName == '__wasm_apply_relocs') {
+          continue;
+        }
+  
+        var replace = false;
+        var value = exports[symName];
+        if (symName.indexOf('orig$') == 0) {
+          symName = symName.split('$')[1];
+          replace = true;
+        }
+  
+        if (!GOT[symName]) {
+          GOT[symName] = new WebAssembly.Global({value: 'i32', mutable: true});
+        }
+        if (replace || GOT[symName].value == 0) {
+          if (typeof value === 'function') {
+            GOT[symName].value = addFunctionWasm(value);
+          } else if (typeof value === 'number') {
+            GOT[symName].value = value;
+          } else {
+            err("unhandled export type for `" + symName + "`: " + (typeof value));
+          }
+        }
+      }
+    }
+  Module["updateGOT"] = updateGOT;
   function relocateExports(exports, memoryBase) {
       var relocated = {};
   
@@ -1750,6 +1759,7 @@ var ASM_CONSTS = {
         }
         relocated[e] = value;
       }
+      updateGOT(relocated);
       return relocated;
     }
   Module["relocateExports"] = relocateExports;
@@ -1759,36 +1769,36 @@ var ASM_CONSTS = {
       return x.indexOf('dynCall_') == 0 || unmangledSymbols.indexOf(x) != -1 ? x : '_' + x;
     }
   Module["asmjsMangle"] = asmjsMangle;
-  
-  function resolveGlobalSymbol(sym, legalized) {
-      // In case the function was legalized, look for the original export first.
-      // We always want to return the original wasm function here since this
-      // function is used in the internal linking only.
-      if (!legalized) {
-        var orig = Module['asm']['orig$' + sym];
-        if (orig) {
-          return orig;
-        }
+  function resolveGlobalSymbol(symName, direct) {
+      var sym;
+      if (direct) {
+        // First look for the orig$ symbol which is the symbols without
+        // any legalization performed.   Here we look on the 'asm' object
+        // to avoid any JS wrapping of the symbol.
+        sym = Module['asm']['orig$' + symName];
+      }
+      // Then look for the unmangled name itself.
+      if (!sym) {
+        sym = Module['asm'][symName];
+      }
+      // fall back to the mangled name on the module object which could include
+      // JavaScript functions and wrapped native functions.
+      if (!sym && direct) {
+        sym = Module['_orig$' + symName];
       }
   
-      var resolved = Module['asm'][sym];
-      if (!resolved) {
-        if (!legalized) {
-          orig = Module['_orig$' + sym];
-          if (orig) {
-            return orig;
-          }
-       }
-        resolved = Module[asmjsMangle(sym)];
+      if (!sym) {
+        sym = Module[asmjsMangle(symName)];
       }
   
-      if (!resolved && sym.startsWith('invoke_')) {
-        resolved = createInvokeFunction(sym.split('_')[1]);
+      if (!sym && symName.indexOf('invoke_') == 0) {
+        sym = createInvokeFunction(symName.split('_')[1]);
       }
-      return resolved;
+  
+      return sym;
     }
   Module["resolveGlobalSymbol"] = resolveGlobalSymbol;
-  function loadSideModule(binary, flags) {
+  function loadWebAssemblyModule(binary, flags) {
       var int32View = new Uint32Array(new Uint8Array(binary.subarray(0, 24)).buffer);
       assert(int32View[0] == 0x6d736100, 'need to see wasm magic number'); // \0asm
       // we should see the dylink section right after the magic number and wasm version
@@ -1871,16 +1881,12 @@ var ASM_CONSTS = {
         // b) Symbols from side modules are not always added to the global namespace.
         var moduleExports;
   
-        function resolveSymbol(sym, type, legalized) {
-          var resolved = resolveGlobalSymbol(sym, legalized);
-          if (!resolved && !legalized) {
-            // In case the function was legalized, look for the original export first.
-            resolved = moduleExports['orig$' + sym];
-          }
+        function resolveSymbol(sym) {
+          var resolved = resolveGlobalSymbol(sym, false);
           if (!resolved) {
             resolved = moduleExports[sym];
           }
-          assert(resolved, 'missing linked ' + type + ' `' + sym + '`. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment');
+          assert(resolved, 'undefined symbol `' + sym + '`. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment');
           return resolved;
         }
   
@@ -1911,66 +1917,37 @@ var ASM_CONSTS = {
               case '__table_base':
                 return tableBase;
             }
-  
             if (prop in obj) {
               return obj[prop]; // already present
             }
-            if (prop.startsWith('g$')) {
-              // a global. the g$ function returns the global address.
-              var name = prop.substr(2); // without g$ prefix
-              return obj[prop] = function() {
-                return resolveSymbol(name, 'global');
-              };
-            }
-            if (prop.startsWith('fp$')) {
-              // the fp$ function returns the address (table index) of the function
-              var parts = prop.split('$');
-              assert(parts.length == 3)
-              var name = parts[1];
-              var sig = parts[2];
-              var fp = 0;
-              return obj[prop] = function() {
-                if (!fp) {
-                  var f = resolveSymbol(name, 'function');
-                  fp = addFunction(f, sig);
-                }
-                return fp;
-              };
-            }
             // otherwise this is regular function import - call it indirectly
+            var resolved;
             return obj[prop] = function() {
-              return resolveSymbol(prop, 'function', true).apply(null, arguments);
+              if (!resolved) resolved = resolveSymbol(prop, true);
+              return resolved.apply(null, arguments);
             };
           }
         };
         var proxy = new Proxy(env, proxyHandler);
         var info = {
-          global: {
-            'NaN': NaN,
-            'Infinity': Infinity,
-          },
-          'global.Math': Math,
-          env: proxy,
+          'GOT.mem': new Proxy(asmLibraryArg, GOTHandler),
+          'GOT.func': new Proxy(asmLibraryArg, GOTHandler),
+          'env': proxy,
           wasi_snapshot_preview1: proxy,
         };
-        var oldTable = [];
-        for (var i = 0; i < tableBase; i++) {
-          oldTable.push(table.get(i));
-        }
   
         function postInstantiation(instance) {
           // the table should be unchanged
           assert(table === originalTable);
           assert(table === wasmTable);
-          // the old part of the table should be unchanged
-          for (var i = 0; i < tableBase; i++) {
-            assert(table.get(i) === oldTable[i], 'old table entries must remain the same');
-          }
           // verify that the new table region was filled in
           for (var i = 0; i < tableSize; i++) {
             assert(table.get(tableBase + i) !== undefined, 'table entry was not filled in');
           }
           moduleExports = relocateExports(instance.exports, memoryBase);
+          if (!flags.allowUndefined) {
+            reportUndefinedSymbols();
+          }
           // initialize the module
           var init = moduleExports['__post_instantiate'];
           if (init) {
@@ -2008,7 +1985,7 @@ var ASM_CONSTS = {
       });
       return loadModule();
     }
-  Module["loadSideModule"] = loadSideModule;
+  Module["loadWebAssemblyModule"] = loadWebAssemblyModule;
   
   function fetchBinary(url) {
       return fetch(url, { credentials: 'same-origin' }).then(function(response) {
@@ -2075,7 +2052,7 @@ var ASM_CONSTS = {
         if (flags.fs) {
           var libData = flags.fs.readFile(libFile, {encoding: 'binary'});
           if (!(libData instanceof Uint8Array)) {
-            libData = new Uint8Array(lib_data);
+            libData = new Uint8Array(libData);
           }
           return flags.loadAsync ? Promise.resolve(libData) : libData;
         }
@@ -2099,11 +2076,11 @@ var ASM_CONSTS = {
         // module not preloaded - load lib data and create new module from it
         if (flags.loadAsync) {
           return loadLibData(lib).then(function(libData) {
-            return loadSideModule(libData, flags);
+            return loadWebAssemblyModule(libData, flags);
           });
         }
   
-        return loadSideModule(loadLibData(lib), flags);
+        return loadWebAssemblyModule(loadLibData(lib), flags);
       }
   
       // Module.symbols <- libModule.symbols (flags.global handler)
@@ -2117,7 +2094,8 @@ var ASM_CONSTS = {
           // When RTLD_GLOBAL is enable, the symbols defined by this shared object will be made
           // available for symbol resolution of subsequently loaded shared objects.
           //
-          // We should copy the symbols (which include methods and variables) from SIDE_MODULE to MAIN_MODULE.
+          // We should copy the symbols (which include methods and variables) from
+          // SIDE_MODULE to MAIN_MODULE.
   
           var module_sym = asmjsMangle(sym);
   
@@ -2146,32 +2124,55 @@ var ASM_CONSTS = {
       return handle;
     }
   Module["loadDynamicLibrary"] = loadDynamicLibrary;
+  
+  function reportUndefinedSymbols() {
+      for (var symName in GOT) {
+        if (GOT[symName].value == 0) {
+          var value = resolveGlobalSymbol(symName, true)
+          assert(value, 'undefined symbol `' + symName + '`. perhaps a side module was not linked in? if this global was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment');
+          if (typeof value === 'function') {
+            GOT[symName].value = addFunctionWasm(value, value.sig);
+          } else if (typeof value === 'number') {
+            GOT[symName].value = value;
+          } else {
+            assert(false, 'bad export type for `' + symName + '`: ' + (typeof value));
+          }
+        }
+      }
+    }
+  Module["reportUndefinedSymbols"] = reportUndefinedSymbols;
   function preloadDylibs() {
       var libs = [];
       if (Module['dynamicLibraries']) {
         libs = libs.concat(Module['dynamicLibraries'])
       }
       if (!libs.length) {
+        reportUndefinedSymbols();
         return;
       }
+  
       // if we can load dynamic libraries synchronously, do so, otherwise, preload
       if (!readBinary) {
         // we can't read binary data synchronously, so preload
         addRunDependency('preloadDylibs');
         Promise.all(libs.map(function(lib) {
-          return loadDynamicLibrary(lib, {loadAsync: true, global: true, nodelete: true});
+          return loadDynamicLibrary(lib, {loadAsync: true, global: true, nodelete: true, allowUndefined: true});
         })).then(function() {
           // we got them all, wonderful
           removeRunDependency('preloadDylibs');
+          reportUndefinedSymbols();
         });
         return;
       }
+  
       libs.forEach(function(lib) {
         // libraries linked to main never go away
-        loadDynamicLibrary(lib, {global: true, nodelete: true});
+        loadDynamicLibrary(lib, {global: true, nodelete: true, allowUndefined: true});
       });
+      reportUndefinedSymbols();
     }
   Module["preloadDylibs"] = preloadDylibs;
+
 
 
   function stackTrace() {
@@ -2183,37 +2184,37 @@ var ASM_CONSTS = {
 
   function _Add(
   ) {
-  if (!Module['_Add']) abort("external function 'Add' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['_Add']) abort("external symbol 'Add' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['_Add'].apply(null, arguments);
   }
 
   function __Unwind_GetIP(
   ) {
-  if (!Module['__Unwind_GetIP']) abort("external function '_Unwind_GetIP' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['__Unwind_GetIP']) abort("external symbol '_Unwind_GetIP' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['__Unwind_GetIP'].apply(null, arguments);
   }
 
   function __Unwind_GetLanguageSpecificData(
   ) {
-  if (!Module['__Unwind_GetLanguageSpecificData']) abort("external function '_Unwind_GetLanguageSpecificData' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['__Unwind_GetLanguageSpecificData']) abort("external symbol '_Unwind_GetLanguageSpecificData' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['__Unwind_GetLanguageSpecificData'].apply(null, arguments);
   }
 
   function __Unwind_GetRegionStart(
   ) {
-  if (!Module['__Unwind_GetRegionStart']) abort("external function '_Unwind_GetRegionStart' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['__Unwind_GetRegionStart']) abort("external symbol '_Unwind_GetRegionStart' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['__Unwind_GetRegionStart'].apply(null, arguments);
   }
 
   function __Unwind_SetGR(
   ) {
-  if (!Module['__Unwind_SetGR']) abort("external function '_Unwind_SetGR' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['__Unwind_SetGR']) abort("external symbol '_Unwind_SetGR' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['__Unwind_SetGR'].apply(null, arguments);
   }
 
   function __Unwind_SetIP(
   ) {
-  if (!Module['__Unwind_SetIP']) abort("external function '_Unwind_SetIP' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['__Unwind_SetIP']) abort("external symbol '_Unwind_SetIP' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['__Unwind_SetIP'].apply(null, arguments);
   }
 
@@ -2260,6 +2261,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_tzset"] = _tzset;
+  _tzset.sig = 'v';
   function _mktime(tmPtr) {
       _tzset();
       var date = new Date(HEAP32[(((tmPtr)+(20))>>2)] + 1900,
@@ -2292,10 +2294,17 @@ var ASM_CONSTS = {
       HEAP32[(((tmPtr)+(24))>>2)]=date.getDay();
       var yday = ((date.getTime() - start.getTime()) / (1000 * 60 * 60 * 24))|0;
       HEAP32[(((tmPtr)+(28))>>2)]=yday;
+      // To match expected behavior, update fields from date
+      HEAP32[((tmPtr)>>2)]=date.getSeconds();
+      HEAP32[(((tmPtr)+(4))>>2)]=date.getMinutes();
+      HEAP32[(((tmPtr)+(8))>>2)]=date.getHours();
+      HEAP32[(((tmPtr)+(12))>>2)]=date.getDate();
+      HEAP32[(((tmPtr)+(16))>>2)]=date.getMonth();
   
       return (date.getTime() / 1000)|0;
     }
   Module["_mktime"] = _mktime;
+  _mktime.sig = 'ii';
   function _asctime_r(tmPtr, buf) {
       var date = {
         tm_sec: HEAP32[((tmPtr)>>2)],
@@ -2324,6 +2333,7 @@ var ASM_CONSTS = {
       return buf;
     }
   Module["_asctime_r"] = _asctime_r;
+  _asctime_r.sig = 'iii';
   function ___asctime_r(a0,a1
   ) {
   return _asctime_r(a0,a1);
@@ -2365,15 +2375,18 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_clock_gettime"] = _clock_gettime;
+  _clock_gettime.sig = 'iii';
   function ___clock_gettime(a0,a1
   ) {
   return _clock_gettime(a0,a1);
   }
   Module["___clock_gettime"] = ___clock_gettime;
+  ___clock_gettime.sig = 'iii';
 
   function _atexit(func, arg) {
     }
   Module["_atexit"] = _atexit;
+  _atexit.sig = 'iii';
   function ___cxa_atexit(a0,a1
   ) {
   return _atexit(a0,a1);
@@ -2400,6 +2413,7 @@ var ASM_CONSTS = {
       return tmPtr;
     }
   Module["_gmtime_r"] = _gmtime_r;
+  _gmtime_r.sig = 'iii';
   function ___gmtime_r(a0,a1
   ) {
   return _gmtime_r(a0,a1);
@@ -2434,6 +2448,7 @@ var ASM_CONSTS = {
       return tmPtr;
     }
   Module["_localtime_r"] = _localtime_r;
+  _localtime_r.sig = 'iii';
   function ___localtime_r(a0,a1
   ) {
   return _localtime_r(a0,a1);
@@ -2448,8 +2463,14 @@ var ASM_CONSTS = {
 
   function ___posix_spawnx(
   ) {
-  if (!Module['___posix_spawnx']) abort("external function '__posix_spawnx' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['___posix_spawnx']) abort("external symbol '__posix_spawnx' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['___posix_spawnx'].apply(null, arguments);
+  }
+
+  function ___pthread_once(
+  ) {
+  if (!Module['___pthread_once']) abort("external symbol '__pthread_once' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  return Module['___pthread_once'].apply(null, arguments);
   }
 
   var PATH={splitPath:function(filename) {
@@ -3076,10 +3097,7 @@ var ASM_CONSTS = {
   
   var ERRNO_CODES={EPERM:63,ENOENT:44,ESRCH:71,EINTR:27,EIO:29,ENXIO:60,E2BIG:1,ENOEXEC:45,EBADF:8,ECHILD:12,EAGAIN:6,EWOULDBLOCK:6,ENOMEM:48,EACCES:2,EFAULT:21,ENOTBLK:105,EBUSY:10,EEXIST:20,EXDEV:75,ENODEV:43,ENOTDIR:54,EISDIR:31,EINVAL:28,ENFILE:41,EMFILE:33,ENOTTY:59,ETXTBSY:74,EFBIG:22,ENOSPC:51,ESPIPE:70,EROFS:69,EMLINK:34,EPIPE:64,EDOM:18,ERANGE:68,ENOMSG:49,EIDRM:24,ECHRNG:106,EL2NSYNC:156,EL3HLT:107,EL3RST:108,ELNRNG:109,EUNATCH:110,ENOCSI:111,EL2HLT:112,EDEADLK:16,ENOLCK:46,EBADE:113,EBADR:114,EXFULL:115,ENOANO:104,EBADRQC:103,EBADSLT:102,EDEADLOCK:16,EBFONT:101,ENOSTR:100,ENODATA:116,ETIME:117,ENOSR:118,ENONET:119,ENOPKG:120,EREMOTE:121,ENOLINK:47,EADV:122,ESRMNT:123,ECOMM:124,EPROTO:65,EMULTIHOP:36,EDOTDOT:125,EBADMSG:9,ENOTUNIQ:126,EBADFD:127,EREMCHG:128,ELIBACC:129,ELIBBAD:130,ELIBSCN:131,ELIBMAX:132,ELIBEXEC:133,ENOSYS:52,ENOTEMPTY:55,ENAMETOOLONG:37,ELOOP:32,EOPNOTSUPP:138,EPFNOSUPPORT:139,ECONNRESET:15,ENOBUFS:42,EAFNOSUPPORT:5,EPROTOTYPE:67,ENOTSOCK:57,ENOPROTOOPT:50,ESHUTDOWN:140,ECONNREFUSED:14,EADDRINUSE:3,ECONNABORTED:13,ENETUNREACH:40,ENETDOWN:38,ETIMEDOUT:73,EHOSTDOWN:142,EHOSTUNREACH:23,EINPROGRESS:26,EALREADY:7,EDESTADDRREQ:17,EMSGSIZE:35,EPROTONOSUPPORT:66,ESOCKTNOSUPPORT:137,EADDRNOTAVAIL:4,ENETRESET:39,EISCONN:30,ENOTCONN:53,ETOOMANYREFS:141,EUSERS:136,EDQUOT:19,ESTALE:72,ENOTSUP:138,ENOMEDIUM:148,EILSEQ:25,EOVERFLOW:61,ECANCELED:11,ENOTRECOVERABLE:56,EOWNERDEAD:62,ESTRPIPE:135};
   Module["ERRNO_CODES"] = ERRNO_CODES;
-  var FS={root:null,mounts:[],devices:{},streams:[],nextInode:1,nameTable:null,currentPath:"/",initialized:false,ignorePermissions:true,trackingDelegate:{},tracking:{openFlags:{READ:1,WRITE:2}},ErrnoError:null,genericErrors:{},filesystems:null,syncFSRequests:0,handleFSError:function(e) {
-        if (!(e instanceof FS.ErrnoError)) throw e + ' : ' + stackTrace();
-        return setErrNo(e.errno);
-      },lookupPath:function(path, opts) {
+  var FS={root:null,mounts:[],devices:{},streams:[],nextInode:1,nameTable:null,currentPath:"/",initialized:false,ignorePermissions:true,trackingDelegate:{},tracking:{openFlags:{READ:1,WRITE:2}},ErrnoError:null,genericErrors:{},filesystems:null,syncFSRequests:0,lookupPath:function(path, opts) {
         path = PATH_FS.resolve(FS.cwd(), path);
         opts = opts || {};
   
@@ -3220,7 +3238,7 @@ var ASM_CONSTS = {
         return (mode & 61440) === 4096;
       },isSocket:function(mode) {
         return (mode & 49152) === 49152;
-      },flagModes:{"r":0,"rs":1052672,"r+":2,"w":577,"wx":705,"xw":705,"w+":578,"wx+":706,"xw+":706,"a":1089,"ax":1217,"xa":1217,"a+":1090,"ax+":1218,"xa+":1218},modeStringToFlags:function(str) {
+      },flagModes:{"r":0,"r+":2,"w":577,"w+":578,"a":1089,"a+":1090},modeStringToFlags:function(str) {
         var flags = FS.flagModes[str];
         if (typeof flags === 'undefined') {
           throw new Error('Unknown file open mode: ' + str);
@@ -4074,7 +4092,7 @@ var ASM_CONSTS = {
         return stream.stream_ops.ioctl(stream, cmd, arg);
       },readFile:function(path, opts) {
         opts = opts || {};
-        opts.flags = opts.flags || 'r';
+        opts.flags = opts.flags || 0;
         opts.encoding = opts.encoding || 'binary';
         if (opts.encoding !== 'utf8' && opts.encoding !== 'binary') {
           throw new Error('Invalid encoding type "' + opts.encoding + '"');
@@ -4094,7 +4112,7 @@ var ASM_CONSTS = {
         return ret;
       },writeFile:function(path, data, opts) {
         opts = opts || {};
-        opts.flags = opts.flags || 'w';
+        opts.flags = opts.flags || 577;
         var stream = FS.open(path, opts.flags, opts.mode);
         if (typeof data === 'string') {
           var buf = new Uint8Array(lengthBytesUTF8(data)+1);
@@ -4135,7 +4153,7 @@ var ASM_CONSTS = {
         });
         FS.mkdev('/dev/null', FS.makedev(1, 3));
         // setup /dev/tty and /dev/tty1
-        // stderr needs to print output using Module['printErr']
+        // stderr needs to print output using err() rather than out()
         // so we register a second tty just for it.
         TTY.register(FS.makedev(5, 0), TTY.default_tty_ops);
         TTY.register(FS.makedev(6, 0), TTY.default_tty1_ops);
@@ -4200,9 +4218,9 @@ var ASM_CONSTS = {
         }
   
         // open default streams for the stdin, stdout and stderr devices
-        var stdin = FS.open('/dev/stdin', 'r');
-        var stdout = FS.open('/dev/stdout', 'w');
-        var stderr = FS.open('/dev/stderr', 'w');
+        var stdin = FS.open('/dev/stdin', 0);
+        var stdout = FS.open('/dev/stdout', 1);
+        var stderr = FS.open('/dev/stderr', 1);
         assert(stdin.fd === 0, 'invalid handle for stdin (' + stdin.fd + ')');
         assert(stdout.fd === 1, 'invalid handle for stdout (' + stdout.fd + ')');
         assert(stderr.fd === 2, 'invalid handle for stderr (' + stderr.fd + ')');
@@ -4286,7 +4304,6 @@ var ASM_CONSTS = {
         if (ret.exists) {
           return ret.object;
         } else {
-          setErrNo(ret.error);
           return null;
         }
       },analyzePath:function(path, dontResolveLastLink) {
@@ -4347,7 +4364,7 @@ var ASM_CONSTS = {
           }
           // make sure we can write to the file
           FS.chmod(node, mode | 146);
-          var stream = FS.open(node, 'w');
+          var stream = FS.open(node, 577);
           FS.write(stream, data, 0, data.length, 0, canOwn);
           FS.close(stream);
           FS.chmod(node, mode);
@@ -4408,7 +4425,6 @@ var ASM_CONSTS = {
         return FS.mkdev(path, mode, dev);
       },forceLoadFile:function(obj) {
         if (obj.isDevice || obj.isFolder || obj.link || obj.contents) return true;
-        var success = true;
         if (typeof XMLHttpRequest !== 'undefined') {
           throw new Error("Lazy loading should have been performed (contents set) in createLazyFile, but it was not. Lazy loading only works in web workers. Use --embed-file or --preload-file in emcc on the main thread.");
         } else if (read_) {
@@ -4419,13 +4435,11 @@ var ASM_CONSTS = {
             obj.contents = intArrayFromString(read_(obj.url), true);
             obj.usedBytes = obj.contents.length;
           } catch (e) {
-            success = false;
+            throw new FS.ErrnoError(29);
           }
         } else {
           throw new Error('Cannot load without read() or XMLHttpRequest.');
         }
-        if (!success) setErrNo(29);
-        return success;
       },createLazyFile:function(parent, name, url, canRead, canWrite) {
         // Lazy chunked Uint8Array (implements get and length from Uint8Array). Actual getting is abstracted away for eventual reuse.
         /** @constructor */
@@ -4556,17 +4570,13 @@ var ASM_CONSTS = {
         keys.forEach(function(key) {
           var fn = node.stream_ops[key];
           stream_ops[key] = function forceLoadLazyFile() {
-            if (!FS.forceLoadFile(node)) {
-              throw new FS.ErrnoError(29);
-            }
+            FS.forceLoadFile(node);
             return fn.apply(null, arguments);
           };
         });
         // use a custom read function
         stream_ops.read = function stream_ops_read(stream, buffer, offset, length, position) {
-          if (!FS.forceLoadFile(node)) {
-            throw new FS.ErrnoError(29);
-          }
+          FS.forceLoadFile(node);
           var contents = stream.node.contents;
           if (position >= contents.length)
             return 0;
@@ -5293,12 +5303,14 @@ var ASM_CONSTS = {
   return ___sys_getegid32();
   }
   Module["___sys_geteuid32"] = ___sys_geteuid32;
+  ___sys_geteuid32.sig = 'i';
 
   function ___sys_getgid32(
   ) {
   return ___sys_getegid32();
   }
   Module["___sys_getgid32"] = ___sys_getgid32;
+  ___sys_getgid32.sig = 'i';
 
   function ___sys_getgroups32(size, list) {
       if (size < 1) return -28;
@@ -5341,6 +5353,7 @@ var ASM_CONSTS = {
   return ___sys_getresgid32(a0,a1,a2);
   }
   Module["___sys_getresuid32"] = ___sys_getresuid32;
+  ___sys_getresuid32.sig = 'iiii';
 
   function ___sys_getrusage(who, usage) {try {
   
@@ -5368,6 +5381,7 @@ var ASM_CONSTS = {
   return ___sys_getegid32();
   }
   Module["___sys_getuid32"] = ___sys_getuid32;
+  ___sys_getuid32.sig = 'i';
 
   function ___sys_ioctl(fd, op, varargs) {SYSCALLS.varargs = varargs;
   try {
@@ -5517,11 +5531,13 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["___sys_mlock"] = ___sys_mlock;
+  ___sys_mlock.sig = 'iii';
 
   function ___sys_mlockall(flags) {
       return 0;
     }
   Module["___sys_mlockall"] = ___sys_mlockall;
+  ___sys_mlockall.sig = 'ii';
 
   function syscallMmap2(addr, len, prot, flags, fd, off) {
       off <<= 12; // undo pgoffset
@@ -5589,11 +5605,13 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["___sys_munlock"] = ___sys_munlock;
+  ___sys_munlock.sig = 'iii';
 
   function ___sys_munlockall() {
       return 0;
     }
   Module["___sys_munlockall"] = ___sys_munlockall;
+  ___sys_munlockall.sig = 'i';
 
   function syscallMunmap(addr, len) {
       if ((addr | 0) === -1 || len === 0) {
@@ -5635,7 +5653,7 @@ var ASM_CONSTS = {
   try {
   
       var pathname = SYSCALLS.getStr(path);
-      var mode = SYSCALLS.get();
+      var mode = varargs ? SYSCALLS.get() : 0;
       var stream = FS.open(pathname, flags, mode);
       return stream.fd;
     } catch (e) {
@@ -5690,7 +5708,7 @@ var ASM_CONSTS = {
         var readableStream = FS.createStream({
           path: rName,
           node: rNode,
-          flags: FS.modeStringToFlags('r'),
+          flags: 0,
           seekable: false,
           stream_ops: PIPEFS.stream_ops
         });
@@ -5699,7 +5717,7 @@ var ASM_CONSTS = {
         var writableStream = FS.createStream({
           path: wName,
           node: wNode,
-          flags: FS.modeStringToFlags('w'),
+          flags: 1,
           seekable: false,
           stream_ops: PIPEFS.stream_ops
         });
@@ -5911,29 +5929,6 @@ var ASM_CONSTS = {
   }
   Module["___sys_poll"] = ___sys_poll;
 
-  function ___sys_pread64(fd, buf, count, zero, low, high) {try {
-  
-      var stream = SYSCALLS.getStreamFromFD(fd)
-      var offset = SYSCALLS.get64(low, high);
-      return FS.read(stream, HEAP8,buf, count, offset);
-    } catch (e) {
-    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
-    return -e.errno;
-  }
-  }
-  Module["___sys_pread64"] = ___sys_pread64;
-
-  function ___sys_preadv(fd, iov, iovcnt, low, high) {try {
-  
-      var stream = SYSCALLS.getStreamFromFD(fd);
-      return SYSCALLS.doReadv(stream, iov, iovcnt, offset);
-    } catch (e) {
-    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
-    return -e.errno;
-  }
-  }
-  Module["___sys_preadv"] = ___sys_preadv;
-
   function ___sys_prlimit64(pid, resource, new_limit, old_limit) {try {
   
       if (old_limit) { // just report no limits
@@ -5954,41 +5949,6 @@ var ASM_CONSTS = {
       return -52; // unsupported feature
     }
   Module["___sys_pselect6"] = ___sys_pselect6;
-
-  function ___sys_pwrite64(fd, buf, count, zero, low, high) {try {
-  
-      var stream = SYSCALLS.getStreamFromFD(fd)
-      var offset = SYSCALLS.get64(low, high);
-      return FS.write(stream, HEAP8,buf, count, offset);
-    } catch (e) {
-    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
-    return -e.errno;
-  }
-  }
-  Module["___sys_pwrite64"] = ___sys_pwrite64;
-
-  function ___sys_pwritev(fd, iov, iovcnt, low, high) {try {
-  
-      var stream = SYSCALLS.getStreamFromFD(fd);
-      var offset = SYSCALLS.get64(low, high);
-      return SYSCALLS.doWritev(stream, iov, iovcnt, offset);
-    } catch (e) {
-    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
-    return -e.errno;
-  }
-  }
-  Module["___sys_pwritev"] = ___sys_pwritev;
-
-  function ___sys_read(fd, buf, count) {try {
-  
-      var stream = SYSCALLS.getStreamFromFD(fd);
-      return FS.read(stream, HEAP8,buf, count);
-    } catch (e) {
-    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
-    return -e.errno;
-  }
-  }
-  Module["___sys_read"] = ___sys_read;
 
   function ___sys_readlink(path, buf, bufsize) {try {
   
@@ -6146,7 +6106,7 @@ var ASM_CONSTS = {
         var stream = FS.createStream({
           path: name,
           node: node,
-          flags: FS.modeStringToFlags('r+'),
+          flags: 2,
           seekable: false,
           stream_ops: SOCKFS.stream_ops
         });
@@ -6944,16 +6904,22 @@ var ASM_CONSTS = {
     }
   Module["__read_sockaddr"] = __read_sockaddr;
   
-  function __write_sockaddr(sa, family, addr, port) {
+  function __write_sockaddr(sa, family, addr, port, addrlen) {
       switch (family) {
         case 2:
           addr = __inet_pton4_raw(addr);
+          if (addrlen) {
+            HEAP32[((addrlen)>>2)]=16;
+          }
           HEAP16[((sa)>>1)]=family;
           HEAP32[(((sa)+(4))>>2)]=addr;
           HEAP16[(((sa)+(2))>>1)]=_htons(port);
           break;
         case 10:
           addr = __inet_pton6_raw(addr);
+          if (addrlen) {
+            HEAP32[((addrlen)>>2)]=28;
+          }
           HEAP32[((sa)>>2)]=family;
           HEAP32[(((sa)+(8))>>2)]=addr[0];
           HEAP32[(((sa)+(12))>>2)]=addr[1];
@@ -6964,10 +6930,9 @@ var ASM_CONSTS = {
           HEAP32[(((sa)+(24))>>2)]=0;
           break;
         default:
-          return { errno: 5 };
+          return 5;
       }
-      // kind of lame, but let's match _read_sockaddr's interface
-      return {};
+      return 0;
     }
   Module["__write_sockaddr"] = __write_sockaddr;
   function ___sys_socketcall(call, socketvararg) {try {
@@ -7016,16 +6981,16 @@ var ASM_CONSTS = {
           var sock = getSocketFromFD(), addr = SYSCALLS.get(), addrlen = SYSCALLS.get();
           var newsock = sock.sock_ops.accept(sock);
           if (addr) {
-            var res = __write_sockaddr(addr, newsock.family, DNS.lookup_name(newsock.daddr), newsock.dport);
-            assert(!res.errno);
+            var errno = __write_sockaddr(addr, newsock.family, DNS.lookup_name(newsock.daddr), newsock.dport, addrlen);
+            assert(!errno);
           }
           return newsock.stream.fd;
         }
         case 6: { // getsockname
           var sock = getSocketFromFD(), addr = SYSCALLS.get(), addrlen = SYSCALLS.get();
           // TODO: sock.saddr should never be undefined, see TODO in websocket_sock_ops.getname
-          var res = __write_sockaddr(addr, sock.family, DNS.lookup_name(sock.saddr || '0.0.0.0'), sock.sport);
-          assert(!res.errno);
+          var errno = __write_sockaddr(addr, sock.family, DNS.lookup_name(sock.saddr || '0.0.0.0'), sock.sport, addrlen);
+          assert(!errno);
           return 0;
         }
         case 7: { // getpeername
@@ -7033,8 +6998,8 @@ var ASM_CONSTS = {
           if (!sock.daddr) {
             return -53; // The socket is not connected.
           }
-          var res = __write_sockaddr(addr, sock.family, DNS.lookup_name(sock.daddr), sock.dport);
-          assert(!res.errno);
+          var errno = __write_sockaddr(addr, sock.family, DNS.lookup_name(sock.daddr), sock.dport, addrlen);
+          assert(!errno);
           return 0;
         }
         case 11: { // sendto
@@ -7052,8 +7017,8 @@ var ASM_CONSTS = {
           var msg = sock.sock_ops.recvmsg(sock, len);
           if (!msg) return 0; // socket is closed
           if (addr) {
-            var res = __write_sockaddr(addr, sock.family, DNS.lookup_name(msg.addr), msg.port);
-            assert(!res.errno);
+            var errno = __write_sockaddr(addr, sock.family, DNS.lookup_name(msg.addr), msg.port, addrlen);
+            assert(!errno);
           }
           HEAPU8.set(msg.buffer, buf);
           return msg.buffer.byteLength;
@@ -7130,8 +7095,8 @@ var ASM_CONSTS = {
           // write the source address out
           var name = HEAP32[((message)>>2)];
           if (name) {
-            var res = __write_sockaddr(name, sock.family, DNS.lookup_name(msg.addr), msg.port);
-            assert(!res.errno);
+            var errno = __write_sockaddr(name, sock.family, DNS.lookup_name(msg.addr), msg.port);
+            assert(!errno);
           }
           // write the buffer out to the scatter-gather arrays
           var bytesRead = 0;
@@ -7278,7 +7243,7 @@ var ASM_CONSTS = {
   function ___sys_uname(buf) {try {
   
       if (!buf) return -21
-      var layout = {"__size__":390,"sysname":0,"nodename":65,"release":130,"version":195,"machine":260,"domainname":325};
+      var layout = {"__size__":390,"domainname":325,"machine":260,"nodename":65,"release":130,"sysname":0,"version":195};
       var copyString = function(element, value) {
         var offset = layout[element];
         writeAsciiToMemory(value, buf + offset);
@@ -7358,25 +7323,25 @@ var ASM_CONSTS = {
   }
   Module["___sys_wait4"] = ___sys_wait4;
 
-  function ___wait() {}
-  Module["___wait"] = ___wait;
-
   function _exit(status) {
       // void _exit(int status);
       // http://pubs.opengroup.org/onlinepubs/000095399/functions/exit.html
       exit(status);
     }
   Module["_exit"] = _exit;
+  _exit.sig = 'vi';
   function __exit(a0
   ) {
   return _exit(a0);
   }
   Module["__exit"] = __exit;
+  __exit.sig = 'vi';
 
   function _abort() {
       abort();
     }
   Module["_abort"] = _abort;
+  _abort.sig = 'v';
 
 
   function _emscripten_memcpy_big(dest, src, num) {
@@ -7399,11 +7364,13 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_resize_heap"] = _emscripten_resize_heap;
 
-  function _emscripten_stack_get_end() {
-      // TODO(sbc): rename STACK_MAX -> STACK_END?
-      return STACK_MAX;
+  function _emscripten_thread_sleep(msecs) {
+      var start = _emscripten_get_now();
+      while (_emscripten_get_now() - start < msecs) {
+        // Do nothing.
+      }
     }
-  Module["_emscripten_stack_get_end"] = _emscripten_stack_get_end;
+  Module["_emscripten_thread_sleep"] = _emscripten_thread_sleep;
 
   var ENV={};
   Module["ENV"] = ENV;
@@ -7439,7 +7406,8 @@ var ASM_CONSTS = {
       return getEnvStrings.strings;
     }
   Module["getEnvStrings"] = getEnvStrings;
-  function _environ_get(__environ, environ_buf) {
+  function _environ_get(__environ, environ_buf) {try {
+  
       var bufSize = 0;
       getEnvStrings().forEach(function(string, i) {
         var ptr = environ_buf + bufSize;
@@ -7448,10 +7416,16 @@ var ASM_CONSTS = {
         bufSize += string.length + 1;
       });
       return 0;
-    }
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return e.errno;
+  }
+  }
   Module["_environ_get"] = _environ_get;
+  _environ_get.sig = 'iii';
 
-  function _environ_sizes_get(penviron_count, penviron_buf_size) {
+  function _environ_sizes_get(penviron_count, penviron_buf_size) {try {
+  
       var strings = getEnvStrings();
       HEAP32[((penviron_count)>>2)]=strings.length;
       var bufSize = 0;
@@ -7460,8 +7434,13 @@ var ASM_CONSTS = {
       });
       HEAP32[((penviron_buf_size)>>2)]=bufSize;
       return 0;
-    }
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return e.errno;
+  }
+  }
   Module["_environ_sizes_get"] = _environ_sizes_get;
+  _environ_sizes_get.sig = 'iii';
 
   function _execve(path, argv, envp) {
       // int execve(const char *pathname, char *const argv[],
@@ -7472,6 +7451,7 @@ var ASM_CONSTS = {
       return -1;
     }
   Module["_execve"] = _execve;
+  _execve.sig = 'iiii';
 
 
   function _fd_close(fd) {try {
@@ -7485,6 +7465,7 @@ var ASM_CONSTS = {
   }
   }
   Module["_fd_close"] = _fd_close;
+  _fd_close.sig = 'ii';
 
   function _fd_fdstat_get(fd, pbuf) {try {
   
@@ -7506,6 +7487,37 @@ var ASM_CONSTS = {
   }
   }
   Module["_fd_fdstat_get"] = _fd_fdstat_get;
+  _fd_fdstat_get.sig = 'iii';
+
+  function _fd_pread(fd, iov, iovcnt, offset_low, offset_high, pnum) {try {
+  
+      
+      assert(!offset_high, 'offsets over 2^32 not yet supported');
+      var stream = SYSCALLS.getStreamFromFD(fd)
+      var num = SYSCALLS.doReadv(stream, iov, iovcnt, offset_low);
+      HEAP32[((pnum)>>2)]=num
+      return 0;
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return e.errno;
+  }
+  }
+  Module["_fd_pread"] = _fd_pread;
+
+  function _fd_pwrite(fd, iov, iovcnt, offset_low, offset_high, pnum) {try {
+  
+      
+      var stream = SYSCALLS.getStreamFromFD(fd)
+      assert(!offset_high, 'offsets over 2^32 not yet supported');
+      var num = SYSCALLS.doWritev(stream, iov, iovcnt, offset_low);
+      HEAP32[((pnum)>>2)]=num
+      return 0;
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return e.errno;
+  }
+  }
+  Module["_fd_pwrite"] = _fd_pwrite;
 
   function _fd_read(fd, iov, iovcnt, pnum) {try {
   
@@ -7519,6 +7531,7 @@ var ASM_CONSTS = {
   }
   }
   Module["_fd_read"] = _fd_read;
+  _fd_read.sig = 'iiiii';
 
   function _fd_seek(fd, offset_low, offset_high, whence, newOffset) {try {
   
@@ -7558,6 +7571,7 @@ var ASM_CONSTS = {
   }
   }
   Module["_fd_sync"] = _fd_sync;
+  _fd_sync.sig = 'ii';
 
   function _fd_write(fd, iov, iovcnt, pnum) {try {
   
@@ -7571,6 +7585,7 @@ var ASM_CONSTS = {
   }
   }
   Module["_fd_write"] = _fd_write;
+  _fd_write.sig = 'iiiii';
 
   function _fork() {
       // pid_t fork(void);
@@ -7580,12 +7595,7 @@ var ASM_CONSTS = {
       return -1;
     }
   Module["_fork"] = _fork;
-
-  function _g$__heap_base(
-  ) {
-  if (!Module['___heap_base']) abort("external global '__heap_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
-  return Module['___heap_base'];
-  }
+  _fork.sig = 'i';
 
   function _getentropy(buffer, size) {
       if (!_getentropy.randomDevice) {
@@ -7652,36 +7662,6 @@ var ASM_CONSTS = {
     }
   Module["_inet_addr"] = _inet_addr;
 
-  function _usleep(useconds) {
-      // int usleep(useconds_t useconds);
-      // http://pubs.opengroup.org/onlinepubs/000095399/functions/usleep.html
-      // We're single-threaded, so use a busy loop. Super-ugly.
-      var start = _emscripten_get_now();
-      while (_emscripten_get_now() - start < useconds / 1000) {
-        // Do nothing.
-      }
-    }
-  Module["_usleep"] = _usleep;
-  function _nanosleep(rqtp, rmtp) {
-      // int nanosleep(const struct timespec  *rqtp, struct timespec *rmtp);
-      if (rqtp === 0) {
-        setErrNo(28);
-        return -1;
-      }
-      var seconds = HEAP32[((rqtp)>>2)];
-      var nanoseconds = HEAP32[(((rqtp)+(4))>>2)];
-      if (nanoseconds < 0 || nanoseconds > 999999999 || seconds < 0) {
-        setErrNo(28);
-        return -1;
-      }
-      if (rmtp !== 0) {
-        HEAP32[((rmtp)>>2)]=0;
-        HEAP32[(((rmtp)+(4))>>2)]=0;
-      }
-      return _usleep((seconds * 1e6) + (nanoseconds / 1000));
-    }
-  Module["_nanosleep"] = _nanosleep;
-
   function _fpathconf(fildes, name) {
       // long fpathconf(int fildes, int name);
       // http://pubs.opengroup.org/onlinepubs/000095399/functions/encrypt.html
@@ -7721,6 +7701,7 @@ var ASM_CONSTS = {
       return -1;
     }
   Module["_fpathconf"] = _fpathconf;
+  _fpathconf.sig = 'iii';
   function _pathconf(a0,a1
   ) {
   return _fpathconf(a0,a1);
@@ -7736,30 +7717,24 @@ var ASM_CONSTS = {
       _pthread_cleanup_push.level = __ATEXIT__.length;
     }
   Module["_pthread_cleanup_pop"] = _pthread_cleanup_pop;
+  _pthread_cleanup_pop.sig = 'vi';
 
   function _pthread_cleanup_push(routine, arg) {
       __ATEXIT__.push({ func: routine, arg: arg });
       _pthread_cleanup_push.level = __ATEXIT__.length;
     }
   Module["_pthread_cleanup_push"] = _pthread_cleanup_push;
+  _pthread_cleanup_push.sig = 'vii';
 
-  function _pthread_detach() {}
-  Module["_pthread_detach"] = _pthread_detach;
+  function _pthread_create() {
+      return 6;
+    }
+  Module["_pthread_create"] = _pthread_create;
 
-  function _pthread_join() {}
+  function _pthread_join() {
+      return 28;
+    }
   Module["_pthread_join"] = _pthread_join;
-
-  function _pthread_mutexattr_destroy() {}
-  Module["_pthread_mutexattr_destroy"] = _pthread_mutexattr_destroy;
-
-  function _pthread_mutexattr_init() {}
-  Module["_pthread_mutexattr_init"] = _pthread_mutexattr_init;
-
-  function _pthread_mutexattr_settype() {}
-  Module["_pthread_mutexattr_settype"] = _pthread_mutexattr_settype;
-
-  function _pthread_setcancelstate() { return 0; }
-  Module["_pthread_setcancelstate"] = _pthread_setcancelstate;
 
   function _pthread_sigmask(how, set, oldset) {
       err('pthread_sigmask() is not supported: this is a no-op.');
@@ -7771,6 +7746,7 @@ var ASM_CONSTS = {
       setTempRet0(($i) | 0);
     }
   Module["_setTempRet0"] = _setTempRet0;
+  _setTempRet0.sig = 'vi';
 
   function _setitimer() {
       throw 'setitimer() is not implemented yet';
@@ -8299,6 +8275,7 @@ var ASM_CONSTS = {
       return -1;
     }
   Module["_sysconf"] = _sysconf;
+  _sysconf.sig = 'ii';
 
   function _time(ptr) {
       var ret = (Date.now()/1000)|0;
@@ -8311,26 +8288,33 @@ var ASM_CONSTS = {
 
   function ___stack_pointer(
   ) {
-  if (!Module['___stack_pointer']) abort("external function '__stack_pointer' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['___stack_pointer']) abort("external symbol '__stack_pointer' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['___stack_pointer'].apply(null, arguments);
   }
 
   function ___memory_base(
   ) {
-  if (!Module['___memory_base']) abort("external function '__memory_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['___memory_base']) abort("external symbol '__memory_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['___memory_base'].apply(null, arguments);
   }
 
   function ___table_base(
   ) {
-  if (!Module['___table_base']) abort("external function '__table_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['___table_base']) abort("external symbol '__table_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['___table_base'].apply(null, arguments);
+  }
+
+  function ___heap_base(
+  ) {
+  if (!Module['___heap_base']) abort("external symbol '__heap_base' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  return Module['___heap_base'].apply(null, arguments);
   }
 
   function _getTempRet0() {
       return (getTempRet0() | 0);
     }
   Module["_getTempRet0"] = _getTempRet0;
+  _getTempRet0.sig = 'i';
 
 
   function stringToNewUTF8(jsString) {
@@ -8341,49 +8325,50 @@ var ASM_CONSTS = {
     }
   Module["stringToNewUTF8"] = stringToNewUTF8;
 
+  function setFileTime(path, time) {
+      path = UTF8ToString(path);
+      try {
+        FS.utime(path, time, time);
+        return 0;
+      } catch (e) {
+        if (!(e instanceof FS.ErrnoError)) throw e + ' : ' + stackTrace();
+        setErrNo(e.errno);
+        return -1;
+      }
+    }
+  Module["setFileTime"] = setFileTime;
+
   function _utime(path, times) {
       // int utime(const char *path, const struct utimbuf *times);
       // http://pubs.opengroup.org/onlinepubs/009695399/basedefs/utime.h.html
       var time;
       if (times) {
         // NOTE: We don't keep track of access timestamps.
-        var offset = 4;
-        time = HEAP32[(((times)+(offset))>>2)];
-        time *= 1000;
+        time = HEAP32[(((times)+(4))>>2)] * 1000;
       } else {
         time = Date.now();
       }
-      path = UTF8ToString(path);
-      try {
-        FS.utime(path, time, time);
-        return 0;
-      } catch (e) {
-        FS.handleFSError(e);
-        return -1;
-      }
+      return setFileTime(path, time);
     }
   Module["_utime"] = _utime;
+  _utime.sig = 'iii';
 
   function _utimes(path, times) {
+      // utimes is just like utime but take an array of 2 times: `struct timeval times[2]`
+      // times[0] is the new access time (which we currently ignore)
+      // times[1] is the new modification time.
       var time;
       if (times) {
-        var offset = 8 + 0;
-        time = HEAP32[(((times)+(offset))>>2)] * 1000;
-        offset = 8 + 4;
-        time += HEAP32[(((times)+(offset))>>2)] / 1000;
+        var mtime = times + 8;
+        time = HEAP32[((mtime)>>2)] * 1000;
+        time += HEAP32[(((mtime)+(4))>>2)] / 1000;
       } else {
         time = Date.now();
       }
-      path = UTF8ToString(path);
-      try {
-        FS.utime(path, time, time);
-        return 0;
-      } catch (e) {
-        FS.handleFSError(e);
-        return -1;
-      }
+      return setFileTime(path, time);
     }
   Module["_utimes"] = _utimes;
+  _utimes.sig = 'iii';
 
   function _flock(fd, operation) {
       // int flock(int fd, int operation);
@@ -8399,6 +8384,7 @@ var ASM_CONSTS = {
       return -1;
     }
   Module["_chroot"] = _chroot;
+  _chroot.sig = 'ii';
 
 
 
@@ -8456,6 +8442,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_confstr"] = _confstr;
+  _confstr.sig = 'iiii';
 
 
 
@@ -8465,6 +8452,7 @@ var ASM_CONSTS = {
   return _exit(a0);
   }
   Module["__Exit"] = __Exit;
+  __Exit.sig = 'vi';
 
 
   function _vfork(
@@ -8591,35 +8579,11 @@ var ASM_CONSTS = {
   Module["_getloadavg"] = _getloadavg;
 
 
-  function ___builtin_prefetch(){}
-  Module["___builtin_prefetch"] = ___builtin_prefetch;
-
   function ___assert_fail(condition, filename, line, func) {
       abort('Assertion failed: ' + UTF8ToString(condition) + ', at: ' + [filename ? UTF8ToString(filename) : 'unknown filename', line, func ? UTF8ToString(func) : 'unknown function']);
     }
   Module["___assert_fail"] = ___assert_fail;
-
-  function ___assert_func(filename, line, func, condition) {
-      abort('Assertion failed: ' + (condition ? UTF8ToString(condition) : 'unknown condition') + ', at: ' + [filename ? UTF8ToString(filename) : 'unknown filename', line, func ? UTF8ToString(func) : 'unknown function']);
-    }
-  Module["___assert_func"] = ___assert_func;
-
-  function ___cxa_call_unexpected(exception) {
-      err('Unexpected exception thrown, this is not properly supported - aborting');
-      ABORT = true;
-      throw exception;
-    }
-  Module["___cxa_call_unexpected"] = ___cxa_call_unexpected;
-  function _terminate(a0
-  ) {
-  return ___cxa_call_unexpected(a0);
-  }
-  Module["_terminate"] = _terminate;
-
-  function ___gxx_personality_v0() {
-    }
-  Module["___gxx_personality_v0"] = ___gxx_personality_v0;
-
+  ___assert_fail.sig = 'viiii';
 
   function _getpwuid() { throw 'getpwuid: TODO' }
   Module["_getpwuid"] = _getpwuid;
@@ -8676,6 +8640,7 @@ var ASM_CONSTS = {
       return rv;
     }
   Module["_ctime_r"] = _ctime_r;
+  _ctime_r.sig = 'iii';
 
   function ___ctime_r(a0,a1
   ) {
@@ -9042,6 +9007,7 @@ var ASM_CONSTS = {
       return ((maj) << 8 | (min));
     }
   Module["_makedev"] = _makedev;
+  _makedev.sig = 'iii';
 
   function _gnu_dev_makedev(a0,a1
   ) {
@@ -9053,6 +9019,7 @@ var ASM_CONSTS = {
       return ((dev) >> 8);
     }
   Module["_major"] = _major;
+  _major.sig = 'ii';
 
   function _gnu_dev_major(a0
   ) {
@@ -9064,6 +9031,7 @@ var ASM_CONSTS = {
       return ((dev) & 0xff);
     }
   Module["_minor"] = _minor;
+  _minor.sig = 'ii';
 
   function _gnu_dev_minor(a0
   ) {
@@ -9076,12 +9044,14 @@ var ASM_CONSTS = {
       throw 'longjmp';
     }
   Module["_longjmp"] = _longjmp;
+  _longjmp.sig = 'vii';
 
   function _emscripten_longjmp(a0,a1
   ) {
   return _longjmp(a0,a1);
   }
   Module["_emscripten_longjmp"] = _emscripten_longjmp;
+  _emscripten_longjmp.sig = 'vii';
 
 
   function _waitid(a0
@@ -9161,11 +9131,13 @@ var ASM_CONSTS = {
       return getHostByName(host);
     }
   Module["_gethostbyaddr"] = _gethostbyaddr;
+  _gethostbyaddr.sig = 'iiii';
 
   function _gethostbyname(name) {
       return getHostByName(UTF8ToString(name));
     }
   Module["_gethostbyname"] = _gethostbyname;
+  _gethostbyname.sig = 'ii';
 
 
   function _gethostbyname_r(name, ret, buf, buflen, out, err) {
@@ -9177,6 +9149,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_gethostbyname_r"] = _gethostbyname_r;
+  _gethostbyname_r.sig = 'iiiiiii';
 
   function _getaddrinfo(node, service, hint, out) {
       // Note getaddrinfo currently only returns a single addrinfo with ai_next defaulting to NULL. When NULL
@@ -9194,7 +9167,7 @@ var ASM_CONSTS = {
   
       function allocaddrinfo(family, type, proto, canon, addr, port) {
         var sa, salen, ai;
-        var res;
+        var errno;
   
         salen = family === 10 ?
           28 :
@@ -9203,8 +9176,8 @@ var ASM_CONSTS = {
           __inet_ntop6_raw(addr) :
           __inet_ntop4_raw(addr);
         sa = _malloc(salen);
-        res = __write_sockaddr(sa, family, addr, port);
-        assert(!res.errno);
+        errno = __write_sockaddr(sa, family, addr, port);
+        assert(!errno);
   
         ai = _malloc(32);
         HEAP32[(((ai)+(4))>>2)]=family;
@@ -9347,6 +9320,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_getaddrinfo"] = _getaddrinfo;
+  _getaddrinfo.sig = 'iiiii';
 
 
   var GAI_ERRNO_MESSAGES={};
@@ -9518,12 +9492,14 @@ var ASM_CONSTS = {
       eval(UTF8ToString(ptr));
     }
   Module["_emscripten_run_script"] = _emscripten_run_script;
+  _emscripten_run_script.sig = 'vi';
 
   /** @suppress{checkTypes} */
   function _emscripten_run_script_int(ptr) {
       return eval(UTF8ToString(ptr))|0;
     }
   Module["_emscripten_run_script_int"] = _emscripten_run_script_int;
+  _emscripten_run_script_int.sig = 'ii';
 
   function _emscripten_run_script_string(ptr) {
       var s = eval(UTF8ToString(ptr));
@@ -10443,6 +10419,7 @@ var ASM_CONSTS = {
       return ASM_CONSTS[code].apply(null, args);
     }
   Module["_emscripten_asm_const_int"] = _emscripten_asm_const_int;
+  _emscripten_asm_const_int.sig = 'iiii';
 
   function _emscripten_asm_const_double(a0,a1,a2
   ) {
@@ -10461,6 +10438,7 @@ var ASM_CONSTS = {
       return mainThreadEM_ASM(code, sigPtr, argbuf, 1);
     }
   Module["_emscripten_asm_const_int_sync_on_main_thread"] = _emscripten_asm_const_int_sync_on_main_thread;
+  _emscripten_asm_const_int_sync_on_main_thread.sig = 'iiii';
 
   function _emscripten_asm_const_double_sync_on_main_thread(a0,a1,a2
   ) {
@@ -10569,19 +10547,19 @@ var ASM_CONSTS = {
   
   var exceptionLast=0;
   Module["exceptionLast"] = exceptionLast;
+  
+  var uncaughtExceptionCount=0;
+  Module["uncaughtExceptionCount"] = uncaughtExceptionCount;
   function ___cxa_throw(ptr, type, destructor) {
       var info = new ExceptionInfo(ptr);
       // Initialize ExceptionInfo content after it was allocated in __cxa_allocate_exception.
       info.init(type, destructor);
       exceptionLast = ptr;
-      if (!("uncaught_exception" in __ZSt18uncaught_exceptionv)) {
-        __ZSt18uncaught_exceptionv.uncaught_exceptions = 1;
-      } else {
-        __ZSt18uncaught_exceptionv.uncaught_exceptions++;
-      }
+      uncaughtExceptionCount++;
       throw ptr + " - Exception catching is disabled, this exception cannot be caught. Compile with -s DISABLE_EXCEPTION_CATCHING=0 or DISABLE_EXCEPTION_CATCHING=2 to catch." + " (note: in dynamic linking, if a side module wants exceptions, the main module must be built with that support)";
     }
   Module["___cxa_throw"] = ___cxa_throw;
+  ___cxa_throw.sig = 'viii';
   function __Unwind_RaiseException(ex) {
       err('Warning: _Unwind_RaiseException is not correctly implemented');
       return ___cxa_throw(ex, 0, 0);
@@ -10623,13 +10601,6 @@ var ASM_CONSTS = {
     }
   Module["_emscripten_autodebug_double"] = _emscripten_autodebug_double;
 
-  function _emscripten_scan_stack(func) {
-      var base = STACK_BASE; // TODO verify this is right on pthreads
-      var end = stackSave();
-      wasmTable.get(func)(Math.min(base, end), Math.max(base, end));
-    }
-  Module["_emscripten_scan_stack"] = _emscripten_scan_stack;
-
   function ___handle_stack_overflow() {
       abort('stack overflow')
     }
@@ -10657,7 +10628,32 @@ var ASM_CONSTS = {
     }
   Module["autoResumeAudioContext"] = autoResumeAudioContext;
 
+  function dynCallLegacy(sig, ptr, args) {
+      assert(('dynCall_' + sig) in Module, 'bad function pointer type - no table for sig \'' + sig + '\'');
+      if (args && args.length) {
+        // j (64-bit integer) must be passed in as two numbers [low 32, high 32].
+        assert(args.length === sig.substring(1).replace(/j/g, '--').length);
+      } else {
+        assert(sig.length == 1);
+      }
+      if (args && args.length) {
+        return Module['dynCall_' + sig].apply(null, [ptr].concat(args));
+      }
+      return Module['dynCall_' + sig].call(null, ptr);
+    }
+  Module["dynCallLegacy"] = dynCallLegacy;
 
+  function dynCall(sig, ptr, args) {
+      // Without WASM_BIGINT support we cannot directly call function with i64 as
+      // part of thier signature, so we rely the dynCall functions generated by
+      // wasm-emscripten-finalize
+      if (sig.indexOf('j') != -1) {
+        return dynCallLegacy(sig, ptr, args);
+      }
+      assert(wasmTable.get(ptr), 'missing table entry in dynCall: ' + ptr);
+      return wasmTable.get(ptr).apply(null, args)
+    }
+  Module["dynCall"] = dynCall;
   function getDynCaller(sig, ptr) {
       assert(sig.indexOf('j') >= 0, 'getDynCaller should only be called with i64 sigs')
       var argCache = [];
@@ -10671,12 +10667,6 @@ var ASM_CONSTS = {
     }
   Module["getDynCaller"] = getDynCaller;
 
-
-
-  function _emscripten_stack_get_base() {
-      return STACK_BASE;
-    }
-  Module["_emscripten_stack_get_base"] = _emscripten_stack_get_base;
 
 
 
@@ -10838,6 +10828,7 @@ var ASM_CONSTS = {
   return _signal(a0,a1);
   }
   Module["_bsd_signal"] = _bsd_signal;
+  _bsd_signal.sig = 'iii';
 
   function _sigemptyset(set) {
       HEAP32[((set)>>2)]=0;
@@ -10875,6 +10866,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_sigprocmask"] = _sigprocmask;
+
 
   function ___libc_current_sigrtmin() {
       err('Calling stub instead of __libc_current_sigrtmin');
@@ -10965,18 +10957,6 @@ var ASM_CONSTS = {
   Module["___sys_exit"] = ___sys_exit;
 
 
-  function ___sys_write(fd, buf, count) {try {
-  
-      var stream = SYSCALLS.getStreamFromFD(fd);
-      return FS.write(stream, HEAP8,buf, count);
-    } catch (e) {
-    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
-    return -e.errno;
-  }
-  }
-  Module["___sys_write"] = ___sys_write;
-
-
 
 
 
@@ -11054,18 +11034,18 @@ var ASM_CONSTS = {
 
 
 
-
-
   function ___sys_setregid32(ruid, euid) {
       if (uid !== 0) return -63;
       return 0;
     }
   Module["___sys_setregid32"] = ___sys_setregid32;
+  ___sys_setregid32.sig = 'iii';
   function ___sys_setreuid32(a0,a1
   ) {
   return ___sys_setregid32(a0,a1);
   }
   Module["___sys_setreuid32"] = ___sys_setreuid32;
+  ___sys_setreuid32.sig = 'iii';
 
 
   function ___sys_setgid32(uid) {
@@ -11073,11 +11053,13 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["___sys_setgid32"] = ___sys_setgid32;
+  ___sys_setgid32.sig = 'ii';
   function ___sys_setuid32(a0
   ) {
   return ___sys_setgid32(a0);
   }
   Module["___sys_setuid32"] = ___sys_setuid32;
+  ___sys_setuid32.sig = 'ii';
 
 
 
@@ -11091,6 +11073,7 @@ var ASM_CONSTS = {
   return ___sys_setresgid32(a0,a1,a2);
   }
   Module["___sys_setresuid32"] = ___sys_setresuid32;
+  ___sys_setresuid32.sig = 'iiii';
 
 
 
@@ -11136,14 +11119,6 @@ var ASM_CONSTS = {
   }
   }
   Module["___sys_faccessat"] = ___sys_faccessat;
-
-
-
-
-
-
-
-
 
 
 
@@ -11325,18 +11300,21 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_keypress_callback_on_thread"] = _emscripten_set_keypress_callback_on_thread;
+  _emscripten_set_keypress_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_keydown_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerKeyEventCallback(target, userData, useCapture, callbackfunc, 2, "keydown", targetThread);
       return 0;
     }
   Module["_emscripten_set_keydown_callback_on_thread"] = _emscripten_set_keydown_callback_on_thread;
+  _emscripten_set_keydown_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_keyup_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerKeyEventCallback(target, userData, useCapture, callbackfunc, 3, "keyup", targetThread);
       return 0;
     }
   Module["_emscripten_set_keyup_callback_on_thread"] = _emscripten_set_keyup_callback_on_thread;
+  _emscripten_set_keyup_callback_on_thread.sig = 'iiiiii';
 
   function __getBoundingClientRect(e) {
       return specialHTMLTargets.indexOf(e) < 0 ? e.getBoundingClientRect() : {'left':0,'top':0};
@@ -11400,54 +11378,63 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_click_callback_on_thread"] = _emscripten_set_click_callback_on_thread;
+  _emscripten_set_click_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_mousedown_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerMouseEventCallback(target, userData, useCapture, callbackfunc, 5, "mousedown", targetThread);
       return 0;
     }
   Module["_emscripten_set_mousedown_callback_on_thread"] = _emscripten_set_mousedown_callback_on_thread;
+  _emscripten_set_mousedown_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_mouseup_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerMouseEventCallback(target, userData, useCapture, callbackfunc, 6, "mouseup", targetThread);
       return 0;
     }
   Module["_emscripten_set_mouseup_callback_on_thread"] = _emscripten_set_mouseup_callback_on_thread;
+  _emscripten_set_mouseup_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_dblclick_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerMouseEventCallback(target, userData, useCapture, callbackfunc, 7, "dblclick", targetThread);
       return 0;
     }
   Module["_emscripten_set_dblclick_callback_on_thread"] = _emscripten_set_dblclick_callback_on_thread;
+  _emscripten_set_dblclick_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_mousemove_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerMouseEventCallback(target, userData, useCapture, callbackfunc, 8, "mousemove", targetThread);
       return 0;
     }
   Module["_emscripten_set_mousemove_callback_on_thread"] = _emscripten_set_mousemove_callback_on_thread;
+  _emscripten_set_mousemove_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_mouseenter_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerMouseEventCallback(target, userData, useCapture, callbackfunc, 33, "mouseenter", targetThread);
       return 0;
     }
   Module["_emscripten_set_mouseenter_callback_on_thread"] = _emscripten_set_mouseenter_callback_on_thread;
+  _emscripten_set_mouseenter_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_mouseleave_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerMouseEventCallback(target, userData, useCapture, callbackfunc, 34, "mouseleave", targetThread);
       return 0;
     }
   Module["_emscripten_set_mouseleave_callback_on_thread"] = _emscripten_set_mouseleave_callback_on_thread;
+  _emscripten_set_mouseleave_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_mouseover_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerMouseEventCallback(target, userData, useCapture, callbackfunc, 35, "mouseover", targetThread);
       return 0;
     }
   Module["_emscripten_set_mouseover_callback_on_thread"] = _emscripten_set_mouseover_callback_on_thread;
+  _emscripten_set_mouseover_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_mouseout_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerMouseEventCallback(target, userData, useCapture, callbackfunc, 36, "mouseout", targetThread);
       return 0;
     }
   Module["_emscripten_set_mouseout_callback_on_thread"] = _emscripten_set_mouseout_callback_on_thread;
+  _emscripten_set_mouseout_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_get_mouse_status(mouseState) {
       if (!JSEvents.mouseEvent) return -7;
@@ -11458,6 +11445,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_mouse_status"] = _emscripten_get_mouse_status;
+  _emscripten_get_mouse_status.sig = 'ii';
 
   function __registerWheelEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
       if (!JSEvents.wheelEvent) JSEvents.wheelEvent = _malloc( 96 );
@@ -11496,6 +11484,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_set_wheel_callback_on_thread"] = _emscripten_set_wheel_callback_on_thread;
+  _emscripten_set_wheel_callback_on_thread.sig = 'iiiiii';
 
   function __registerUiEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
       if (!JSEvents.uiEvent) JSEvents.uiEvent = _malloc( 36 );
@@ -11545,12 +11534,14 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_resize_callback_on_thread"] = _emscripten_set_resize_callback_on_thread;
+  _emscripten_set_resize_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_scroll_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerUiEventCallback(target, userData, useCapture, callbackfunc, 11, "scroll", targetThread);
       return 0;
     }
   Module["_emscripten_set_scroll_callback_on_thread"] = _emscripten_set_scroll_callback_on_thread;
+  _emscripten_set_scroll_callback_on_thread.sig = 'iiiiii';
 
   function __registerFocusEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
       if (!JSEvents.focusEvent) JSEvents.focusEvent = _malloc( 256 );
@@ -11584,24 +11575,28 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_blur_callback_on_thread"] = _emscripten_set_blur_callback_on_thread;
+  _emscripten_set_blur_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_focus_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerFocusEventCallback(target, userData, useCapture, callbackfunc, 13, "focus", targetThread);
       return 0;
     }
   Module["_emscripten_set_focus_callback_on_thread"] = _emscripten_set_focus_callback_on_thread;
+  _emscripten_set_focus_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_focusin_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerFocusEventCallback(target, userData, useCapture, callbackfunc, 14, "focusin", targetThread);
       return 0;
     }
   Module["_emscripten_set_focusin_callback_on_thread"] = _emscripten_set_focusin_callback_on_thread;
+  _emscripten_set_focusin_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_focusout_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerFocusEventCallback(target, userData, useCapture, callbackfunc, 15, "focusout", targetThread);
       return 0;
     }
   Module["_emscripten_set_focusout_callback_on_thread"] = _emscripten_set_focusout_callback_on_thread;
+  _emscripten_set_focusout_callback_on_thread.sig = 'iiiiii';
 
   function __fillDeviceOrientationEventData(eventStruct, e, target) {
       HEAPF64[((eventStruct)>>3)]=e.alpha;
@@ -11638,6 +11633,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_deviceorientation_callback_on_thread"] = _emscripten_set_deviceorientation_callback_on_thread;
+  _emscripten_set_deviceorientation_callback_on_thread.sig = 'iiiii';
 
   function _emscripten_get_deviceorientation_status(orientationState) {
       if (!JSEvents.deviceOrientationEvent) return -7;
@@ -11648,6 +11644,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_deviceorientation_status"] = _emscripten_get_deviceorientation_status;
+  _emscripten_get_deviceorientation_status.sig = 'ii';
 
   function __fillDeviceMotionEventData(eventStruct, e, target) {
       var supportedFields = 0;
@@ -11699,6 +11696,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_devicemotion_callback_on_thread"] = _emscripten_set_devicemotion_callback_on_thread;
+  _emscripten_set_devicemotion_callback_on_thread.sig = 'iiiii';
 
   function _emscripten_get_devicemotion_status(motionState) {
       if (!JSEvents.deviceMotionEvent) return -7;
@@ -11709,6 +11707,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_devicemotion_status"] = _emscripten_get_devicemotion_status;
+  _emscripten_get_devicemotion_status.sig = 'ii';
 
   function __screenOrientation() {
       if (!screen) return undefined;
@@ -11765,6 +11764,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_orientationchange_callback_on_thread"] = _emscripten_set_orientationchange_callback_on_thread;
+  _emscripten_set_orientationchange_callback_on_thread.sig = 'iiiii';
 
   function _emscripten_get_orientation_status(orientationChangeEvent) {
       if (!__screenOrientation() && typeof orientation === 'undefined') return -1;
@@ -11772,6 +11772,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_orientation_status"] = _emscripten_get_orientation_status;
+  _emscripten_get_orientation_status.sig = 'ii';
 
   function _emscripten_lock_orientation(allowedOrientations) {
       var orientations = [];
@@ -11798,6 +11799,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_lock_orientation"] = _emscripten_lock_orientation;
+  _emscripten_lock_orientation.sig = 'ii';
 
   function _emscripten_unlock_orientation() {
       if (screen.unlockOrientation) {
@@ -11814,6 +11816,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_unlock_orientation"] = _emscripten_unlock_orientation;
+  _emscripten_unlock_orientation.sig = 'i';
 
   function __fillFullscreenChangeEventData(eventStruct) {
       var fullscreenElement = document.fullscreenElement || document.mozFullScreenElement || document.webkitFullscreenElement || document.msFullscreenElement;
@@ -11875,6 +11878,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_fullscreenchange_callback_on_thread"] = _emscripten_set_fullscreenchange_callback_on_thread;
+  _emscripten_set_fullscreenchange_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_get_fullscreen_status(fullscreenStatus) {
       if (!JSEvents.fullscreenEnabled()) return -1;
@@ -11882,6 +11886,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_fullscreen_status"] = _emscripten_get_fullscreen_status;
+  _emscripten_get_fullscreen_status.sig = 'ii';
 
   function _emscripten_get_canvas_element_size(target, width, height) {
       var canvas = findCanvasEventTarget(target);
@@ -12214,6 +12219,7 @@ var ASM_CONSTS = {
       return __emscripten_do_request_fullscreen(target, strategy);
     }
   Module["_emscripten_request_fullscreen"] = _emscripten_request_fullscreen;
+  _emscripten_request_fullscreen.sig = 'iii';
 
   function _emscripten_request_fullscreen_strategy(target, deferUntilInEventHandler, fullscreenStrategy) {
       var strategy = {
@@ -12228,6 +12234,7 @@ var ASM_CONSTS = {
       return __emscripten_do_request_fullscreen(target, strategy);
     }
   Module["_emscripten_request_fullscreen_strategy"] = _emscripten_request_fullscreen_strategy;
+  _emscripten_request_fullscreen_strategy.sig = 'iiii';
 
   function _emscripten_enter_soft_fullscreen(target, fullscreenStrategy) {
       target = findEventTarget(target);
@@ -12272,6 +12279,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_enter_soft_fullscreen"] = _emscripten_enter_soft_fullscreen;
+  _emscripten_enter_soft_fullscreen.sig = 'iii';
 
   function _emscripten_exit_soft_fullscreen() {
       if (__restoreOldWindowedStyle) __restoreOldWindowedStyle();
@@ -12280,6 +12288,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_exit_soft_fullscreen"] = _emscripten_exit_soft_fullscreen;
+  _emscripten_exit_soft_fullscreen.sig = 'i';
 
   function _emscripten_exit_fullscreen() {
       if (!JSEvents.fullscreenEnabled()) return -1;
@@ -12298,6 +12307,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_exit_fullscreen"] = _emscripten_exit_fullscreen;
+  _emscripten_exit_fullscreen.sig = 'i';
 
   function __fillPointerlockChangeEventData(eventStruct) {
       var pointerLockElement = document.pointerLockElement || document.mozPointerLockElement || document.webkitPointerLockElement || document.msPointerLockElement;
@@ -12350,6 +12360,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_pointerlockchange_callback_on_thread"] = _emscripten_set_pointerlockchange_callback_on_thread;
+  _emscripten_set_pointerlockchange_callback_on_thread.sig = 'iiiiii';
 
   function __registerPointerlockErrorEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
   
@@ -12387,6 +12398,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_pointerlockerror_callback_on_thread"] = _emscripten_set_pointerlockerror_callback_on_thread;
+  _emscripten_set_pointerlockerror_callback_on_thread.sig = 'iiiiii';
 
   /** @suppress {missingProperties} */
   function _emscripten_get_pointerlock_status(pointerlockStatus) {
@@ -12397,6 +12409,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_pointerlock_status"] = _emscripten_get_pointerlock_status;
+  _emscripten_get_pointerlock_status.sig = 'ii';
 
   function __requestPointerLock(target) {
       if (target.requestPointerLock) {
@@ -12442,6 +12455,7 @@ var ASM_CONSTS = {
       return __requestPointerLock(target);
     }
   Module["_emscripten_request_pointerlock"] = _emscripten_request_pointerlock;
+  _emscripten_request_pointerlock.sig = 'iii';
 
   function _emscripten_exit_pointerlock() {
       // Make sure no queued up calls will fire after this.
@@ -12457,6 +12471,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_exit_pointerlock"] = _emscripten_exit_pointerlock;
+  _emscripten_exit_pointerlock.sig = 'i';
 
   function _emscripten_vibrate(msecs) {
       if (!navigator.vibrate) return -1;    
@@ -12464,6 +12479,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_vibrate"] = _emscripten_vibrate;
+  _emscripten_vibrate.sig = 'ii';
 
   function _emscripten_vibrate_pattern(msecsArray, numEntries) {
       if (!navigator.vibrate) return -1;
@@ -12477,6 +12493,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_vibrate_pattern"] = _emscripten_vibrate_pattern;
+  _emscripten_vibrate_pattern.sig = 'iii';
 
   function __fillVisibilityChangeEventData(eventStruct) {
       var visibilityStates = [ "hidden", "visible", "prerender", "unloaded" ];
@@ -12521,6 +12538,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_visibilitychange_callback_on_thread"] = _emscripten_set_visibilitychange_callback_on_thread;
+  _emscripten_set_visibilitychange_callback_on_thread.sig = 'iiiii';
 
   function _emscripten_get_visibility_status(visibilityStatus) {
       if (typeof document.visibilityState === 'undefined' && typeof document.hidden === 'undefined') {
@@ -12530,6 +12548,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_visibility_status"] = _emscripten_get_visibility_status;
+  _emscripten_get_visibility_status.sig = 'ii';
 
   function __registerTouchEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
       if (!JSEvents.touchEvent) JSEvents.touchEvent = _malloc( 1684 );
@@ -12611,24 +12630,28 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_touchstart_callback_on_thread"] = _emscripten_set_touchstart_callback_on_thread;
+  _emscripten_set_touchstart_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_touchend_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerTouchEventCallback(target, userData, useCapture, callbackfunc, 23, "touchend", targetThread);
       return 0;
     }
   Module["_emscripten_set_touchend_callback_on_thread"] = _emscripten_set_touchend_callback_on_thread;
+  _emscripten_set_touchend_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_touchmove_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerTouchEventCallback(target, userData, useCapture, callbackfunc, 24, "touchmove", targetThread);
       return 0;
     }
   Module["_emscripten_set_touchmove_callback_on_thread"] = _emscripten_set_touchmove_callback_on_thread;
+  _emscripten_set_touchmove_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_touchcancel_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerTouchEventCallback(target, userData, useCapture, callbackfunc, 25, "touchcancel", targetThread);
       return 0;
     }
   Module["_emscripten_set_touchcancel_callback_on_thread"] = _emscripten_set_touchcancel_callback_on_thread;
+  _emscripten_set_touchcancel_callback_on_thread.sig = 'iiiiii';
 
   function __fillGamepadEventData(eventStruct, e) {
       HEAPF64[((eventStruct)>>3)]=e.timestamp;
@@ -12690,6 +12713,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_gamepadconnected_callback_on_thread"] = _emscripten_set_gamepadconnected_callback_on_thread;
+  _emscripten_set_gamepadconnected_callback_on_thread.sig = 'iiiii';
 
   function _emscripten_set_gamepaddisconnected_callback_on_thread(userData, useCapture, callbackfunc, targetThread) {
       if (!navigator.getGamepads && !navigator.webkitGetGamepads) return -1;
@@ -12697,12 +12721,14 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_gamepaddisconnected_callback_on_thread"] = _emscripten_set_gamepaddisconnected_callback_on_thread;
+  _emscripten_set_gamepaddisconnected_callback_on_thread.sig = 'iiiii';
 
   function _emscripten_sample_gamepad_data() {
       return (JSEvents.lastGamepadState = (navigator.getGamepads ? navigator.getGamepads() : (navigator.webkitGetGamepads ? navigator.webkitGetGamepads() : null)))
         ? 0 : -1;
     }
   Module["_emscripten_sample_gamepad_data"] = _emscripten_sample_gamepad_data;
+  _emscripten_sample_gamepad_data.sig = 'i';
 
   function _emscripten_get_num_gamepads() {
       if (!JSEvents.lastGamepadState) throw 'emscripten_get_num_gamepads() can only be called after having first called emscripten_sample_gamepad_data() and that function has returned EMSCRIPTEN_RESULT_SUCCESS!';
@@ -12711,6 +12737,7 @@ var ASM_CONSTS = {
       return JSEvents.lastGamepadState.length;
     }
   Module["_emscripten_get_num_gamepads"] = _emscripten_get_num_gamepads;
+  _emscripten_get_num_gamepads.sig = 'i';
 
   function _emscripten_get_gamepad_status(index, gamepadState) {
       if (!JSEvents.lastGamepadState) throw 'emscripten_get_gamepad_status() can only be called after having first called emscripten_sample_gamepad_data() and that function has returned EMSCRIPTEN_RESULT_SUCCESS!';
@@ -12728,6 +12755,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_gamepad_status"] = _emscripten_get_gamepad_status;
+  _emscripten_get_gamepad_status.sig = 'iii';
 
   function __registerBeforeUnloadEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString) {
       var beforeUnloadEventHandlerFunc = function(ev) {
@@ -12766,6 +12794,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_beforeunload_callback_on_thread"] = _emscripten_set_beforeunload_callback_on_thread;
+  _emscripten_set_beforeunload_callback_on_thread.sig = 'iii';
 
   function __fillBatteryEventData(eventStruct, e) {
       HEAPF64[((eventStruct)>>3)]=e.chargingTime;
@@ -12807,6 +12836,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_batterychargingchange_callback_on_thread"] = _emscripten_set_batterychargingchange_callback_on_thread;
+  _emscripten_set_batterychargingchange_callback_on_thread.sig = 'iii';
 
   function _emscripten_set_batterylevelchange_callback_on_thread(userData, callbackfunc, targetThread) {
       if (!__battery()) return -1; 
@@ -12814,6 +12844,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_batterylevelchange_callback_on_thread"] = _emscripten_set_batterylevelchange_callback_on_thread;
+  _emscripten_set_batterylevelchange_callback_on_thread.sig = 'iii';
 
   function _emscripten_get_battery_status(batteryState) {
       if (!__battery()) return -1; 
@@ -12821,6 +12852,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_battery_status"] = _emscripten_get_battery_status;
+  _emscripten_get_battery_status.sig = 'ii';
 
 
 
@@ -12836,6 +12868,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_element_css_size"] = _emscripten_set_element_css_size;
+  _emscripten_set_element_css_size.sig = 'iiii';
 
   function _emscripten_get_element_css_size(target, width, height) {
       target = findEventTarget(target);
@@ -12848,6 +12881,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_element_css_size"] = _emscripten_get_element_css_size;
+  _emscripten_get_element_css_size.sig = 'iiii';
 
   function _emscripten_html5_remove_all_event_listeners() {
       JSEvents.removeAllEventListeners();
@@ -12923,7 +12957,7 @@ var ASM_CONSTS = {
           // Save a little bit of code space: modern browsers should treat
           // negative setTimeout as timeout of 0
           // (https://stackoverflow.com/questions/8430966/is-calling-settimeout-with-a-negative-delay-ok)
-          setTimeout(tick, t - performance.now());
+          setTimeout(tick, n - performance.now());
         }
       }
       return setTimeout(tick, 0);
@@ -12990,20 +13024,28 @@ var ASM_CONSTS = {
       return (typeof devicePixelRatio === 'number' && devicePixelRatio) || 1.0;
     }
   Module["_emscripten_get_device_pixel_ratio"] = _emscripten_get_device_pixel_ratio;
+  _emscripten_get_device_pixel_ratio.sig = 'd';
 
 
 
 
 
-  function _proc_exit(code) {
+  function _proc_exit(code) {try {
+  
       _exit(code);
-    }
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return e.errno;
+  }
+  }
   Module["_proc_exit"] = _proc_exit;
+  _proc_exit.sig = 'vi';
 
 
 
 
-  function _args_sizes_get(pargc, pargv_buf_size) {
+  function _args_sizes_get(pargc, pargv_buf_size) {try {
+  
       HEAP32[((pargc)>>2)]=mainArgs.length;
       var bufSize = 0;
       mainArgs.forEach(function(arg) {
@@ -13011,10 +13053,16 @@ var ASM_CONSTS = {
       });
       HEAP32[((pargv_buf_size)>>2)]=bufSize;
       return 0;
-    }
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return e.errno;
+  }
+  }
   Module["_args_sizes_get"] = _args_sizes_get;
+  _args_sizes_get.sig = 'iii';
 
-  function _args_get(argv, argv_buf) {
+  function _args_get(argv, argv_buf) {try {
+  
       var bufSize = 0;
       mainArgs.forEach(function(arg, i) {
         var ptr = argv_buf + bufSize;
@@ -13023,8 +13071,13 @@ var ASM_CONSTS = {
         bufSize += arg.length + 1;
       });
       return 0;
-    }
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return e.errno;
+  }
+  }
   Module["_args_get"] = _args_get;
+  _args_get.sig = 'iii';
 
   function checkWasiClock(clock_id) {
       return clock_id == 0 ||
@@ -13034,7 +13087,8 @@ var ASM_CONSTS = {
     }
   Module["checkWasiClock"] = checkWasiClock;
 
-  function _clock_time_get(clk_id, precision_low, precision_high, ptime) {
+  function _clock_time_get(clk_id, precision_low, precision_high, ptime) {try {
+  
       
       if (!checkWasiClock(clk_id)) {
         return 28;
@@ -13053,10 +13107,16 @@ var ASM_CONSTS = {
       HEAP32[((ptime)>>2)]=nsec >>> 0;
       HEAP32[(((ptime)+(4))>>2)]=(nsec / Math.pow(2, 32)) >>> 0;
       return 0;
-    }
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return e.errno;
+  }
+  }
   Module["_clock_time_get"] = _clock_time_get;
+  _clock_time_get.sig = 'iiiii';
 
-  function _clock_res_get(clk_id, pres) {
+  function _clock_res_get(clk_id, pres) {try {
+  
       if (!checkWasiClock(clk_id)) {
         return 28;
       }
@@ -13072,8 +13132,21 @@ var ASM_CONSTS = {
       HEAP32[((pres)>>2)]=nsec >>> 0;
       HEAP32[(((pres)+(4))>>2)]=(nsec / Math.pow(2, 32)) >>> 0;
       return 0;
-    }
+    } catch (e) {
+    if (typeof FS === 'undefined' || !(e instanceof FS.ErrnoError)) abort(e);
+    return e.errno;
+  }
+  }
   Module["_clock_res_get"] = _clock_res_get;
+  _clock_res_get.sig = 'iii';
+
+
+
+
+
+
+
+
 
   function readI53FromI64(ptr) {
       return HEAPU32[ptr>>2] + HEAP32[ptr+4>>2] * 4294967296;
@@ -13139,6 +13212,12 @@ var ASM_CONSTS = {
 
 
 
+
+
+
+
+
+
   var DLFCN={error:null,errorMsg:null};
   Module["DLFCN"] = DLFCN;
 
@@ -13149,9 +13228,7 @@ var ASM_CONSTS = {
 
 
 
-
-
-  function _dlopen(filenameAddr, flag) {
+  function _dlopen(filenameAddr, flags) {
       // void *dlopen(const char *file, int mode);
       // http://pubs.opengroup.org/onlinepubs/009695399/functions/dlopen.html
       var searchpaths = [];
@@ -13181,16 +13258,21 @@ var ASM_CONSTS = {
         }
       }
   
+      if (!(flags & (1 | 2))) {
+        DLFCN.errorMsg = 'invalid mode for dlopen(): Either RTLD_LAZY or RTLD_NOW is required';
+        return 0;
+      }
+  
       // We don't care about RTLD_NOW and RTLD_LAZY.
-      var flags = {
-        global:   Boolean(flag & 256),
-        nodelete: Boolean(flag & 4096),
+      var jsflags = {
+        global:   Boolean(flags & 256),
+        nodelete: Boolean(flags & 4096),
   
         fs: FS, // load libraries from provided filesystem
       }
   
       try {
-        return loadDynamicLibrary(filename, flags)
+        return loadDynamicLibrary(filename, jsflags)
       } catch (e) {
         err('Error in loading dynamic library ' + filename + ": " + e);
         DLFCN.errorMsg = 'Could not load dynamic lib: ' + filename + '\n' + e;
@@ -13198,6 +13280,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_dlopen"] = _dlopen;
+  _dlopen.sig = 'iii';
 
   function _dlclose(handle) {
       // int dlclose(void *handle);
@@ -13214,6 +13297,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_dlclose"] = _dlclose;
+  _dlclose.sig = 'ii';
 
   function _dlsym(handle, symbol) {
       // void *dlsym(void *restrict handle, const char *restrict name);
@@ -13222,7 +13306,7 @@ var ASM_CONSTS = {
       var result;
   
       if (handle == 0) {
-        result = resolveGlobalSymbol(symbol)
+        result = resolveGlobalSymbol(symbol, true);
         if (!result) {
           DLFCN.errorMsg = 'Tried to lookup unknown symbol "' + symbol + '" in dynamic lib: RTLD_DEFAULT'
           return 0;
@@ -13242,16 +13326,18 @@ var ASM_CONSTS = {
         result = lib.module[symbol];
       }
   
-      if (typeof result !== 'function') {
+      if (typeof result === 'function') {
+        // Insert the function into the wasm table.  If its a direct wasm function
+        // the second argument will not be needed.  If its a JS function we rely
+        // on the `sig` attribute being set based on the `<func>__sig` specified
+        // in library JS file.
+        return addFunctionWasm(result, result.sig);
+      } else {
         return result;
       }
-  
-      // Insert the function into the wasm table.  Since we know the function
-      // comes directly from the loaded wasm module we can insert it directly
-      // into the table, avoiding any JS interaction.
-      return addFunctionWasm(result);
     }
   Module["_dlsym"] = _dlsym;
+  _dlsym.sig = 'iii';
 
   function _dlerror() {
       // char *dlerror(void);
@@ -13265,6 +13351,7 @@ var ASM_CONSTS = {
       return DLFCN.error;
     }
   Module["_dlerror"] = _dlerror;
+  _dlerror.sig = 'i';
 
   function _dladdr(addr, info) {
       // report all function pointers as coming from this program itself XXX not really correct in any way
@@ -13276,6 +13363,8 @@ var ASM_CONSTS = {
       return 1;
     }
   Module["_dladdr"] = _dladdr;
+  _dladdr.sig = 'iii';
+
 
 
   var exceptionCaught= [];
@@ -13385,7 +13474,7 @@ var ASM_CONSTS = {
         exceptionCaught.push(catchInfo);
         info.set_rethrown(true);
         info.set_caught(false);
-        __ZSt18uncaught_exceptionv.uncaught_exceptions++;
+        uncaughtExceptionCount++;
       } else {
         catchInfo.free();
       }
@@ -13393,23 +13482,7 @@ var ASM_CONSTS = {
       throw ptr + " - Exception catching is disabled, this exception cannot be caught. Compile with -s DISABLE_EXCEPTION_CATCHING=0 or DISABLE_EXCEPTION_CATCHING=2 to catch." + " (note: in dynamic linking, if a side module wants exceptions, the main module must be built with that support)";
     }
   Module["___cxa_rethrow"] = ___cxa_rethrow;
-
-  function _llvm_eh_exception() {
-      return exceptionLast;
-    }
-  Module["_llvm_eh_exception"] = _llvm_eh_exception;
-
-  var _llvm_eh_selector__jsargs=true;
-  Module["_llvm_eh_selector__jsargs"] = _llvm_eh_selector__jsargs;
-
-  function _llvm_eh_selector(unused_exception_value, personality/*, varargs*/) {
-      var type = exceptionLast;
-      for (var i = 2; i < arguments.length; i++) {
-        if (arguments[i] == type) return type;
-      }
-      return 0;
-    }
-  Module["_llvm_eh_selector"] = _llvm_eh_selector;
+  ___cxa_rethrow.sig = 'v';
 
   function _llvm_eh_typeid_for(type) {
       return type;
@@ -13421,7 +13494,7 @@ var ASM_CONSTS = {
       var info = catchInfo.get_exception_info();
       if (!info.get_caught()) {
         info.set_caught(true);
-        __ZSt18uncaught_exceptionv.uncaught_exceptions--;
+        uncaughtExceptionCount--;
       }
       info.set_rethrown(false);
       exceptionCaught.push(catchInfo);
@@ -13442,6 +13515,7 @@ var ASM_CONSTS = {
       exceptionLast = 0; // XXX in decRef?
     }
   Module["___cxa_end_catch"] = ___cxa_end_catch;
+  ___cxa_end_catch.sig = 'v';
 
   function ___cxa_get_exception_ptr(ptr) {
       return new CatchInfo(ptr).get_exception_ptr();
@@ -13449,7 +13523,12 @@ var ASM_CONSTS = {
   Module["___cxa_get_exception_ptr"] = ___cxa_get_exception_ptr;
 
 
-
+  function ___cxa_call_unexpected(exception) {
+      err('Unexpected exception thrown, this is not properly supported - aborting');
+      ABORT = true;
+      throw exception;
+    }
+  Module["___cxa_call_unexpected"] = ___cxa_call_unexpected;
 
 
 
@@ -13465,7 +13544,7 @@ var ASM_CONSTS = {
       var thrown = exceptionLast;
       if (!thrown) {
         // just pass through the null ptr
-        return ((setTempRet0(0),0)|0);
+        setTempRet0((0) | 0); return ((0)|0);
       }
       var info = new ExceptionInfo(thrown);
       var thrownType = info.get_type();
@@ -13473,7 +13552,7 @@ var ASM_CONSTS = {
       catchInfo.set_base_ptr(thrown);
       if (!thrownType) {
         // just pass through the thrown ptr
-        return ((setTempRet0(0),catchInfo.ptr)|0);
+        setTempRet0((0) | 0); return ((catchInfo.ptr)|0);
       }
       var typeArray = Array.prototype.slice.call(arguments);
   
@@ -13496,11 +13575,11 @@ var ASM_CONSTS = {
           if (thrown !== adjusted) {
             catchInfo.set_adjusted_ptr(adjusted);
           }
-          return ((setTempRet0(caughtType),catchInfo.ptr)|0);
+          setTempRet0((caughtType) | 0); return ((catchInfo.ptr)|0);
         }
       }
       stackRestore(stackTop);
-      return ((setTempRet0(thrownType),catchInfo.ptr)|0);
+      setTempRet0((thrownType) | 0); return ((catchInfo.ptr)|0);
     }
   Module["___cxa_find_matching_catch"] = ___cxa_find_matching_catch;
 
@@ -13838,12 +13917,12 @@ var ASM_CONSTS = {
           return !Module.noWasmDecoding && name.endsWith('.so');
         };
         wasmPlugin['handle'] = function(byteArray, name, onload, onerror) {
-          // loadSideModule can not load modules out-of-order, so rather
+          // loadWebAssemblyModule can not load modules out-of-order, so rather
           // than just running the promises in parallel, this makes a chain of
           // promises to run in series.
           this['asyncWasmLoadPromise'] = this['asyncWasmLoadPromise'].then(
             function() {
-              return loadSideModule(byteArray, {loadAsync: true, nodelete: true});
+              return loadWebAssemblyModule(byteArray, {loadAsync: true, nodelete: true});
             }).then(
               function(module) {
                 Module['preloadedWasm'][name] = module;
@@ -14343,6 +14422,7 @@ var ASM_CONSTS = {
       );
     }
   Module["_emscripten_async_wget"] = _emscripten_async_wget;
+  _emscripten_async_wget.sig = 'viiii';
 
   var funcWrappers={};
   Module["funcWrappers"] = funcWrappers;
@@ -14386,6 +14466,7 @@ var ASM_CONSTS = {
       }, true /* no need for run dependency, this is async but will not do any prepare etc. step */ );
     }
   Module["_emscripten_async_wget_data"] = _emscripten_async_wget_data;
+  _emscripten_async_wget_data.sig = 'viiii';
 
   function _emscripten_async_wget2(url, file, request, param, arg, onload, onerror, onprogress) {
       noExitRuntime = true;
@@ -14460,6 +14541,7 @@ var ASM_CONSTS = {
       return handle;
     }
   Module["_emscripten_async_wget2"] = _emscripten_async_wget2;
+  _emscripten_async_wget2.sig = 'iiiiiiiii';
 
   function _emscripten_async_wget2_data(url, request, param, arg, free, onload, onerror, onprogress) {
       var _url = UTF8ToString(url);
@@ -14517,6 +14599,7 @@ var ASM_CONSTS = {
       return handle;
     }
   Module["_emscripten_async_wget2_data"] = _emscripten_async_wget2_data;
+  _emscripten_async_wget2_data.sig = 'iiiiiiiii';
 
   function _emscripten_async_wget2_abort(handle) {
       var http = Browser.wgetRequests[handle];
@@ -14525,6 +14608,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_async_wget2_abort"] = _emscripten_async_wget2_abort;
+  _emscripten_async_wget2_abort.sig = 'vi';
 
   function _emscripten_run_preload_plugins(file, onload, onerror) {
       noExitRuntime = true;
@@ -14547,6 +14631,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_run_preload_plugins"] = _emscripten_run_preload_plugins;
+  _emscripten_run_preload_plugins.sig = 'iiii';
 
   function _emscripten_run_preload_plugins_data(data, size, suffix, arg, onload, onerror) {
       noExitRuntime = true;
@@ -14572,6 +14657,7 @@ var ASM_CONSTS = {
       );
     }
   Module["_emscripten_run_preload_plugins_data"] = _emscripten_run_preload_plugins_data;
+  _emscripten_run_preload_plugins_data.sig = 'viiiiii';
 
   function _emscripten_async_run_script(script, millis) {
       noExitRuntime = true;
@@ -14584,8 +14670,8 @@ var ASM_CONSTS = {
   Module["_emscripten_async_run_script"] = _emscripten_async_run_script;
 
   function _emscripten_async_load_script(url, onload, onerror) {
-      onload = getFuncWrapper(onload, 'v');
-      onerror = getFuncWrapper(onerror, 'v');
+      onload = wasmTable.get(onload);
+      onerror = wasmTable.get(onerror);
   
       noExitRuntime = true;
   
@@ -14615,7 +14701,7 @@ var ASM_CONSTS = {
 
   /** @param {number|boolean=} noSetTiming */
   function _emscripten_set_main_loop(func, fps, simulateInfiniteLoop, arg, noSetTiming) {
-      var browserIterationFunc = function() { wasmTable.get(func)(); };
+      var browserIterationFunc = wasmTable.get(func);
       setMainLoop(browserIterationFunc, fps, simulateInfiniteLoop, arg, noSetTiming);
     }
   Module["_emscripten_set_main_loop"] = _emscripten_set_main_loop;
@@ -14693,6 +14779,7 @@ var ASM_CONSTS = {
       exit(status);
     }
   Module["_emscripten_force_exit"] = _emscripten_force_exit;
+  _emscripten_force_exit.sig = 'vi';
 
   function _emscripten_get_window_title() {
       var buflen = 256;
@@ -14709,17 +14796,20 @@ var ASM_CONSTS = {
       return _emscripten_get_window_title.buffer;
     }
   Module["_emscripten_get_window_title"] = _emscripten_get_window_title;
+  _emscripten_get_window_title.sig = 'iv';
 
   function _emscripten_set_window_title(title) {
       setWindowTitle(AsciiToString(title));
     }
   Module["_emscripten_set_window_title"] = _emscripten_set_window_title;
+  _emscripten_set_window_title.sig = 'vi';
 
   function _emscripten_get_screen_size(width, height) {
       HEAP32[((width)>>2)]=screen.width;
       HEAP32[((height)>>2)]=screen.height;
     }
   Module["_emscripten_get_screen_size"] = _emscripten_get_screen_size;
+  _emscripten_get_screen_size.sig = 'vii';
 
   function _emscripten_hide_mouse() {
       var styleSheet = document.styleSheets[0];
@@ -14733,11 +14823,13 @@ var ASM_CONSTS = {
       styleSheet.insertRule('canvas.emscripten { border: 1px solid black; cursor: none; }', 0);
     }
   Module["_emscripten_hide_mouse"] = _emscripten_hide_mouse;
+  _emscripten_hide_mouse.sig = 'v';
 
   function _emscripten_set_canvas_size(width, height) {
       Browser.setCanvasSize(width, height);
     }
   Module["_emscripten_set_canvas_size"] = _emscripten_set_canvas_size;
+  _emscripten_set_canvas_size.sig = 'vii';
 
   function _emscripten_get_canvas_size(width, height, isFullscreen) {
       var canvas = Module['canvas'];
@@ -14746,6 +14838,7 @@ var ASM_CONSTS = {
       HEAP32[((isFullscreen)>>2)]=Browser.isFullscreen ? 1 : 0;
     }
   Module["_emscripten_get_canvas_size"] = _emscripten_get_canvas_size;
+  _emscripten_get_canvas_size.sig = 'viii';
 
   function _emscripten_create_worker(url) {
       url = UTF8ToString(url);
@@ -14787,6 +14880,7 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_emscripten_create_worker"] = _emscripten_create_worker;
+  _emscripten_create_worker.sig = 'ii';
 
   function _emscripten_destroy_worker(id) {
       var info = Browser.workers[id];
@@ -14795,6 +14889,7 @@ var ASM_CONSTS = {
       Browser.workers[id] = null;
     }
   Module["_emscripten_destroy_worker"] = _emscripten_destroy_worker;
+  _emscripten_destroy_worker.sig = 'vi';
 
   function _emscripten_call_worker(id, funcName, data, size, callback, arg) {
       noExitRuntime = true; // should we only do this if there is a callback?
@@ -14805,7 +14900,7 @@ var ASM_CONSTS = {
       if (callback) {
         callbackId = info.callbacks.length;
         info.callbacks.push({
-          func: getFuncWrapper(callback, 'viii'),
+          func: wasmTable.get(callback),
           arg: arg
         });
         info.awaited++;
@@ -14822,6 +14917,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_call_worker"] = _emscripten_call_worker;
+  _emscripten_call_worker.sig = 'viiiiii';
 
   function _emscripten_worker_respond_provisionally(data, size) {
       if (workerResponded) throw 'already responded with final response!';
@@ -14837,6 +14933,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_worker_respond_provisionally"] = _emscripten_worker_respond_provisionally;
+  _emscripten_worker_respond_provisionally.sig = 'vii';
 
   function _emscripten_worker_respond(data, size) {
       if (workerResponded) throw 'already responded with final response!';
@@ -14853,6 +14950,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_worker_respond"] = _emscripten_worker_respond;
+  _emscripten_worker_respond.sig = 'vii';
 
   function _emscripten_get_worker_queue_size(id) {
       var info = Browser.workers[id];
@@ -14860,6 +14958,7 @@ var ASM_CONSTS = {
       return info.awaited;
     }
   Module["_emscripten_get_worker_queue_size"] = _emscripten_get_worker_queue_size;
+  _emscripten_get_worker_queue_size.sig = 'i';
 
   function _emscripten_get_preloaded_image_data(path, w, h) {
       if ((path | 0) === path) path = UTF8ToString(path);
@@ -14882,6 +14981,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_preloaded_image_data"] = _emscripten_get_preloaded_image_data;
+  _emscripten_get_preloaded_image_data.sig = 'iiii';
 
   function _emscripten_get_preloaded_image_data_from_FILE(file, w, h) {
       var fd = Module['_fileno'](file);
@@ -14893,6 +14993,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_get_preloaded_image_data_from_FILE"] = _emscripten_get_preloaded_image_data_from_FILE;
+  _emscripten_get_preloaded_image_data_from_FILE.sig = 'iiii';
 
 
 
@@ -15075,41 +15176,13 @@ var ASM_CONSTS = {
         GLctx.disjointTimerQueryExt = GLctx.getExtension("EXT_disjoint_timer_query");
         __webgl_enable_WEBGL_multi_draw(GLctx);
   
-        // These are the 'safe' feature-enabling extensions that don't add any performance impact related to e.g. debugging, and
-        // should be enabled by default so that client GLES2/GL code will not need to go through extra hoops to get its stuff working.
-        // As new extensions are ratified at http://www.khronos.org/registry/webgl/extensions/ , feel free to add your new extensions
-        // here, as long as they don't produce a performance impact for users that might not be using those extensions.
-        // E.g. debugging-related extensions should probably be off by default.
-        var automaticallyEnabledExtensions = [ // Khronos ratified WebGL extensions ordered by number (no debug extensions):
-                                               "OES_texture_float", "OES_texture_half_float", "OES_standard_derivatives",
-                                               "OES_vertex_array_object", "WEBGL_compressed_texture_s3tc", "WEBGL_depth_texture",
-                                               "OES_element_index_uint", "EXT_texture_filter_anisotropic", "EXT_frag_depth",
-                                               "WEBGL_draw_buffers", "ANGLE_instanced_arrays", "OES_texture_float_linear",
-                                               "OES_texture_half_float_linear", "EXT_blend_minmax", "EXT_shader_texture_lod",
-                                               "EXT_texture_norm16",
-                                               // Community approved WebGL extensions ordered by number:
-                                               "WEBGL_compressed_texture_pvrtc", "EXT_color_buffer_half_float", "WEBGL_color_buffer_float",
-                                               "EXT_sRGB", "WEBGL_compressed_texture_etc1", "EXT_disjoint_timer_query",
-                                               "WEBGL_compressed_texture_etc", "WEBGL_compressed_texture_astc", "EXT_color_buffer_float",
-                                               "WEBGL_compressed_texture_s3tc_srgb", "EXT_disjoint_timer_query_webgl2",
-                                               // Old style prefixed forms of extensions (but still currently used on e.g. iPhone Xs as
-                                               // tested on iOS 12.4.1):
-                                               "WEBKIT_WEBGL_compressed_texture_pvrtc"];
-  
-        function shouldEnableAutomatically(extension) {
-          var ret = false;
-          automaticallyEnabledExtensions.forEach(function(include) {
-            if (extension.indexOf(include) != -1) {
-              ret = true;
-            }
-          });
-          return ret;
-        }
-  
-        var exts = GLctx.getSupportedExtensions() || []; // .getSupportedExtensions() can return null if context is lost, so coerce to empty array.
+        // .getSupportedExtensions() can return null if context is lost, so coerce to empty array.
+        var exts = GLctx.getSupportedExtensions() || [];
         exts.forEach(function(ext) {
-          if (automaticallyEnabledExtensions.indexOf(ext) != -1) {
-            GLctx.getExtension(ext); // Calling .getExtension enables that extension permanently, no need to store the return value to be enabled.
+          // WEBGL_lose_context, WEBGL_debug_renderer_info and WEBGL_debug_shaders are not enabled by default.
+          if (ext.indexOf('lose_context') < 0 && ext.indexOf('debug') < 0) {
+            // Call .getExtension() to enable that extension permanently.
+            GLctx.getExtension(ext);
           }
         });
       },populateUniformTable:function(program) {
@@ -15225,6 +15298,7 @@ var ASM_CONSTS = {
       GLctx.pixelStorei(pname, param);
     }
   Module["_glPixelStorei"] = _glPixelStorei;
+  _glPixelStorei.sig = 'vii';
 
   function _glGetString(name_) {
       if (GL.stringCache[name_]) return GL.stringCache[name_];
@@ -15273,6 +15347,7 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_glGetString"] = _glGetString;
+  _glGetString.sig = 'ii';
 
   function emscriptenWebGLGet(name_, p, type) {
       // Guard against user passing a null pointer.
@@ -15379,16 +15454,19 @@ var ASM_CONSTS = {
       emscriptenWebGLGet(name_, p, 0);
     }
   Module["_glGetIntegerv"] = _glGetIntegerv;
+  _glGetIntegerv.sig = 'vii';
 
   function _glGetFloatv(name_, p) {
       emscriptenWebGLGet(name_, p, 2);
     }
   Module["_glGetFloatv"] = _glGetFloatv;
+  _glGetFloatv.sig = 'vii';
 
   function _glGetBooleanv(name_, p) {
       emscriptenWebGLGet(name_, p, 4);
     }
   Module["_glGetBooleanv"] = _glGetBooleanv;
+  _glGetBooleanv.sig = 'vii';
 
   function _glDeleteTextures(n, textures) {
       for (var i = 0; i < n; i++) {
@@ -15401,16 +15479,19 @@ var ASM_CONSTS = {
       }
     }
   Module["_glDeleteTextures"] = _glDeleteTextures;
+  _glDeleteTextures.sig = 'vii';
 
   function _glCompressedTexImage2D(target, level, internalFormat, width, height, border, imageSize, data) {
       GLctx['compressedTexImage2D'](target, level, internalFormat, width, height, border, data ? HEAPU8.subarray((data),(data+imageSize)) : null);
     }
   Module["_glCompressedTexImage2D"] = _glCompressedTexImage2D;
+  _glCompressedTexImage2D.sig = 'viiiiiiii';
 
   function _glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, data) {
       GLctx['compressedTexSubImage2D'](target, level, xoffset, yoffset, width, height, format, data ? HEAPU8.subarray((data),(data+imageSize)) : null);
     }
   Module["_glCompressedTexSubImage2D"] = _glCompressedTexSubImage2D;
+  _glCompressedTexSubImage2D.sig = 'viiiiiiiii';
 
   function computeUnpackAlignedImageSize(width, height, sizePerPixel, alignment) {
       function roundedToNextMultipleOf(x, y) {
@@ -15453,6 +15534,7 @@ var ASM_CONSTS = {
       GLctx.texImage2D(target, level, internalFormat, width, height, border, format, type, pixels ? emscriptenWebGLGetTexPixelData(type, format, width, height, pixels, internalFormat) : null);
     }
   Module["_glTexImage2D"] = _glTexImage2D;
+  _glTexImage2D.sig = 'viiiiiiiii';
 
   function _glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels) {
       var pixelData = null;
@@ -15460,6 +15542,7 @@ var ASM_CONSTS = {
       GLctx.texSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixelData);
     }
   Module["_glTexSubImage2D"] = _glTexSubImage2D;
+  _glTexSubImage2D.sig = 'viiiiiiiii';
 
   function _glReadPixels(x, y, width, height, format, type, pixels) {
       var pixelData = emscriptenWebGLGetTexPixelData(type, format, width, height, pixels, format);
@@ -15470,11 +15553,13 @@ var ASM_CONSTS = {
       GLctx.readPixels(x, y, width, height, format, type, pixelData);
     }
   Module["_glReadPixels"] = _glReadPixels;
+  _glReadPixels.sig = 'viiiiiii';
 
   function _glBindTexture(target, texture) {
       GLctx.bindTexture(target, GL.textures[texture]);
     }
   Module["_glBindTexture"] = _glBindTexture;
+  _glBindTexture.sig = 'vii';
 
   function _glGetTexParameterfv(target, pname, params) {
       if (!params) {
@@ -15486,6 +15571,7 @@ var ASM_CONSTS = {
       HEAPF32[((params)>>2)]=GLctx.getTexParameter(target, pname);
     }
   Module["_glGetTexParameterfv"] = _glGetTexParameterfv;
+  _glGetTexParameterfv.sig = 'viii';
 
   function _glGetTexParameteriv(target, pname, params) {
       if (!params) {
@@ -15497,18 +15583,21 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=GLctx.getTexParameter(target, pname);
     }
   Module["_glGetTexParameteriv"] = _glGetTexParameteriv;
+  _glGetTexParameteriv.sig = 'viii';
 
   function _glTexParameterfv(target, pname, params) {
       var param = HEAPF32[((params)>>2)];
       GLctx.texParameterf(target, pname, param);
     }
   Module["_glTexParameterfv"] = _glTexParameterfv;
+  _glTexParameterfv.sig = 'viii';
 
   function _glTexParameteriv(target, pname, params) {
       var param = HEAP32[((params)>>2)];
       GLctx.texParameteri(target, pname, param);
     }
   Module["_glTexParameteriv"] = _glTexParameteriv;
+  _glTexParameteriv.sig = 'viii';
 
   function _glIsTexture(id) {
       var texture = GL.textures[id];
@@ -15516,6 +15605,7 @@ var ASM_CONSTS = {
       return GLctx.isTexture(texture);
     }
   Module["_glIsTexture"] = _glIsTexture;
+  _glIsTexture.sig = 'ii';
 
   function __glGenObject(n, buffers, createFunction, objectTable
       ) {
@@ -15532,18 +15622,21 @@ var ASM_CONSTS = {
       }
     }
   Module["__glGenObject"] = __glGenObject;
+  __glGenObject.sig = 'vii';
 
   function _glGenBuffers(n, buffers) {
       __glGenObject(n, buffers, 'createBuffer', GL.buffers
         );
     }
   Module["_glGenBuffers"] = _glGenBuffers;
+  _glGenBuffers.sig = 'vii';
 
   function _glGenTextures(n, textures) {
       __glGenObject(n, textures, 'createTexture', GL.textures
         );
     }
   Module["_glGenTextures"] = _glGenTextures;
+  _glGenTextures.sig = 'vii';
 
   function _glDeleteBuffers(n, buffers) {
       for (var i = 0; i < n; i++) {
@@ -15561,6 +15654,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_glDeleteBuffers"] = _glDeleteBuffers;
+  _glDeleteBuffers.sig = 'vii';
 
   function _glGetBufferParameteriv(target, value, data) {
       if (!data) {
@@ -15572,6 +15666,7 @@ var ASM_CONSTS = {
       HEAP32[((data)>>2)]=GLctx.getBufferParameter(target, value);
     }
   Module["_glGetBufferParameteriv"] = _glGetBufferParameteriv;
+  _glGetBufferParameteriv.sig = 'viii';
 
   function _glBufferData(target, size, data, usage) {
   
@@ -15580,11 +15675,13 @@ var ASM_CONSTS = {
         GLctx.bufferData(target, data ? HEAPU8.subarray(data, data+size) : size, usage);
     }
   Module["_glBufferData"] = _glBufferData;
+  _glBufferData.sig = 'viiii';
 
   function _glBufferSubData(target, offset, size, data) {
       GLctx.bufferSubData(target, offset, HEAPU8.subarray(data, data+size));
     }
   Module["_glBufferSubData"] = _glBufferSubData;
+  _glBufferSubData.sig = 'viiii';
 
   function _glGenQueriesEXT(n, ids) {
       for (var i = 0; i < n; i++) {
@@ -15601,6 +15698,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_glGenQueriesEXT"] = _glGenQueriesEXT;
+  _glGenQueriesEXT.sig = 'vii';
 
   function _glDeleteQueriesEXT(n, ids) {
       for (var i = 0; i < n; i++) {
@@ -15612,6 +15710,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_glDeleteQueriesEXT"] = _glDeleteQueriesEXT;
+  _glDeleteQueriesEXT.sig = 'vii';
 
   function _glIsQueryEXT(id) {
       var query = GL.timerQueriesEXT[id];
@@ -15619,21 +15718,25 @@ var ASM_CONSTS = {
       return GLctx.disjointTimerQueryExt['isQueryEXT'](query);
     }
   Module["_glIsQueryEXT"] = _glIsQueryEXT;
+  _glIsQueryEXT.sig = 'ii';
 
   function _glBeginQueryEXT(target, id) {
       GLctx.disjointTimerQueryExt['beginQueryEXT'](target, GL.timerQueriesEXT[id]);
     }
   Module["_glBeginQueryEXT"] = _glBeginQueryEXT;
+  _glBeginQueryEXT.sig = 'vii';
 
   function _glEndQueryEXT(target) {
       GLctx.disjointTimerQueryExt['endQueryEXT'](target);
     }
   Module["_glEndQueryEXT"] = _glEndQueryEXT;
+  _glEndQueryEXT.sig = 'vi';
 
   function _glQueryCounterEXT(id, target) {
       GLctx.disjointTimerQueryExt['queryCounterEXT'](GL.timerQueriesEXT[id], target);
     }
   Module["_glQueryCounterEXT"] = _glQueryCounterEXT;
+  _glQueryCounterEXT.sig = 'vii';
 
   function _glGetQueryivEXT(target, pname, params) {
       if (!params) {
@@ -15645,6 +15748,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=GLctx.disjointTimerQueryExt['getQueryEXT'](target, pname);
     }
   Module["_glGetQueryivEXT"] = _glGetQueryivEXT;
+  _glGetQueryivEXT.sig = 'viii';
 
   function _glGetQueryObjectivEXT(id, pname, params) {
       if (!params) {
@@ -15664,6 +15768,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=ret;
     }
   Module["_glGetQueryObjectivEXT"] = _glGetQueryObjectivEXT;
+  _glGetQueryObjectivEXT.sig = 'viii';
 
   function _glGetQueryObjectuivEXT(id, pname, params) {
       if (!params) {
@@ -15683,6 +15788,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=ret;
     }
   Module["_glGetQueryObjectuivEXT"] = _glGetQueryObjectuivEXT;
+  _glGetQueryObjectuivEXT.sig = 'viii';
 
   function _glGetQueryObjecti64vEXT(id, pname, params) {
       if (!params) {
@@ -15702,6 +15808,7 @@ var ASM_CONSTS = {
       writeI53ToI64(params, ret);
     }
   Module["_glGetQueryObjecti64vEXT"] = _glGetQueryObjecti64vEXT;
+  _glGetQueryObjecti64vEXT.sig = 'viii';
 
   function _glGetQueryObjectui64vEXT(id, pname, params) {
       if (!params) {
@@ -15721,6 +15828,7 @@ var ASM_CONSTS = {
       writeI53ToI64(params, ret);
     }
   Module["_glGetQueryObjectui64vEXT"] = _glGetQueryObjectui64vEXT;
+  _glGetQueryObjectui64vEXT.sig = 'viii';
 
   function _glIsBuffer(buffer) {
       var b = GL.buffers[buffer];
@@ -15728,12 +15836,14 @@ var ASM_CONSTS = {
       return GLctx.isBuffer(b);
     }
   Module["_glIsBuffer"] = _glIsBuffer;
+  _glIsBuffer.sig = 'ii';
 
   function _glGenRenderbuffers(n, renderbuffers) {
       __glGenObject(n, renderbuffers, 'createRenderbuffer', GL.renderbuffers
         );
     }
   Module["_glGenRenderbuffers"] = _glGenRenderbuffers;
+  _glGenRenderbuffers.sig = 'vii';
 
   function _glDeleteRenderbuffers(n, renderbuffers) {
       for (var i = 0; i < n; i++) {
@@ -15746,11 +15856,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_glDeleteRenderbuffers"] = _glDeleteRenderbuffers;
+  _glDeleteRenderbuffers.sig = 'vii';
 
   function _glBindRenderbuffer(target, renderbuffer) {
       GLctx.bindRenderbuffer(target, GL.renderbuffers[renderbuffer]);
     }
   Module["_glBindRenderbuffer"] = _glBindRenderbuffer;
+  _glBindRenderbuffer.sig = 'vii';
 
   function _glGetRenderbufferParameteriv(target, pname, params) {
       if (!params) {
@@ -15762,6 +15874,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=GLctx.getRenderbufferParameter(target, pname);
     }
   Module["_glGetRenderbufferParameteriv"] = _glGetRenderbufferParameteriv;
+  _glGetRenderbufferParameteriv.sig = 'viii';
 
   function _glIsRenderbuffer(renderbuffer) {
       var rb = GL.renderbuffers[renderbuffer];
@@ -15769,6 +15882,7 @@ var ASM_CONSTS = {
       return GLctx.isRenderbuffer(rb);
     }
   Module["_glIsRenderbuffer"] = _glIsRenderbuffer;
+  _glIsRenderbuffer.sig = 'ii';
 
   /** @suppress{checkTypes} */
   function emscriptenWebGLGetUniform(program, location, params, type) {
@@ -15799,11 +15913,13 @@ var ASM_CONSTS = {
       emscriptenWebGLGetUniform(program, location, params, 2);
     }
   Module["_glGetUniformfv"] = _glGetUniformfv;
+  _glGetUniformfv.sig = 'viii';
 
   function _glGetUniformiv(program, location, params) {
       emscriptenWebGLGetUniform(program, location, params, 0);
     }
   Module["_glGetUniformiv"] = _glGetUniformiv;
+  _glGetUniformiv.sig = 'viii';
 
   function _glGetUniformLocation(program, name) {
       name = UTF8ToString(name);
@@ -15824,6 +15940,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_glGetUniformLocation"] = _glGetUniformLocation;
+  _glGetUniformLocation.sig = 'iii';
 
   /** @suppress{checkTypes} */
   function emscriptenWebGLGetVertexAttrib(index, pname, params, type) {
@@ -15860,6 +15977,7 @@ var ASM_CONSTS = {
       emscriptenWebGLGetVertexAttrib(index, pname, params, 2);
     }
   Module["_glGetVertexAttribfv"] = _glGetVertexAttribfv;
+  _glGetVertexAttribfv.sig = 'viii';
 
   function _glGetVertexAttribiv(index, pname, params) {
       // N.B. This function may only be called if the vertex attribute was specified using the function glVertexAttrib*f(),
@@ -15867,6 +15985,7 @@ var ASM_CONSTS = {
       emscriptenWebGLGetVertexAttrib(index, pname, params, 5);
     }
   Module["_glGetVertexAttribiv"] = _glGetVertexAttribiv;
+  _glGetVertexAttribiv.sig = 'viii';
 
   function _glGetVertexAttribPointerv(index, pname, pointer) {
       if (!pointer) {
@@ -15878,46 +15997,55 @@ var ASM_CONSTS = {
       HEAP32[((pointer)>>2)]=GLctx.getVertexAttribOffset(index, pname);
     }
   Module["_glGetVertexAttribPointerv"] = _glGetVertexAttribPointerv;
+  _glGetVertexAttribPointerv.sig = 'viii';
 
   function _glUniform1f(location, v0) {
       GLctx.uniform1f(GL.uniforms[location], v0);
     }
   Module["_glUniform1f"] = _glUniform1f;
+  _glUniform1f.sig = 'vif';
 
   function _glUniform2f(location, v0, v1) {
       GLctx.uniform2f(GL.uniforms[location], v0, v1);
     }
   Module["_glUniform2f"] = _glUniform2f;
+  _glUniform2f.sig = 'viff';
 
   function _glUniform3f(location, v0, v1, v2) {
       GLctx.uniform3f(GL.uniforms[location], v0, v1, v2);
     }
   Module["_glUniform3f"] = _glUniform3f;
+  _glUniform3f.sig = 'vifff';
 
   function _glUniform4f(location, v0, v1, v2, v3) {
       GLctx.uniform4f(GL.uniforms[location], v0, v1, v2, v3);
     }
   Module["_glUniform4f"] = _glUniform4f;
+  _glUniform4f.sig = 'viffff';
 
   function _glUniform1i(location, v0) {
       GLctx.uniform1i(GL.uniforms[location], v0);
     }
   Module["_glUniform1i"] = _glUniform1i;
+  _glUniform1i.sig = 'vii';
 
   function _glUniform2i(location, v0, v1) {
       GLctx.uniform2i(GL.uniforms[location], v0, v1);
     }
   Module["_glUniform2i"] = _glUniform2i;
+  _glUniform2i.sig = 'viii';
 
   function _glUniform3i(location, v0, v1, v2) {
       GLctx.uniform3i(GL.uniforms[location], v0, v1, v2);
     }
   Module["_glUniform3i"] = _glUniform3i;
+  _glUniform3i.sig = 'viiii';
 
   function _glUniform4i(location, v0, v1, v2, v3) {
       GLctx.uniform4i(GL.uniforms[location], v0, v1, v2, v3);
     }
   Module["_glUniform4i"] = _glUniform4i;
+  _glUniform4i.sig = 'viiiii';
 
   function _glUniform1iv(location, count, value) {
   
@@ -15934,6 +16062,7 @@ var ASM_CONSTS = {
       GLctx.uniform1iv(GL.uniforms[location], view);
     }
   Module["_glUniform1iv"] = _glUniform1iv;
+  _glUniform1iv.sig = 'viii';
 
   function _glUniform2iv(location, count, value) {
   
@@ -15951,6 +16080,7 @@ var ASM_CONSTS = {
       GLctx.uniform2iv(GL.uniforms[location], view);
     }
   Module["_glUniform2iv"] = _glUniform2iv;
+  _glUniform2iv.sig = 'viii';
 
   function _glUniform3iv(location, count, value) {
   
@@ -15969,6 +16099,7 @@ var ASM_CONSTS = {
       GLctx.uniform3iv(GL.uniforms[location], view);
     }
   Module["_glUniform3iv"] = _glUniform3iv;
+  _glUniform3iv.sig = 'viii';
 
   function _glUniform4iv(location, count, value) {
   
@@ -15988,6 +16119,7 @@ var ASM_CONSTS = {
       GLctx.uniform4iv(GL.uniforms[location], view);
     }
   Module["_glUniform4iv"] = _glUniform4iv;
+  _glUniform4iv.sig = 'viii';
 
   function _glUniform1fv(location, count, value) {
   
@@ -16004,6 +16136,7 @@ var ASM_CONSTS = {
       GLctx.uniform1fv(GL.uniforms[location], view);
     }
   Module["_glUniform1fv"] = _glUniform1fv;
+  _glUniform1fv.sig = 'viii';
 
   function _glUniform2fv(location, count, value) {
   
@@ -16021,6 +16154,7 @@ var ASM_CONSTS = {
       GLctx.uniform2fv(GL.uniforms[location], view);
     }
   Module["_glUniform2fv"] = _glUniform2fv;
+  _glUniform2fv.sig = 'viii';
 
   function _glUniform3fv(location, count, value) {
   
@@ -16039,6 +16173,7 @@ var ASM_CONSTS = {
       GLctx.uniform3fv(GL.uniforms[location], view);
     }
   Module["_glUniform3fv"] = _glUniform3fv;
+  _glUniform3fv.sig = 'viii';
 
   function _glUniform4fv(location, count, value) {
   
@@ -16062,6 +16197,7 @@ var ASM_CONSTS = {
       GLctx.uniform4fv(GL.uniforms[location], view);
     }
   Module["_glUniform4fv"] = _glUniform4fv;
+  _glUniform4fv.sig = 'viii';
 
   function _glUniformMatrix2fv(location, count, transpose, value) {
   
@@ -16081,6 +16217,7 @@ var ASM_CONSTS = {
       GLctx.uniformMatrix2fv(GL.uniforms[location], !!transpose, view);
     }
   Module["_glUniformMatrix2fv"] = _glUniformMatrix2fv;
+  _glUniformMatrix2fv.sig = 'viiii';
 
   function _glUniformMatrix3fv(location, count, transpose, value) {
   
@@ -16105,6 +16242,7 @@ var ASM_CONSTS = {
       GLctx.uniformMatrix3fv(GL.uniforms[location], !!transpose, view);
     }
   Module["_glUniformMatrix3fv"] = _glUniformMatrix3fv;
+  _glUniformMatrix3fv.sig = 'viiii';
 
   function _glUniformMatrix4fv(location, count, transpose, value) {
   
@@ -16140,41 +16278,48 @@ var ASM_CONSTS = {
       GLctx.uniformMatrix4fv(GL.uniforms[location], !!transpose, view);
     }
   Module["_glUniformMatrix4fv"] = _glUniformMatrix4fv;
+  _glUniformMatrix4fv.sig = 'viiii';
 
   function _glBindBuffer(target, buffer) {
   
       GLctx.bindBuffer(target, GL.buffers[buffer]);
     }
   Module["_glBindBuffer"] = _glBindBuffer;
+  _glBindBuffer.sig = 'vii';
 
   function _glVertexAttrib1fv(index, v) {
   
       GLctx.vertexAttrib1f(index, HEAPF32[v>>2]);
     }
   Module["_glVertexAttrib1fv"] = _glVertexAttrib1fv;
+  _glVertexAttrib1fv.sig = 'vii';
 
   function _glVertexAttrib2fv(index, v) {
   
       GLctx.vertexAttrib2f(index, HEAPF32[v>>2], HEAPF32[v+4>>2]);
     }
   Module["_glVertexAttrib2fv"] = _glVertexAttrib2fv;
+  _glVertexAttrib2fv.sig = 'vii';
 
   function _glVertexAttrib3fv(index, v) {
   
       GLctx.vertexAttrib3f(index, HEAPF32[v>>2], HEAPF32[v+4>>2], HEAPF32[v+8>>2]);
     }
   Module["_glVertexAttrib3fv"] = _glVertexAttrib3fv;
+  _glVertexAttrib3fv.sig = 'vii';
 
   function _glVertexAttrib4fv(index, v) {
   
       GLctx.vertexAttrib4f(index, HEAPF32[v>>2], HEAPF32[v+4>>2], HEAPF32[v+8>>2], HEAPF32[v+12>>2]);
     }
   Module["_glVertexAttrib4fv"] = _glVertexAttrib4fv;
+  _glVertexAttrib4fv.sig = 'vii';
 
   function _glGetAttribLocation(program, name) {
       return GLctx.getAttribLocation(GL.programs[program], UTF8ToString(name));
     }
   Module["_glGetAttribLocation"] = _glGetAttribLocation;
+  _glGetAttribLocation.sig = 'iii';
 
   function __glGetActiveAttribOrUniform(funcName, program, index, bufSize, length, size, type, name) {
       program = GL.programs[program];
@@ -16192,11 +16337,13 @@ var ASM_CONSTS = {
       __glGetActiveAttribOrUniform('getActiveAttrib', program, index, bufSize, length, size, type, name);
     }
   Module["_glGetActiveAttrib"] = _glGetActiveAttrib;
+  _glGetActiveAttrib.sig = 'viiiiiii';
 
   function _glGetActiveUniform(program, index, bufSize, length, size, type, name) {
       __glGetActiveAttribOrUniform('getActiveUniform', program, index, bufSize, length, size, type, name);
     }
   Module["_glGetActiveUniform"] = _glGetActiveUniform;
+  _glGetActiveUniform.sig = 'viiiiiii';
 
   function _glCreateShader(shaderType) {
       var id = GL.getNewId(GL.shaders);
@@ -16204,6 +16351,7 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_glCreateShader"] = _glCreateShader;
+  _glCreateShader.sig = 'ii';
 
   function _glDeleteShader(id) {
       if (!id) return;
@@ -16216,6 +16364,7 @@ var ASM_CONSTS = {
       GL.shaders[id] = null;
     }
   Module["_glDeleteShader"] = _glDeleteShader;
+  _glDeleteShader.sig = 'vi';
 
   function _glGetAttachedShaders(program, maxCount, count, shaders) {
       var result = GLctx.getAttachedShaders(GL.programs[program]);
@@ -16230,6 +16379,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_glGetAttachedShaders"] = _glGetAttachedShaders;
+  _glGetAttachedShaders.sig = 'viiii';
 
   function _glShaderSource(shader, count, string, length) {
       var source = GL.getSource(shader, count, string, length);
@@ -16237,6 +16387,7 @@ var ASM_CONSTS = {
       GLctx.shaderSource(GL.shaders[shader], source);
     }
   Module["_glShaderSource"] = _glShaderSource;
+  _glShaderSource.sig = 'viiii';
 
   function _glGetShaderSource(shader, bufSize, length, source) {
       var result = GLctx.getShaderSource(GL.shaders[shader]);
@@ -16245,11 +16396,13 @@ var ASM_CONSTS = {
       if (length) HEAP32[((length)>>2)]=numBytesWrittenExclNull;
     }
   Module["_glGetShaderSource"] = _glGetShaderSource;
+  _glGetShaderSource.sig = 'viiii';
 
   function _glCompileShader(shader) {
       GLctx.compileShader(GL.shaders[shader]);
     }
   Module["_glCompileShader"] = _glCompileShader;
+  _glCompileShader.sig = 'vi';
 
   function _glGetShaderInfoLog(shader, maxLength, length, infoLog) {
       var log = GLctx.getShaderInfoLog(GL.shaders[shader]);
@@ -16258,6 +16411,7 @@ var ASM_CONSTS = {
       if (length) HEAP32[((length)>>2)]=numBytesWrittenExclNull;
     }
   Module["_glGetShaderInfoLog"] = _glGetShaderInfoLog;
+  _glGetShaderInfoLog.sig = 'viiii';
 
   function _glGetShaderiv(shader, pname, p) {
       if (!p) {
@@ -16286,6 +16440,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_glGetShaderiv"] = _glGetShaderiv;
+  _glGetShaderiv.sig = 'viii';
 
   function _glGetProgramiv(program, pname, p) {
       if (!p) {
@@ -16339,6 +16494,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_glGetProgramiv"] = _glGetProgramiv;
+  _glGetProgramiv.sig = 'viii';
 
   function _glIsShader(shader) {
       var s = GL.shaders[shader];
@@ -16346,6 +16502,7 @@ var ASM_CONSTS = {
       return GLctx.isShader(s);
     }
   Module["_glIsShader"] = _glIsShader;
+  _glIsShader.sig = 'ii';
 
   function _glCreateProgram() {
       var id = GL.getNewId(GL.programs);
@@ -16355,6 +16512,7 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_glCreateProgram"] = _glCreateProgram;
+  _glCreateProgram.sig = 'i';
 
   function _glDeleteProgram(id) {
       if (!id) return;
@@ -16369,18 +16527,21 @@ var ASM_CONSTS = {
       GL.programInfos[id] = null;
     }
   Module["_glDeleteProgram"] = _glDeleteProgram;
+  _glDeleteProgram.sig = 'vi';
 
   function _glAttachShader(program, shader) {
       GLctx.attachShader(GL.programs[program],
                               GL.shaders[shader]);
     }
   Module["_glAttachShader"] = _glAttachShader;
+  _glAttachShader.sig = 'vii';
 
   function _glDetachShader(program, shader) {
       GLctx.detachShader(GL.programs[program],
                               GL.shaders[shader]);
     }
   Module["_glDetachShader"] = _glDetachShader;
+  _glDetachShader.sig = 'vii';
 
   function _glGetShaderPrecisionFormat(shaderType, precisionType, range, precision) {
       var result = GLctx.getShaderPrecisionFormat(shaderType, precisionType);
@@ -16389,12 +16550,14 @@ var ASM_CONSTS = {
       HEAP32[((precision)>>2)]=result.precision;
     }
   Module["_glGetShaderPrecisionFormat"] = _glGetShaderPrecisionFormat;
+  _glGetShaderPrecisionFormat.sig = 'viiii';
 
   function _glLinkProgram(program) {
       GLctx.linkProgram(GL.programs[program]);
       GL.populateUniformTable(program);
     }
   Module["_glLinkProgram"] = _glLinkProgram;
+  _glLinkProgram.sig = 'vi';
 
   function _glGetProgramInfoLog(program, maxLength, length, infoLog) {
       var log = GLctx.getProgramInfoLog(GL.programs[program]);
@@ -16403,16 +16566,19 @@ var ASM_CONSTS = {
       if (length) HEAP32[((length)>>2)]=numBytesWrittenExclNull;
     }
   Module["_glGetProgramInfoLog"] = _glGetProgramInfoLog;
+  _glGetProgramInfoLog.sig = 'viiii';
 
   function _glUseProgram(program) {
       GLctx.useProgram(GL.programs[program]);
     }
   Module["_glUseProgram"] = _glUseProgram;
+  _glUseProgram.sig = 'vi';
 
   function _glValidateProgram(program) {
       GLctx.validateProgram(GL.programs[program]);
     }
   Module["_glValidateProgram"] = _glValidateProgram;
+  _glValidateProgram.sig = 'vi';
 
   function _glIsProgram(program) {
       program = GL.programs[program];
@@ -16420,11 +16586,13 @@ var ASM_CONSTS = {
       return GLctx.isProgram(program);
     }
   Module["_glIsProgram"] = _glIsProgram;
+  _glIsProgram.sig = 'ii';
 
   function _glBindAttribLocation(program, index, name) {
       GLctx.bindAttribLocation(GL.programs[program], index, UTF8ToString(name));
     }
   Module["_glBindAttribLocation"] = _glBindAttribLocation;
+  _glBindAttribLocation.sig = 'viii';
 
   function _glBindFramebuffer(target, framebuffer) {
   
@@ -16432,12 +16600,14 @@ var ASM_CONSTS = {
   
     }
   Module["_glBindFramebuffer"] = _glBindFramebuffer;
+  _glBindFramebuffer.sig = 'vii';
 
   function _glGenFramebuffers(n, ids) {
       __glGenObject(n, ids, 'createFramebuffer', GL.framebuffers
         );
     }
   Module["_glGenFramebuffers"] = _glGenFramebuffers;
+  _glGenFramebuffers.sig = 'vii';
 
   function _glDeleteFramebuffers(n, framebuffers) {
       for (var i = 0; i < n; ++i) {
@@ -16450,18 +16620,21 @@ var ASM_CONSTS = {
       }
     }
   Module["_glDeleteFramebuffers"] = _glDeleteFramebuffers;
+  _glDeleteFramebuffers.sig = 'vii';
 
   function _glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer) {
       GLctx.framebufferRenderbuffer(target, attachment, renderbuffertarget,
                                          GL.renderbuffers[renderbuffer]);
     }
   Module["_glFramebufferRenderbuffer"] = _glFramebufferRenderbuffer;
+  _glFramebufferRenderbuffer.sig = 'viiii';
 
   function _glFramebufferTexture2D(target, attachment, textarget, texture, level) {
       GLctx.framebufferTexture2D(target, attachment, textarget,
                                       GL.textures[texture], level);
     }
   Module["_glFramebufferTexture2D"] = _glFramebufferTexture2D;
+  _glFramebufferTexture2D.sig = 'viiiii';
 
   function _glGetFramebufferAttachmentParameteriv(target, attachment, pname, params) {
       var result = GLctx.getFramebufferAttachmentParameter(target, attachment, pname);
@@ -16472,6 +16645,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=result;
     }
   Module["_glGetFramebufferAttachmentParameteriv"] = _glGetFramebufferAttachmentParameteriv;
+  _glGetFramebufferAttachmentParameteriv.sig = 'viiii';
 
   function _glIsFramebuffer(framebuffer) {
       var fb = GL.framebuffers[framebuffer];
@@ -16479,12 +16653,14 @@ var ASM_CONSTS = {
       return GLctx.isFramebuffer(fb);
     }
   Module["_glIsFramebuffer"] = _glIsFramebuffer;
+  _glIsFramebuffer.sig = 'ii';
 
   function _glGenVertexArrays(n, arrays) {
       __glGenObject(n, arrays, 'createVertexArray', GL.vaos
         );
     }
   Module["_glGenVertexArrays"] = _glGenVertexArrays;
+  _glGenVertexArrays.sig = 'vii';
 
   function _glDeleteVertexArrays(n, vaos) {
       for (var i = 0; i < n; i++) {
@@ -16494,11 +16670,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_glDeleteVertexArrays"] = _glDeleteVertexArrays;
+  _glDeleteVertexArrays.sig = 'vii';
 
   function _glBindVertexArray(vao) {
       GLctx['bindVertexArray'](GL.vaos[vao]);
     }
   Module["_glBindVertexArray"] = _glBindVertexArray;
+  _glBindVertexArray.sig = 'vi';
 
   function _glIsVertexArray(array) {
   
@@ -16507,6 +16685,7 @@ var ASM_CONSTS = {
       return GLctx['isVertexArray'](vao);
     }
   Module["_glIsVertexArray"] = _glIsVertexArray;
+  _glIsVertexArray.sig = 'ii';
 
   function _glVertexPointer(){ throw 'Legacy GL function (glVertexPointer) called. If you want legacy GL emulation, you need to compile with -s LEGACY_GL_EMULATION=1 to enable legacy GL emulation.'; }
   Module["_glVertexPointer"] = _glVertexPointer;
@@ -16525,6 +16704,7 @@ var ASM_CONSTS = {
         );
     }
   Module["_glGenVertexArraysOES"] = _glGenVertexArraysOES;
+  _glGenVertexArraysOES.sig = 'vii';
 
   function _glDeleteVertexArraysOES(n, vaos) {
       for (var i = 0; i < n; i++) {
@@ -16534,11 +16714,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_glDeleteVertexArraysOES"] = _glDeleteVertexArraysOES;
+  _glDeleteVertexArraysOES.sig = 'vii';
 
   function _glBindVertexArrayOES(vao) {
       GLctx['bindVertexArray'](GL.vaos[vao]);
     }
   Module["_glBindVertexArrayOES"] = _glBindVertexArrayOES;
+  _glBindVertexArrayOES.sig = 'vi';
 
   function _glIsVertexArrayOES(array) {
   
@@ -16547,6 +16729,7 @@ var ASM_CONSTS = {
       return GLctx['isVertexArray'](vao);
     }
   Module["_glIsVertexArrayOES"] = _glIsVertexArrayOES;
+  _glIsVertexArrayOES.sig = 'ii';
 
   function _gluPerspective(fov, aspect, near, far) {
       GLImmediate.matricesModified = true;
@@ -16616,7 +16799,7 @@ var ASM_CONSTS = {
 
   function _glOrtho(
   ) {
-  if (!Module['_glOrtho']) abort("external function 'glOrtho' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['_glOrtho']) abort("external symbol 'glOrtho' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['_glOrtho'].apply(null, arguments);
   }
   function _gluOrtho2D(left, right, bottom, top) {
@@ -16628,16 +16811,19 @@ var ASM_CONSTS = {
       GLctx.vertexAttribPointer(index, size, type, !!normalized, stride, ptr);
     }
   Module["_glVertexAttribPointer"] = _glVertexAttribPointer;
+  _glVertexAttribPointer.sig = 'viiiiii';
 
   function _glEnableVertexAttribArray(index) {
       GLctx.enableVertexAttribArray(index);
     }
   Module["_glEnableVertexAttribArray"] = _glEnableVertexAttribArray;
+  _glEnableVertexAttribArray.sig = 'vi';
 
   function _glDisableVertexAttribArray(index) {
       GLctx.disableVertexAttribArray(index);
     }
   Module["_glDisableVertexAttribArray"] = _glDisableVertexAttribArray;
+  _glDisableVertexAttribArray.sig = 'vi';
 
   function _glDrawArrays(mode, first, count) {
   
@@ -16645,6 +16831,7 @@ var ASM_CONSTS = {
   
     }
   Module["_glDrawArrays"] = _glDrawArrays;
+  _glDrawArrays.sig = 'viii';
 
   function _glDrawElements(mode, count, type, indices) {
   
@@ -16652,16 +16839,19 @@ var ASM_CONSTS = {
   
     }
   Module["_glDrawElements"] = _glDrawElements;
+  _glDrawElements.sig = 'viiii';
 
   function _glShaderBinary() {
       GL.recordError(0x500/*GL_INVALID_ENUM*/);
     }
   Module["_glShaderBinary"] = _glShaderBinary;
+  _glShaderBinary.sig = 'v';
 
   function _glReleaseShaderCompiler() {
       // NOP (as allowed by GLES 2.0 spec)
     }
   Module["_glReleaseShaderCompiler"] = _glReleaseShaderCompiler;
+  _glReleaseShaderCompiler.sig = 'v';
 
   function _glGetError() {
       var error = GLctx.getError() || GL.lastError;
@@ -16669,81 +16859,97 @@ var ASM_CONSTS = {
       return error;
     }
   Module["_glGetError"] = _glGetError;
+  _glGetError.sig = 'i';
 
   function _glVertexAttribDivisor(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_glVertexAttribDivisor"] = _glVertexAttribDivisor;
+  _glVertexAttribDivisor.sig = 'vii';
 
   function _glDrawArraysInstanced(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_glDrawArraysInstanced"] = _glDrawArraysInstanced;
+  _glDrawArraysInstanced.sig = 'viiii';
 
   function _glDrawElementsInstanced(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_glDrawElementsInstanced"] = _glDrawElementsInstanced;
+  _glDrawElementsInstanced.sig = 'viiiii';
 
   function _glVertexAttribDivisorNV(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_glVertexAttribDivisorNV"] = _glVertexAttribDivisorNV;
+  _glVertexAttribDivisorNV.sig = 'vii';
 
   function _glDrawArraysInstancedNV(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_glDrawArraysInstancedNV"] = _glDrawArraysInstancedNV;
+  _glDrawArraysInstancedNV.sig = 'viiii';
 
   function _glDrawElementsInstancedNV(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_glDrawElementsInstancedNV"] = _glDrawElementsInstancedNV;
+  _glDrawElementsInstancedNV.sig = 'viiiii';
 
   function _glVertexAttribDivisorEXT(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_glVertexAttribDivisorEXT"] = _glVertexAttribDivisorEXT;
+  _glVertexAttribDivisorEXT.sig = 'vii';
 
   function _glDrawArraysInstancedEXT(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_glDrawArraysInstancedEXT"] = _glDrawArraysInstancedEXT;
+  _glDrawArraysInstancedEXT.sig = 'viiii';
 
   function _glDrawElementsInstancedEXT(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_glDrawElementsInstancedEXT"] = _glDrawElementsInstancedEXT;
+  _glDrawElementsInstancedEXT.sig = 'viiiii';
 
   function _glVertexAttribDivisorARB(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_glVertexAttribDivisorARB"] = _glVertexAttribDivisorARB;
+  _glVertexAttribDivisorARB.sig = 'vii';
 
   function _glDrawArraysInstancedARB(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_glDrawArraysInstancedARB"] = _glDrawArraysInstancedARB;
+  _glDrawArraysInstancedARB.sig = 'viiii';
 
   function _glDrawElementsInstancedARB(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_glDrawElementsInstancedARB"] = _glDrawElementsInstancedARB;
+  _glDrawElementsInstancedARB.sig = 'viiiii';
 
   function _glVertexAttribDivisorANGLE(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_glVertexAttribDivisorANGLE"] = _glVertexAttribDivisorANGLE;
+  _glVertexAttribDivisorANGLE.sig = 'vii';
 
   function _glDrawArraysInstancedANGLE(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_glDrawArraysInstancedANGLE"] = _glDrawArraysInstancedANGLE;
+  _glDrawArraysInstancedANGLE.sig = 'viiii';
 
   function _glDrawElementsInstancedANGLE(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_glDrawElementsInstancedANGLE"] = _glDrawElementsInstancedANGLE;
+  _glDrawElementsInstancedANGLE.sig = 'viiiii';
 
   function _glDrawBuffers(n, bufs) {
   
@@ -16755,6 +16961,7 @@ var ASM_CONSTS = {
       GLctx['drawBuffers'](bufArray);
     }
   Module["_glDrawBuffers"] = _glDrawBuffers;
+  _glDrawBuffers.sig = 'vii';
 
   function _glDrawBuffersEXT(n, bufs) {
   
@@ -16766,6 +16973,7 @@ var ASM_CONSTS = {
       GLctx['drawBuffers'](bufArray);
     }
   Module["_glDrawBuffersEXT"] = _glDrawBuffersEXT;
+  _glDrawBuffersEXT.sig = 'vii';
 
   function _glDrawBuffersWEBGL(n, bufs) {
   
@@ -16777,21 +16985,25 @@ var ASM_CONSTS = {
       GLctx['drawBuffers'](bufArray);
     }
   Module["_glDrawBuffersWEBGL"] = _glDrawBuffersWEBGL;
+  _glDrawBuffersWEBGL.sig = 'vii';
 
   function _glColorMask(red, green, blue, alpha) {
       GLctx.colorMask(!!red, !!green, !!blue, !!alpha);
     }
   Module["_glColorMask"] = _glColorMask;
+  _glColorMask.sig = 'viiii';
 
   function _glDepthMask(flag) {
       GLctx.depthMask(!!flag);
     }
   Module["_glDepthMask"] = _glDepthMask;
+  _glDepthMask.sig = 'vi';
 
   function _glSampleCoverage(value, invert) {
       GLctx.sampleCoverage(value, !!invert);
     }
   Module["_glSampleCoverage"] = _glSampleCoverage;
+  _glSampleCoverage.sig = 'vii';
 
   function _glMultiDrawArrays(mode, firsts, counts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
@@ -16803,6 +17015,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawArrays"] = _glMultiDrawArrays;
+  _glMultiDrawArrays.sig = 'viiii';
 
   function _glMultiDrawArraysANGLE(mode, firsts, counts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
@@ -16814,6 +17027,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawArraysANGLE"] = _glMultiDrawArraysANGLE;
+  _glMultiDrawArraysANGLE.sig = 'viiii';
 
   function _glMultiDrawArraysWEBGL(mode, firsts, counts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
@@ -16825,6 +17039,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawArraysWEBGL"] = _glMultiDrawArraysWEBGL;
+  _glMultiDrawArraysWEBGL.sig = 'viiii';
 
   function _glMultiDrawArraysInstancedANGLE(mode, firsts, counts, instanceCounts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysInstancedWEBGL'](
@@ -16838,6 +17053,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawArraysInstancedANGLE"] = _glMultiDrawArraysInstancedANGLE;
+  _glMultiDrawArraysInstancedANGLE.sig = 'viiiii';
 
   function _glMultiDrawArraysInstancedWEBGL(mode, firsts, counts, instanceCounts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysInstancedWEBGL'](
@@ -16851,6 +17067,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawArraysInstancedWEBGL"] = _glMultiDrawArraysInstancedWEBGL;
+  _glMultiDrawArraysInstancedWEBGL.sig = 'viiiii';
 
   function _glMultiDrawElements(mode, counts, type, offsets, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
@@ -16863,6 +17080,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawElements"] = _glMultiDrawElements;
+  _glMultiDrawElements.sig = 'viiiii';
 
   function _glMultiDrawElementsANGLE(mode, counts, type, offsets, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
@@ -16875,6 +17093,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawElementsANGLE"] = _glMultiDrawElementsANGLE;
+  _glMultiDrawElementsANGLE.sig = 'viiiii';
 
   function _glMultiDrawElementsWEBGL(mode, counts, type, offsets, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
@@ -16887,6 +17106,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawElementsWEBGL"] = _glMultiDrawElementsWEBGL;
+  _glMultiDrawElementsWEBGL.sig = 'viiiii';
 
   function _glMultiDrawElementsInstancedANGLE(mode, counts, type, offsets, instanceCounts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsInstancedWEBGL'](
@@ -16901,6 +17121,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawElementsInstancedANGLE"] = _glMultiDrawElementsInstancedANGLE;
+  _glMultiDrawElementsInstancedANGLE.sig = 'viiiiii';
 
   function _glMultiDrawElementsInstancedWEBGL(mode, counts, type, offsets, instanceCounts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsInstancedWEBGL'](
@@ -16915,135 +17136,179 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_glMultiDrawElementsInstancedWEBGL"] = _glMultiDrawElementsInstancedWEBGL;
+  _glMultiDrawElementsInstancedWEBGL.sig = 'viiiiii';
 
   function _glFinish() { GLctx['finish']() }
   Module["_glFinish"] = _glFinish;
+  _glFinish.sig = 'v';
 
   function _glFlush() { GLctx['flush']() }
   Module["_glFlush"] = _glFlush;
+  _glFlush.sig = 'v';
 
   function _glClearDepth(x0) { GLctx['clearDepth'](x0) }
   Module["_glClearDepth"] = _glClearDepth;
+  _glClearDepth.sig = 'vi';
 
   function _glClearDepthf(x0) { GLctx['clearDepth'](x0) }
   Module["_glClearDepthf"] = _glClearDepthf;
+  _glClearDepthf.sig = 'vi';
 
   function _glDepthFunc(x0) { GLctx['depthFunc'](x0) }
   Module["_glDepthFunc"] = _glDepthFunc;
+  _glDepthFunc.sig = 'vi';
 
   function _glEnable(x0) { GLctx['enable'](x0) }
   Module["_glEnable"] = _glEnable;
+  _glEnable.sig = 'vi';
 
   function _glDisable(x0) { GLctx['disable'](x0) }
   Module["_glDisable"] = _glDisable;
+  _glDisable.sig = 'vi';
 
   function _glFrontFace(x0) { GLctx['frontFace'](x0) }
   Module["_glFrontFace"] = _glFrontFace;
+  _glFrontFace.sig = 'vi';
 
   function _glCullFace(x0) { GLctx['cullFace'](x0) }
   Module["_glCullFace"] = _glCullFace;
+  _glCullFace.sig = 'vi';
 
   function _glClear(x0) { GLctx['clear'](x0) }
   Module["_glClear"] = _glClear;
+  _glClear.sig = 'vi';
 
   function _glLineWidth(x0) { GLctx['lineWidth'](x0) }
   Module["_glLineWidth"] = _glLineWidth;
+  _glLineWidth.sig = 'vi';
 
   function _glClearStencil(x0) { GLctx['clearStencil'](x0) }
   Module["_glClearStencil"] = _glClearStencil;
+  _glClearStencil.sig = 'vi';
 
   function _glStencilMask(x0) { GLctx['stencilMask'](x0) }
   Module["_glStencilMask"] = _glStencilMask;
+  _glStencilMask.sig = 'vi';
 
   function _glCheckFramebufferStatus(x0) { return GLctx['checkFramebufferStatus'](x0) }
   Module["_glCheckFramebufferStatus"] = _glCheckFramebufferStatus;
+  _glCheckFramebufferStatus.sig = 'ii';
 
   function _glGenerateMipmap(x0) { GLctx['generateMipmap'](x0) }
   Module["_glGenerateMipmap"] = _glGenerateMipmap;
+  _glGenerateMipmap.sig = 'vi';
 
   function _glActiveTexture(x0) { GLctx['activeTexture'](x0) }
   Module["_glActiveTexture"] = _glActiveTexture;
+  _glActiveTexture.sig = 'vi';
 
   function _glBlendEquation(x0) { GLctx['blendEquation'](x0) }
   Module["_glBlendEquation"] = _glBlendEquation;
+  _glBlendEquation.sig = 'vi';
 
   function _glIsEnabled(x0) { return GLctx['isEnabled'](x0) }
   Module["_glIsEnabled"] = _glIsEnabled;
+  _glIsEnabled.sig = 'ii';
 
   function _glBlendFunc(x0, x1) { GLctx['blendFunc'](x0, x1) }
   Module["_glBlendFunc"] = _glBlendFunc;
+  _glBlendFunc.sig = 'vii';
 
   function _glBlendEquationSeparate(x0, x1) { GLctx['blendEquationSeparate'](x0, x1) }
   Module["_glBlendEquationSeparate"] = _glBlendEquationSeparate;
+  _glBlendEquationSeparate.sig = 'vii';
 
   function _glDepthRange(x0, x1) { GLctx['depthRange'](x0, x1) }
   Module["_glDepthRange"] = _glDepthRange;
+  _glDepthRange.sig = 'vii';
 
   function _glDepthRangef(x0, x1) { GLctx['depthRange'](x0, x1) }
   Module["_glDepthRangef"] = _glDepthRangef;
+  _glDepthRangef.sig = 'vii';
 
   function _glStencilMaskSeparate(x0, x1) { GLctx['stencilMaskSeparate'](x0, x1) }
   Module["_glStencilMaskSeparate"] = _glStencilMaskSeparate;
+  _glStencilMaskSeparate.sig = 'vii';
 
   function _glHint(x0, x1) { GLctx['hint'](x0, x1) }
   Module["_glHint"] = _glHint;
+  _glHint.sig = 'vii';
 
   function _glPolygonOffset(x0, x1) { GLctx['polygonOffset'](x0, x1) }
   Module["_glPolygonOffset"] = _glPolygonOffset;
+  _glPolygonOffset.sig = 'vii';
 
   function _glVertexAttrib1f(x0, x1) { GLctx['vertexAttrib1f'](x0, x1) }
   Module["_glVertexAttrib1f"] = _glVertexAttrib1f;
+  _glVertexAttrib1f.sig = 'vii';
 
   function _glTexParameteri(x0, x1, x2) { GLctx['texParameteri'](x0, x1, x2) }
   Module["_glTexParameteri"] = _glTexParameteri;
+  _glTexParameteri.sig = 'viii';
 
   function _glTexParameterf(x0, x1, x2) { GLctx['texParameterf'](x0, x1, x2) }
   Module["_glTexParameterf"] = _glTexParameterf;
+  _glTexParameterf.sig = 'viii';
 
   function _glVertexAttrib2f(x0, x1, x2) { GLctx['vertexAttrib2f'](x0, x1, x2) }
   Module["_glVertexAttrib2f"] = _glVertexAttrib2f;
+  _glVertexAttrib2f.sig = 'viii';
 
   function _glStencilFunc(x0, x1, x2) { GLctx['stencilFunc'](x0, x1, x2) }
   Module["_glStencilFunc"] = _glStencilFunc;
+  _glStencilFunc.sig = 'viii';
 
   function _glStencilOp(x0, x1, x2) { GLctx['stencilOp'](x0, x1, x2) }
   Module["_glStencilOp"] = _glStencilOp;
+  _glStencilOp.sig = 'viii';
 
   function _glViewport(x0, x1, x2, x3) { GLctx['viewport'](x0, x1, x2, x3) }
   Module["_glViewport"] = _glViewport;
+  _glViewport.sig = 'viiii';
 
   function _glClearColor(x0, x1, x2, x3) { GLctx['clearColor'](x0, x1, x2, x3) }
   Module["_glClearColor"] = _glClearColor;
+  _glClearColor.sig = 'viiii';
 
   function _glScissor(x0, x1, x2, x3) { GLctx['scissor'](x0, x1, x2, x3) }
   Module["_glScissor"] = _glScissor;
+  _glScissor.sig = 'viiii';
 
   function _glVertexAttrib3f(x0, x1, x2, x3) { GLctx['vertexAttrib3f'](x0, x1, x2, x3) }
   Module["_glVertexAttrib3f"] = _glVertexAttrib3f;
+  _glVertexAttrib3f.sig = 'viiii';
 
   function _glRenderbufferStorage(x0, x1, x2, x3) { GLctx['renderbufferStorage'](x0, x1, x2, x3) }
   Module["_glRenderbufferStorage"] = _glRenderbufferStorage;
+  _glRenderbufferStorage.sig = 'viiii';
 
   function _glBlendFuncSeparate(x0, x1, x2, x3) { GLctx['blendFuncSeparate'](x0, x1, x2, x3) }
   Module["_glBlendFuncSeparate"] = _glBlendFuncSeparate;
+  _glBlendFuncSeparate.sig = 'viiii';
 
   function _glBlendColor(x0, x1, x2, x3) { GLctx['blendColor'](x0, x1, x2, x3) }
   Module["_glBlendColor"] = _glBlendColor;
+  _glBlendColor.sig = 'vffff';
 
   function _glStencilFuncSeparate(x0, x1, x2, x3) { GLctx['stencilFuncSeparate'](x0, x1, x2, x3) }
   Module["_glStencilFuncSeparate"] = _glStencilFuncSeparate;
+  _glStencilFuncSeparate.sig = 'viiii';
 
   function _glStencilOpSeparate(x0, x1, x2, x3) { GLctx['stencilOpSeparate'](x0, x1, x2, x3) }
   Module["_glStencilOpSeparate"] = _glStencilOpSeparate;
+  _glStencilOpSeparate.sig = 'viiii';
 
   function _glVertexAttrib4f(x0, x1, x2, x3, x4) { GLctx['vertexAttrib4f'](x0, x1, x2, x3, x4) }
   Module["_glVertexAttrib4f"] = _glVertexAttrib4f;
+  _glVertexAttrib4f.sig = 'viiiii';
 
   function _glCopyTexImage2D(x0, x1, x2, x3, x4, x5, x6, x7) { GLctx['copyTexImage2D'](x0, x1, x2, x3, x4, x5, x6, x7) }
   Module["_glCopyTexImage2D"] = _glCopyTexImage2D;
+  _glCopyTexImage2D.sig = 'viiiiiiii';
 
   function _glCopyTexSubImage2D(x0, x1, x2, x3, x4, x5, x6, x7) { GLctx['copyTexSubImage2D'](x0, x1, x2, x3, x4, x5, x6, x7) }
   Module["_glCopyTexSubImage2D"] = _glCopyTexSubImage2D;
+  _glCopyTexSubImage2D.sig = 'viiiiiiii';
 
   function _emscripten_glPixelStorei(pname, param) {
       if (pname == 0xCF5 /* GL_UNPACK_ALIGNMENT */) {
@@ -17052,6 +17317,7 @@ var ASM_CONSTS = {
       GLctx.pixelStorei(pname, param);
     }
   Module["_emscripten_glPixelStorei"] = _emscripten_glPixelStorei;
+  _emscripten_glPixelStorei.sig = 'vii';
 
   function _emscripten_glGetString(name_) {
       if (GL.stringCache[name_]) return GL.stringCache[name_];
@@ -17100,21 +17366,25 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_emscripten_glGetString"] = _emscripten_glGetString;
+  _emscripten_glGetString.sig = 'ii';
 
   function _emscripten_glGetIntegerv(name_, p) {
       emscriptenWebGLGet(name_, p, 0);
     }
   Module["_emscripten_glGetIntegerv"] = _emscripten_glGetIntegerv;
+  _emscripten_glGetIntegerv.sig = 'vii';
 
   function _emscripten_glGetFloatv(name_, p) {
       emscriptenWebGLGet(name_, p, 2);
     }
   Module["_emscripten_glGetFloatv"] = _emscripten_glGetFloatv;
+  _emscripten_glGetFloatv.sig = 'vii';
 
   function _emscripten_glGetBooleanv(name_, p) {
       emscriptenWebGLGet(name_, p, 4);
     }
   Module["_emscripten_glGetBooleanv"] = _emscripten_glGetBooleanv;
+  _emscripten_glGetBooleanv.sig = 'vii';
 
   function _emscripten_glDeleteTextures(n, textures) {
       for (var i = 0; i < n; i++) {
@@ -17127,21 +17397,25 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glDeleteTextures"] = _emscripten_glDeleteTextures;
+  _emscripten_glDeleteTextures.sig = 'vii';
 
   function _emscripten_glCompressedTexImage2D(target, level, internalFormat, width, height, border, imageSize, data) {
       GLctx['compressedTexImage2D'](target, level, internalFormat, width, height, border, data ? HEAPU8.subarray((data),(data+imageSize)) : null);
     }
   Module["_emscripten_glCompressedTexImage2D"] = _emscripten_glCompressedTexImage2D;
+  _emscripten_glCompressedTexImage2D.sig = 'viiiiiiii';
 
   function _emscripten_glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, data) {
       GLctx['compressedTexSubImage2D'](target, level, xoffset, yoffset, width, height, format, data ? HEAPU8.subarray((data),(data+imageSize)) : null);
     }
   Module["_emscripten_glCompressedTexSubImage2D"] = _emscripten_glCompressedTexSubImage2D;
+  _emscripten_glCompressedTexSubImage2D.sig = 'viiiiiiiii';
 
   function _emscripten_glTexImage2D(target, level, internalFormat, width, height, border, format, type, pixels) {
       GLctx.texImage2D(target, level, internalFormat, width, height, border, format, type, pixels ? emscriptenWebGLGetTexPixelData(type, format, width, height, pixels, internalFormat) : null);
     }
   Module["_emscripten_glTexImage2D"] = _emscripten_glTexImage2D;
+  _emscripten_glTexImage2D.sig = 'viiiiiiiii';
 
   function _emscripten_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels) {
       var pixelData = null;
@@ -17149,6 +17423,7 @@ var ASM_CONSTS = {
       GLctx.texSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixelData);
     }
   Module["_emscripten_glTexSubImage2D"] = _emscripten_glTexSubImage2D;
+  _emscripten_glTexSubImage2D.sig = 'viiiiiiiii';
 
   function _emscripten_glReadPixels(x, y, width, height, format, type, pixels) {
       var pixelData = emscriptenWebGLGetTexPixelData(type, format, width, height, pixels, format);
@@ -17159,11 +17434,13 @@ var ASM_CONSTS = {
       GLctx.readPixels(x, y, width, height, format, type, pixelData);
     }
   Module["_emscripten_glReadPixels"] = _emscripten_glReadPixels;
+  _emscripten_glReadPixels.sig = 'viiiiiii';
 
   function _emscripten_glBindTexture(target, texture) {
       GLctx.bindTexture(target, GL.textures[texture]);
     }
   Module["_emscripten_glBindTexture"] = _emscripten_glBindTexture;
+  _emscripten_glBindTexture.sig = 'vii';
 
   function _emscripten_glGetTexParameterfv(target, pname, params) {
       if (!params) {
@@ -17175,6 +17452,7 @@ var ASM_CONSTS = {
       HEAPF32[((params)>>2)]=GLctx.getTexParameter(target, pname);
     }
   Module["_emscripten_glGetTexParameterfv"] = _emscripten_glGetTexParameterfv;
+  _emscripten_glGetTexParameterfv.sig = 'viii';
 
   function _emscripten_glGetTexParameteriv(target, pname, params) {
       if (!params) {
@@ -17186,18 +17464,21 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=GLctx.getTexParameter(target, pname);
     }
   Module["_emscripten_glGetTexParameteriv"] = _emscripten_glGetTexParameteriv;
+  _emscripten_glGetTexParameteriv.sig = 'viii';
 
   function _emscripten_glTexParameterfv(target, pname, params) {
       var param = HEAPF32[((params)>>2)];
       GLctx.texParameterf(target, pname, param);
     }
   Module["_emscripten_glTexParameterfv"] = _emscripten_glTexParameterfv;
+  _emscripten_glTexParameterfv.sig = 'viii';
 
   function _emscripten_glTexParameteriv(target, pname, params) {
       var param = HEAP32[((params)>>2)];
       GLctx.texParameteri(target, pname, param);
     }
   Module["_emscripten_glTexParameteriv"] = _emscripten_glTexParameteriv;
+  _emscripten_glTexParameteriv.sig = 'viii';
 
   function _emscripten_glIsTexture(id) {
       var texture = GL.textures[id];
@@ -17205,18 +17486,21 @@ var ASM_CONSTS = {
       return GLctx.isTexture(texture);
     }
   Module["_emscripten_glIsTexture"] = _emscripten_glIsTexture;
+  _emscripten_glIsTexture.sig = 'ii';
 
   function _emscripten_glGenBuffers(n, buffers) {
       __glGenObject(n, buffers, 'createBuffer', GL.buffers
         );
     }
   Module["_emscripten_glGenBuffers"] = _emscripten_glGenBuffers;
+  _emscripten_glGenBuffers.sig = 'vii';
 
   function _emscripten_glGenTextures(n, textures) {
       __glGenObject(n, textures, 'createTexture', GL.textures
         );
     }
   Module["_emscripten_glGenTextures"] = _emscripten_glGenTextures;
+  _emscripten_glGenTextures.sig = 'vii';
 
   function _emscripten_glDeleteBuffers(n, buffers) {
       for (var i = 0; i < n; i++) {
@@ -17234,6 +17518,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glDeleteBuffers"] = _emscripten_glDeleteBuffers;
+  _emscripten_glDeleteBuffers.sig = 'vii';
 
   function _emscripten_glGetBufferParameteriv(target, value, data) {
       if (!data) {
@@ -17245,6 +17530,7 @@ var ASM_CONSTS = {
       HEAP32[((data)>>2)]=GLctx.getBufferParameter(target, value);
     }
   Module["_emscripten_glGetBufferParameteriv"] = _emscripten_glGetBufferParameteriv;
+  _emscripten_glGetBufferParameteriv.sig = 'viii';
 
   function _emscripten_glBufferData(target, size, data, usage) {
   
@@ -17253,11 +17539,13 @@ var ASM_CONSTS = {
         GLctx.bufferData(target, data ? HEAPU8.subarray(data, data+size) : size, usage);
     }
   Module["_emscripten_glBufferData"] = _emscripten_glBufferData;
+  _emscripten_glBufferData.sig = 'viiii';
 
   function _emscripten_glBufferSubData(target, offset, size, data) {
       GLctx.bufferSubData(target, offset, HEAPU8.subarray(data, data+size));
     }
   Module["_emscripten_glBufferSubData"] = _emscripten_glBufferSubData;
+  _emscripten_glBufferSubData.sig = 'viiii';
 
   function _emscripten_glGenQueriesEXT(n, ids) {
       for (var i = 0; i < n; i++) {
@@ -17274,6 +17562,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glGenQueriesEXT"] = _emscripten_glGenQueriesEXT;
+  _emscripten_glGenQueriesEXT.sig = 'vii';
 
   function _emscripten_glDeleteQueriesEXT(n, ids) {
       for (var i = 0; i < n; i++) {
@@ -17285,6 +17574,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glDeleteQueriesEXT"] = _emscripten_glDeleteQueriesEXT;
+  _emscripten_glDeleteQueriesEXT.sig = 'vii';
 
   function _emscripten_glIsQueryEXT(id) {
       var query = GL.timerQueriesEXT[id];
@@ -17292,21 +17582,25 @@ var ASM_CONSTS = {
       return GLctx.disjointTimerQueryExt['isQueryEXT'](query);
     }
   Module["_emscripten_glIsQueryEXT"] = _emscripten_glIsQueryEXT;
+  _emscripten_glIsQueryEXT.sig = 'ii';
 
   function _emscripten_glBeginQueryEXT(target, id) {
       GLctx.disjointTimerQueryExt['beginQueryEXT'](target, GL.timerQueriesEXT[id]);
     }
   Module["_emscripten_glBeginQueryEXT"] = _emscripten_glBeginQueryEXT;
+  _emscripten_glBeginQueryEXT.sig = 'vii';
 
   function _emscripten_glEndQueryEXT(target) {
       GLctx.disjointTimerQueryExt['endQueryEXT'](target);
     }
   Module["_emscripten_glEndQueryEXT"] = _emscripten_glEndQueryEXT;
+  _emscripten_glEndQueryEXT.sig = 'vi';
 
   function _emscripten_glQueryCounterEXT(id, target) {
       GLctx.disjointTimerQueryExt['queryCounterEXT'](GL.timerQueriesEXT[id], target);
     }
   Module["_emscripten_glQueryCounterEXT"] = _emscripten_glQueryCounterEXT;
+  _emscripten_glQueryCounterEXT.sig = 'vii';
 
   function _emscripten_glGetQueryivEXT(target, pname, params) {
       if (!params) {
@@ -17318,6 +17612,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=GLctx.disjointTimerQueryExt['getQueryEXT'](target, pname);
     }
   Module["_emscripten_glGetQueryivEXT"] = _emscripten_glGetQueryivEXT;
+  _emscripten_glGetQueryivEXT.sig = 'viii';
 
   function _emscripten_glGetQueryObjectivEXT(id, pname, params) {
       if (!params) {
@@ -17337,6 +17632,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=ret;
     }
   Module["_emscripten_glGetQueryObjectivEXT"] = _emscripten_glGetQueryObjectivEXT;
+  _emscripten_glGetQueryObjectivEXT.sig = 'viii';
 
   function _emscripten_glGetQueryObjectuivEXT(id, pname, params) {
       if (!params) {
@@ -17356,6 +17652,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=ret;
     }
   Module["_emscripten_glGetQueryObjectuivEXT"] = _emscripten_glGetQueryObjectuivEXT;
+  _emscripten_glGetQueryObjectuivEXT.sig = 'viii';
 
   function _emscripten_glGetQueryObjecti64vEXT(id, pname, params) {
       if (!params) {
@@ -17375,6 +17672,7 @@ var ASM_CONSTS = {
       writeI53ToI64(params, ret);
     }
   Module["_emscripten_glGetQueryObjecti64vEXT"] = _emscripten_glGetQueryObjecti64vEXT;
+  _emscripten_glGetQueryObjecti64vEXT.sig = 'viii';
 
   function _emscripten_glGetQueryObjectui64vEXT(id, pname, params) {
       if (!params) {
@@ -17394,6 +17692,7 @@ var ASM_CONSTS = {
       writeI53ToI64(params, ret);
     }
   Module["_emscripten_glGetQueryObjectui64vEXT"] = _emscripten_glGetQueryObjectui64vEXT;
+  _emscripten_glGetQueryObjectui64vEXT.sig = 'viii';
 
   function _emscripten_glIsBuffer(buffer) {
       var b = GL.buffers[buffer];
@@ -17401,12 +17700,14 @@ var ASM_CONSTS = {
       return GLctx.isBuffer(b);
     }
   Module["_emscripten_glIsBuffer"] = _emscripten_glIsBuffer;
+  _emscripten_glIsBuffer.sig = 'ii';
 
   function _emscripten_glGenRenderbuffers(n, renderbuffers) {
       __glGenObject(n, renderbuffers, 'createRenderbuffer', GL.renderbuffers
         );
     }
   Module["_emscripten_glGenRenderbuffers"] = _emscripten_glGenRenderbuffers;
+  _emscripten_glGenRenderbuffers.sig = 'vii';
 
   function _emscripten_glDeleteRenderbuffers(n, renderbuffers) {
       for (var i = 0; i < n; i++) {
@@ -17419,11 +17720,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glDeleteRenderbuffers"] = _emscripten_glDeleteRenderbuffers;
+  _emscripten_glDeleteRenderbuffers.sig = 'vii';
 
   function _emscripten_glBindRenderbuffer(target, renderbuffer) {
       GLctx.bindRenderbuffer(target, GL.renderbuffers[renderbuffer]);
     }
   Module["_emscripten_glBindRenderbuffer"] = _emscripten_glBindRenderbuffer;
+  _emscripten_glBindRenderbuffer.sig = 'vii';
 
   function _emscripten_glGetRenderbufferParameteriv(target, pname, params) {
       if (!params) {
@@ -17435,6 +17738,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=GLctx.getRenderbufferParameter(target, pname);
     }
   Module["_emscripten_glGetRenderbufferParameteriv"] = _emscripten_glGetRenderbufferParameteriv;
+  _emscripten_glGetRenderbufferParameteriv.sig = 'viii';
 
   function _emscripten_glIsRenderbuffer(renderbuffer) {
       var rb = GL.renderbuffers[renderbuffer];
@@ -17442,16 +17746,19 @@ var ASM_CONSTS = {
       return GLctx.isRenderbuffer(rb);
     }
   Module["_emscripten_glIsRenderbuffer"] = _emscripten_glIsRenderbuffer;
+  _emscripten_glIsRenderbuffer.sig = 'ii';
 
   function _emscripten_glGetUniformfv(program, location, params) {
       emscriptenWebGLGetUniform(program, location, params, 2);
     }
   Module["_emscripten_glGetUniformfv"] = _emscripten_glGetUniformfv;
+  _emscripten_glGetUniformfv.sig = 'viii';
 
   function _emscripten_glGetUniformiv(program, location, params) {
       emscriptenWebGLGetUniform(program, location, params, 0);
     }
   Module["_emscripten_glGetUniformiv"] = _emscripten_glGetUniformiv;
+  _emscripten_glGetUniformiv.sig = 'viii';
 
   function _emscripten_glGetUniformLocation(program, name) {
       name = UTF8ToString(name);
@@ -17472,6 +17779,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glGetUniformLocation"] = _emscripten_glGetUniformLocation;
+  _emscripten_glGetUniformLocation.sig = 'iii';
 
   function _emscripten_glGetVertexAttribfv(index, pname, params) {
       // N.B. This function may only be called if the vertex attribute was specified using the function glVertexAttrib*f(),
@@ -17479,6 +17787,7 @@ var ASM_CONSTS = {
       emscriptenWebGLGetVertexAttrib(index, pname, params, 2);
     }
   Module["_emscripten_glGetVertexAttribfv"] = _emscripten_glGetVertexAttribfv;
+  _emscripten_glGetVertexAttribfv.sig = 'viii';
 
   function _emscripten_glGetVertexAttribiv(index, pname, params) {
       // N.B. This function may only be called if the vertex attribute was specified using the function glVertexAttrib*f(),
@@ -17486,6 +17795,7 @@ var ASM_CONSTS = {
       emscriptenWebGLGetVertexAttrib(index, pname, params, 5);
     }
   Module["_emscripten_glGetVertexAttribiv"] = _emscripten_glGetVertexAttribiv;
+  _emscripten_glGetVertexAttribiv.sig = 'viii';
 
   function _emscripten_glGetVertexAttribPointerv(index, pname, pointer) {
       if (!pointer) {
@@ -17497,46 +17807,55 @@ var ASM_CONSTS = {
       HEAP32[((pointer)>>2)]=GLctx.getVertexAttribOffset(index, pname);
     }
   Module["_emscripten_glGetVertexAttribPointerv"] = _emscripten_glGetVertexAttribPointerv;
+  _emscripten_glGetVertexAttribPointerv.sig = 'viii';
 
   function _emscripten_glUniform1f(location, v0) {
       GLctx.uniform1f(GL.uniforms[location], v0);
     }
   Module["_emscripten_glUniform1f"] = _emscripten_glUniform1f;
+  _emscripten_glUniform1f.sig = 'vif';
 
   function _emscripten_glUniform2f(location, v0, v1) {
       GLctx.uniform2f(GL.uniforms[location], v0, v1);
     }
   Module["_emscripten_glUniform2f"] = _emscripten_glUniform2f;
+  _emscripten_glUniform2f.sig = 'viff';
 
   function _emscripten_glUniform3f(location, v0, v1, v2) {
       GLctx.uniform3f(GL.uniforms[location], v0, v1, v2);
     }
   Module["_emscripten_glUniform3f"] = _emscripten_glUniform3f;
+  _emscripten_glUniform3f.sig = 'vifff';
 
   function _emscripten_glUniform4f(location, v0, v1, v2, v3) {
       GLctx.uniform4f(GL.uniforms[location], v0, v1, v2, v3);
     }
   Module["_emscripten_glUniform4f"] = _emscripten_glUniform4f;
+  _emscripten_glUniform4f.sig = 'viffff';
 
   function _emscripten_glUniform1i(location, v0) {
       GLctx.uniform1i(GL.uniforms[location], v0);
     }
   Module["_emscripten_glUniform1i"] = _emscripten_glUniform1i;
+  _emscripten_glUniform1i.sig = 'vii';
 
   function _emscripten_glUniform2i(location, v0, v1) {
       GLctx.uniform2i(GL.uniforms[location], v0, v1);
     }
   Module["_emscripten_glUniform2i"] = _emscripten_glUniform2i;
+  _emscripten_glUniform2i.sig = 'viii';
 
   function _emscripten_glUniform3i(location, v0, v1, v2) {
       GLctx.uniform3i(GL.uniforms[location], v0, v1, v2);
     }
   Module["_emscripten_glUniform3i"] = _emscripten_glUniform3i;
+  _emscripten_glUniform3i.sig = 'viiii';
 
   function _emscripten_glUniform4i(location, v0, v1, v2, v3) {
       GLctx.uniform4i(GL.uniforms[location], v0, v1, v2, v3);
     }
   Module["_emscripten_glUniform4i"] = _emscripten_glUniform4i;
+  _emscripten_glUniform4i.sig = 'viiiii';
 
   function _emscripten_glUniform1iv(location, count, value) {
   
@@ -17553,6 +17872,7 @@ var ASM_CONSTS = {
       GLctx.uniform1iv(GL.uniforms[location], view);
     }
   Module["_emscripten_glUniform1iv"] = _emscripten_glUniform1iv;
+  _emscripten_glUniform1iv.sig = 'viii';
 
   function _emscripten_glUniform2iv(location, count, value) {
   
@@ -17570,6 +17890,7 @@ var ASM_CONSTS = {
       GLctx.uniform2iv(GL.uniforms[location], view);
     }
   Module["_emscripten_glUniform2iv"] = _emscripten_glUniform2iv;
+  _emscripten_glUniform2iv.sig = 'viii';
 
   function _emscripten_glUniform3iv(location, count, value) {
   
@@ -17588,6 +17909,7 @@ var ASM_CONSTS = {
       GLctx.uniform3iv(GL.uniforms[location], view);
     }
   Module["_emscripten_glUniform3iv"] = _emscripten_glUniform3iv;
+  _emscripten_glUniform3iv.sig = 'viii';
 
   function _emscripten_glUniform4iv(location, count, value) {
   
@@ -17607,6 +17929,7 @@ var ASM_CONSTS = {
       GLctx.uniform4iv(GL.uniforms[location], view);
     }
   Module["_emscripten_glUniform4iv"] = _emscripten_glUniform4iv;
+  _emscripten_glUniform4iv.sig = 'viii';
 
   function _emscripten_glUniform1fv(location, count, value) {
   
@@ -17623,6 +17946,7 @@ var ASM_CONSTS = {
       GLctx.uniform1fv(GL.uniforms[location], view);
     }
   Module["_emscripten_glUniform1fv"] = _emscripten_glUniform1fv;
+  _emscripten_glUniform1fv.sig = 'viii';
 
   function _emscripten_glUniform2fv(location, count, value) {
   
@@ -17640,6 +17964,7 @@ var ASM_CONSTS = {
       GLctx.uniform2fv(GL.uniforms[location], view);
     }
   Module["_emscripten_glUniform2fv"] = _emscripten_glUniform2fv;
+  _emscripten_glUniform2fv.sig = 'viii';
 
   function _emscripten_glUniform3fv(location, count, value) {
   
@@ -17658,6 +17983,7 @@ var ASM_CONSTS = {
       GLctx.uniform3fv(GL.uniforms[location], view);
     }
   Module["_emscripten_glUniform3fv"] = _emscripten_glUniform3fv;
+  _emscripten_glUniform3fv.sig = 'viii';
 
   function _emscripten_glUniform4fv(location, count, value) {
   
@@ -17681,6 +18007,7 @@ var ASM_CONSTS = {
       GLctx.uniform4fv(GL.uniforms[location], view);
     }
   Module["_emscripten_glUniform4fv"] = _emscripten_glUniform4fv;
+  _emscripten_glUniform4fv.sig = 'viii';
 
   function _emscripten_glUniformMatrix2fv(location, count, transpose, value) {
   
@@ -17700,6 +18027,7 @@ var ASM_CONSTS = {
       GLctx.uniformMatrix2fv(GL.uniforms[location], !!transpose, view);
     }
   Module["_emscripten_glUniformMatrix2fv"] = _emscripten_glUniformMatrix2fv;
+  _emscripten_glUniformMatrix2fv.sig = 'viiii';
 
   function _emscripten_glUniformMatrix3fv(location, count, transpose, value) {
   
@@ -17724,6 +18052,7 @@ var ASM_CONSTS = {
       GLctx.uniformMatrix3fv(GL.uniforms[location], !!transpose, view);
     }
   Module["_emscripten_glUniformMatrix3fv"] = _emscripten_glUniformMatrix3fv;
+  _emscripten_glUniformMatrix3fv.sig = 'viiii';
 
   function _emscripten_glUniformMatrix4fv(location, count, transpose, value) {
   
@@ -17759,51 +18088,60 @@ var ASM_CONSTS = {
       GLctx.uniformMatrix4fv(GL.uniforms[location], !!transpose, view);
     }
   Module["_emscripten_glUniformMatrix4fv"] = _emscripten_glUniformMatrix4fv;
+  _emscripten_glUniformMatrix4fv.sig = 'viiii';
 
   function _emscripten_glBindBuffer(target, buffer) {
   
       GLctx.bindBuffer(target, GL.buffers[buffer]);
     }
   Module["_emscripten_glBindBuffer"] = _emscripten_glBindBuffer;
+  _emscripten_glBindBuffer.sig = 'vii';
 
   function _emscripten_glVertexAttrib1fv(index, v) {
   
       GLctx.vertexAttrib1f(index, HEAPF32[v>>2]);
     }
   Module["_emscripten_glVertexAttrib1fv"] = _emscripten_glVertexAttrib1fv;
+  _emscripten_glVertexAttrib1fv.sig = 'vii';
 
   function _emscripten_glVertexAttrib2fv(index, v) {
   
       GLctx.vertexAttrib2f(index, HEAPF32[v>>2], HEAPF32[v+4>>2]);
     }
   Module["_emscripten_glVertexAttrib2fv"] = _emscripten_glVertexAttrib2fv;
+  _emscripten_glVertexAttrib2fv.sig = 'vii';
 
   function _emscripten_glVertexAttrib3fv(index, v) {
   
       GLctx.vertexAttrib3f(index, HEAPF32[v>>2], HEAPF32[v+4>>2], HEAPF32[v+8>>2]);
     }
   Module["_emscripten_glVertexAttrib3fv"] = _emscripten_glVertexAttrib3fv;
+  _emscripten_glVertexAttrib3fv.sig = 'vii';
 
   function _emscripten_glVertexAttrib4fv(index, v) {
   
       GLctx.vertexAttrib4f(index, HEAPF32[v>>2], HEAPF32[v+4>>2], HEAPF32[v+8>>2], HEAPF32[v+12>>2]);
     }
   Module["_emscripten_glVertexAttrib4fv"] = _emscripten_glVertexAttrib4fv;
+  _emscripten_glVertexAttrib4fv.sig = 'vii';
 
   function _emscripten_glGetAttribLocation(program, name) {
       return GLctx.getAttribLocation(GL.programs[program], UTF8ToString(name));
     }
   Module["_emscripten_glGetAttribLocation"] = _emscripten_glGetAttribLocation;
+  _emscripten_glGetAttribLocation.sig = 'iii';
 
   function _emscripten_glGetActiveAttrib(program, index, bufSize, length, size, type, name) {
       __glGetActiveAttribOrUniform('getActiveAttrib', program, index, bufSize, length, size, type, name);
     }
   Module["_emscripten_glGetActiveAttrib"] = _emscripten_glGetActiveAttrib;
+  _emscripten_glGetActiveAttrib.sig = 'viiiiiii';
 
   function _emscripten_glGetActiveUniform(program, index, bufSize, length, size, type, name) {
       __glGetActiveAttribOrUniform('getActiveUniform', program, index, bufSize, length, size, type, name);
     }
   Module["_emscripten_glGetActiveUniform"] = _emscripten_glGetActiveUniform;
+  _emscripten_glGetActiveUniform.sig = 'viiiiiii';
 
   function _emscripten_glCreateShader(shaderType) {
       var id = GL.getNewId(GL.shaders);
@@ -17811,6 +18149,7 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_emscripten_glCreateShader"] = _emscripten_glCreateShader;
+  _emscripten_glCreateShader.sig = 'ii';
 
   function _emscripten_glDeleteShader(id) {
       if (!id) return;
@@ -17823,6 +18162,7 @@ var ASM_CONSTS = {
       GL.shaders[id] = null;
     }
   Module["_emscripten_glDeleteShader"] = _emscripten_glDeleteShader;
+  _emscripten_glDeleteShader.sig = 'vi';
 
   function _emscripten_glGetAttachedShaders(program, maxCount, count, shaders) {
       var result = GLctx.getAttachedShaders(GL.programs[program]);
@@ -17837,6 +18177,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glGetAttachedShaders"] = _emscripten_glGetAttachedShaders;
+  _emscripten_glGetAttachedShaders.sig = 'viiii';
 
   function _emscripten_glShaderSource(shader, count, string, length) {
       var source = GL.getSource(shader, count, string, length);
@@ -17844,6 +18185,7 @@ var ASM_CONSTS = {
       GLctx.shaderSource(GL.shaders[shader], source);
     }
   Module["_emscripten_glShaderSource"] = _emscripten_glShaderSource;
+  _emscripten_glShaderSource.sig = 'viiii';
 
   function _emscripten_glGetShaderSource(shader, bufSize, length, source) {
       var result = GLctx.getShaderSource(GL.shaders[shader]);
@@ -17852,11 +18194,13 @@ var ASM_CONSTS = {
       if (length) HEAP32[((length)>>2)]=numBytesWrittenExclNull;
     }
   Module["_emscripten_glGetShaderSource"] = _emscripten_glGetShaderSource;
+  _emscripten_glGetShaderSource.sig = 'viiii';
 
   function _emscripten_glCompileShader(shader) {
       GLctx.compileShader(GL.shaders[shader]);
     }
   Module["_emscripten_glCompileShader"] = _emscripten_glCompileShader;
+  _emscripten_glCompileShader.sig = 'vi';
 
   function _emscripten_glGetShaderInfoLog(shader, maxLength, length, infoLog) {
       var log = GLctx.getShaderInfoLog(GL.shaders[shader]);
@@ -17865,6 +18209,7 @@ var ASM_CONSTS = {
       if (length) HEAP32[((length)>>2)]=numBytesWrittenExclNull;
     }
   Module["_emscripten_glGetShaderInfoLog"] = _emscripten_glGetShaderInfoLog;
+  _emscripten_glGetShaderInfoLog.sig = 'viiii';
 
   function _emscripten_glGetShaderiv(shader, pname, p) {
       if (!p) {
@@ -17893,6 +18238,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glGetShaderiv"] = _emscripten_glGetShaderiv;
+  _emscripten_glGetShaderiv.sig = 'viii';
 
   function _emscripten_glGetProgramiv(program, pname, p) {
       if (!p) {
@@ -17946,6 +18292,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glGetProgramiv"] = _emscripten_glGetProgramiv;
+  _emscripten_glGetProgramiv.sig = 'viii';
 
   function _emscripten_glIsShader(shader) {
       var s = GL.shaders[shader];
@@ -17953,6 +18300,7 @@ var ASM_CONSTS = {
       return GLctx.isShader(s);
     }
   Module["_emscripten_glIsShader"] = _emscripten_glIsShader;
+  _emscripten_glIsShader.sig = 'ii';
 
   function _emscripten_glCreateProgram() {
       var id = GL.getNewId(GL.programs);
@@ -17962,6 +18310,7 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_emscripten_glCreateProgram"] = _emscripten_glCreateProgram;
+  _emscripten_glCreateProgram.sig = 'i';
 
   function _emscripten_glDeleteProgram(id) {
       if (!id) return;
@@ -17976,18 +18325,21 @@ var ASM_CONSTS = {
       GL.programInfos[id] = null;
     }
   Module["_emscripten_glDeleteProgram"] = _emscripten_glDeleteProgram;
+  _emscripten_glDeleteProgram.sig = 'vi';
 
   function _emscripten_glAttachShader(program, shader) {
       GLctx.attachShader(GL.programs[program],
                               GL.shaders[shader]);
     }
   Module["_emscripten_glAttachShader"] = _emscripten_glAttachShader;
+  _emscripten_glAttachShader.sig = 'vii';
 
   function _emscripten_glDetachShader(program, shader) {
       GLctx.detachShader(GL.programs[program],
                               GL.shaders[shader]);
     }
   Module["_emscripten_glDetachShader"] = _emscripten_glDetachShader;
+  _emscripten_glDetachShader.sig = 'vii';
 
   function _emscripten_glGetShaderPrecisionFormat(shaderType, precisionType, range, precision) {
       var result = GLctx.getShaderPrecisionFormat(shaderType, precisionType);
@@ -17996,12 +18348,14 @@ var ASM_CONSTS = {
       HEAP32[((precision)>>2)]=result.precision;
     }
   Module["_emscripten_glGetShaderPrecisionFormat"] = _emscripten_glGetShaderPrecisionFormat;
+  _emscripten_glGetShaderPrecisionFormat.sig = 'viiii';
 
   function _emscripten_glLinkProgram(program) {
       GLctx.linkProgram(GL.programs[program]);
       GL.populateUniformTable(program);
     }
   Module["_emscripten_glLinkProgram"] = _emscripten_glLinkProgram;
+  _emscripten_glLinkProgram.sig = 'vi';
 
   function _emscripten_glGetProgramInfoLog(program, maxLength, length, infoLog) {
       var log = GLctx.getProgramInfoLog(GL.programs[program]);
@@ -18010,16 +18364,19 @@ var ASM_CONSTS = {
       if (length) HEAP32[((length)>>2)]=numBytesWrittenExclNull;
     }
   Module["_emscripten_glGetProgramInfoLog"] = _emscripten_glGetProgramInfoLog;
+  _emscripten_glGetProgramInfoLog.sig = 'viiii';
 
   function _emscripten_glUseProgram(program) {
       GLctx.useProgram(GL.programs[program]);
     }
   Module["_emscripten_glUseProgram"] = _emscripten_glUseProgram;
+  _emscripten_glUseProgram.sig = 'vi';
 
   function _emscripten_glValidateProgram(program) {
       GLctx.validateProgram(GL.programs[program]);
     }
   Module["_emscripten_glValidateProgram"] = _emscripten_glValidateProgram;
+  _emscripten_glValidateProgram.sig = 'vi';
 
   function _emscripten_glIsProgram(program) {
       program = GL.programs[program];
@@ -18027,11 +18384,13 @@ var ASM_CONSTS = {
       return GLctx.isProgram(program);
     }
   Module["_emscripten_glIsProgram"] = _emscripten_glIsProgram;
+  _emscripten_glIsProgram.sig = 'ii';
 
   function _emscripten_glBindAttribLocation(program, index, name) {
       GLctx.bindAttribLocation(GL.programs[program], index, UTF8ToString(name));
     }
   Module["_emscripten_glBindAttribLocation"] = _emscripten_glBindAttribLocation;
+  _emscripten_glBindAttribLocation.sig = 'viii';
 
   function _emscripten_glBindFramebuffer(target, framebuffer) {
   
@@ -18039,12 +18398,14 @@ var ASM_CONSTS = {
   
     }
   Module["_emscripten_glBindFramebuffer"] = _emscripten_glBindFramebuffer;
+  _emscripten_glBindFramebuffer.sig = 'vii';
 
   function _emscripten_glGenFramebuffers(n, ids) {
       __glGenObject(n, ids, 'createFramebuffer', GL.framebuffers
         );
     }
   Module["_emscripten_glGenFramebuffers"] = _emscripten_glGenFramebuffers;
+  _emscripten_glGenFramebuffers.sig = 'vii';
 
   function _emscripten_glDeleteFramebuffers(n, framebuffers) {
       for (var i = 0; i < n; ++i) {
@@ -18057,18 +18418,21 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glDeleteFramebuffers"] = _emscripten_glDeleteFramebuffers;
+  _emscripten_glDeleteFramebuffers.sig = 'vii';
 
   function _emscripten_glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer) {
       GLctx.framebufferRenderbuffer(target, attachment, renderbuffertarget,
                                          GL.renderbuffers[renderbuffer]);
     }
   Module["_emscripten_glFramebufferRenderbuffer"] = _emscripten_glFramebufferRenderbuffer;
+  _emscripten_glFramebufferRenderbuffer.sig = 'viiii';
 
   function _emscripten_glFramebufferTexture2D(target, attachment, textarget, texture, level) {
       GLctx.framebufferTexture2D(target, attachment, textarget,
                                       GL.textures[texture], level);
     }
   Module["_emscripten_glFramebufferTexture2D"] = _emscripten_glFramebufferTexture2D;
+  _emscripten_glFramebufferTexture2D.sig = 'viiiii';
 
   function _emscripten_glGetFramebufferAttachmentParameteriv(target, attachment, pname, params) {
       var result = GLctx.getFramebufferAttachmentParameter(target, attachment, pname);
@@ -18079,6 +18443,7 @@ var ASM_CONSTS = {
       HEAP32[((params)>>2)]=result;
     }
   Module["_emscripten_glGetFramebufferAttachmentParameteriv"] = _emscripten_glGetFramebufferAttachmentParameteriv;
+  _emscripten_glGetFramebufferAttachmentParameteriv.sig = 'viiii';
 
   function _emscripten_glIsFramebuffer(framebuffer) {
       var fb = GL.framebuffers[framebuffer];
@@ -18086,12 +18451,14 @@ var ASM_CONSTS = {
       return GLctx.isFramebuffer(fb);
     }
   Module["_emscripten_glIsFramebuffer"] = _emscripten_glIsFramebuffer;
+  _emscripten_glIsFramebuffer.sig = 'ii';
 
   function _emscripten_glGenVertexArrays(n, arrays) {
       __glGenObject(n, arrays, 'createVertexArray', GL.vaos
         );
     }
   Module["_emscripten_glGenVertexArrays"] = _emscripten_glGenVertexArrays;
+  _emscripten_glGenVertexArrays.sig = 'vii';
 
   function _emscripten_glDeleteVertexArrays(n, vaos) {
       for (var i = 0; i < n; i++) {
@@ -18101,11 +18468,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glDeleteVertexArrays"] = _emscripten_glDeleteVertexArrays;
+  _emscripten_glDeleteVertexArrays.sig = 'vii';
 
   function _emscripten_glBindVertexArray(vao) {
       GLctx['bindVertexArray'](GL.vaos[vao]);
     }
   Module["_emscripten_glBindVertexArray"] = _emscripten_glBindVertexArray;
+  _emscripten_glBindVertexArray.sig = 'vi';
 
   function _emscripten_glIsVertexArray(array) {
   
@@ -18114,6 +18483,7 @@ var ASM_CONSTS = {
       return GLctx['isVertexArray'](vao);
     }
   Module["_emscripten_glIsVertexArray"] = _emscripten_glIsVertexArray;
+  _emscripten_glIsVertexArray.sig = 'ii';
 
   function _emscripten_glVertexPointer(){ throw 'Legacy GL function (glVertexPointer) called. If you want legacy GL emulation, you need to compile with -s LEGACY_GL_EMULATION=1 to enable legacy GL emulation.'; }
   Module["_emscripten_glVertexPointer"] = _emscripten_glVertexPointer;
@@ -18132,6 +18502,7 @@ var ASM_CONSTS = {
         );
     }
   Module["_emscripten_glGenVertexArraysOES"] = _emscripten_glGenVertexArraysOES;
+  _emscripten_glGenVertexArraysOES.sig = 'vii';
 
   function _emscripten_glDeleteVertexArraysOES(n, vaos) {
       for (var i = 0; i < n; i++) {
@@ -18141,11 +18512,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_glDeleteVertexArraysOES"] = _emscripten_glDeleteVertexArraysOES;
+  _emscripten_glDeleteVertexArraysOES.sig = 'vii';
 
   function _emscripten_glBindVertexArrayOES(vao) {
       GLctx['bindVertexArray'](GL.vaos[vao]);
     }
   Module["_emscripten_glBindVertexArrayOES"] = _emscripten_glBindVertexArrayOES;
+  _emscripten_glBindVertexArrayOES.sig = 'vi';
 
   function _emscripten_glIsVertexArrayOES(array) {
   
@@ -18154,6 +18527,7 @@ var ASM_CONSTS = {
       return GLctx['isVertexArray'](vao);
     }
   Module["_emscripten_glIsVertexArrayOES"] = _emscripten_glIsVertexArrayOES;
+  _emscripten_glIsVertexArrayOES.sig = 'ii';
 
   function _emscripten_gluPerspective(fov, aspect, near, far) {
       GLImmediate.matricesModified = true;
@@ -18230,16 +18604,19 @@ var ASM_CONSTS = {
       GLctx.vertexAttribPointer(index, size, type, !!normalized, stride, ptr);
     }
   Module["_emscripten_glVertexAttribPointer"] = _emscripten_glVertexAttribPointer;
+  _emscripten_glVertexAttribPointer.sig = 'viiiiii';
 
   function _emscripten_glEnableVertexAttribArray(index) {
       GLctx.enableVertexAttribArray(index);
     }
   Module["_emscripten_glEnableVertexAttribArray"] = _emscripten_glEnableVertexAttribArray;
+  _emscripten_glEnableVertexAttribArray.sig = 'vi';
 
   function _emscripten_glDisableVertexAttribArray(index) {
       GLctx.disableVertexAttribArray(index);
     }
   Module["_emscripten_glDisableVertexAttribArray"] = _emscripten_glDisableVertexAttribArray;
+  _emscripten_glDisableVertexAttribArray.sig = 'vi';
 
   function _emscripten_glDrawArrays(mode, first, count) {
   
@@ -18247,6 +18624,7 @@ var ASM_CONSTS = {
   
     }
   Module["_emscripten_glDrawArrays"] = _emscripten_glDrawArrays;
+  _emscripten_glDrawArrays.sig = 'viii';
 
   function _emscripten_glDrawElements(mode, count, type, indices) {
   
@@ -18254,16 +18632,19 @@ var ASM_CONSTS = {
   
     }
   Module["_emscripten_glDrawElements"] = _emscripten_glDrawElements;
+  _emscripten_glDrawElements.sig = 'viiii';
 
   function _emscripten_glShaderBinary() {
       GL.recordError(0x500/*GL_INVALID_ENUM*/);
     }
   Module["_emscripten_glShaderBinary"] = _emscripten_glShaderBinary;
+  _emscripten_glShaderBinary.sig = 'v';
 
   function _emscripten_glReleaseShaderCompiler() {
       // NOP (as allowed by GLES 2.0 spec)
     }
   Module["_emscripten_glReleaseShaderCompiler"] = _emscripten_glReleaseShaderCompiler;
+  _emscripten_glReleaseShaderCompiler.sig = 'v';
 
   function _emscripten_glGetError() {
       var error = GLctx.getError() || GL.lastError;
@@ -18271,81 +18652,97 @@ var ASM_CONSTS = {
       return error;
     }
   Module["_emscripten_glGetError"] = _emscripten_glGetError;
+  _emscripten_glGetError.sig = 'i';
 
   function _emscripten_glVertexAttribDivisor(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_emscripten_glVertexAttribDivisor"] = _emscripten_glVertexAttribDivisor;
+  _emscripten_glVertexAttribDivisor.sig = 'vii';
 
   function _emscripten_glDrawArraysInstanced(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_emscripten_glDrawArraysInstanced"] = _emscripten_glDrawArraysInstanced;
+  _emscripten_glDrawArraysInstanced.sig = 'viiii';
 
   function _emscripten_glDrawElementsInstanced(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_emscripten_glDrawElementsInstanced"] = _emscripten_glDrawElementsInstanced;
+  _emscripten_glDrawElementsInstanced.sig = 'viiiii';
 
   function _emscripten_glVertexAttribDivisorNV(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_emscripten_glVertexAttribDivisorNV"] = _emscripten_glVertexAttribDivisorNV;
+  _emscripten_glVertexAttribDivisorNV.sig = 'vii';
 
   function _emscripten_glDrawArraysInstancedNV(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_emscripten_glDrawArraysInstancedNV"] = _emscripten_glDrawArraysInstancedNV;
+  _emscripten_glDrawArraysInstancedNV.sig = 'viiii';
 
   function _emscripten_glDrawElementsInstancedNV(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_emscripten_glDrawElementsInstancedNV"] = _emscripten_glDrawElementsInstancedNV;
+  _emscripten_glDrawElementsInstancedNV.sig = 'viiiii';
 
   function _emscripten_glVertexAttribDivisorEXT(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_emscripten_glVertexAttribDivisorEXT"] = _emscripten_glVertexAttribDivisorEXT;
+  _emscripten_glVertexAttribDivisorEXT.sig = 'vii';
 
   function _emscripten_glDrawArraysInstancedEXT(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_emscripten_glDrawArraysInstancedEXT"] = _emscripten_glDrawArraysInstancedEXT;
+  _emscripten_glDrawArraysInstancedEXT.sig = 'viiii';
 
   function _emscripten_glDrawElementsInstancedEXT(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_emscripten_glDrawElementsInstancedEXT"] = _emscripten_glDrawElementsInstancedEXT;
+  _emscripten_glDrawElementsInstancedEXT.sig = 'viiiii';
 
   function _emscripten_glVertexAttribDivisorARB(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_emscripten_glVertexAttribDivisorARB"] = _emscripten_glVertexAttribDivisorARB;
+  _emscripten_glVertexAttribDivisorARB.sig = 'vii';
 
   function _emscripten_glDrawArraysInstancedARB(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_emscripten_glDrawArraysInstancedARB"] = _emscripten_glDrawArraysInstancedARB;
+  _emscripten_glDrawArraysInstancedARB.sig = 'viiii';
 
   function _emscripten_glDrawElementsInstancedARB(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_emscripten_glDrawElementsInstancedARB"] = _emscripten_glDrawElementsInstancedARB;
+  _emscripten_glDrawElementsInstancedARB.sig = 'viiiii';
 
   function _emscripten_glVertexAttribDivisorANGLE(index, divisor) {
       GLctx['vertexAttribDivisor'](index, divisor);
     }
   Module["_emscripten_glVertexAttribDivisorANGLE"] = _emscripten_glVertexAttribDivisorANGLE;
+  _emscripten_glVertexAttribDivisorANGLE.sig = 'vii';
 
   function _emscripten_glDrawArraysInstancedANGLE(mode, first, count, primcount) {
       GLctx['drawArraysInstanced'](mode, first, count, primcount);
     }
   Module["_emscripten_glDrawArraysInstancedANGLE"] = _emscripten_glDrawArraysInstancedANGLE;
+  _emscripten_glDrawArraysInstancedANGLE.sig = 'viiii';
 
   function _emscripten_glDrawElementsInstancedANGLE(mode, count, type, indices, primcount) {
       GLctx['drawElementsInstanced'](mode, count, type, indices, primcount);
     }
   Module["_emscripten_glDrawElementsInstancedANGLE"] = _emscripten_glDrawElementsInstancedANGLE;
+  _emscripten_glDrawElementsInstancedANGLE.sig = 'viiiii';
 
   function _emscripten_glDrawBuffers(n, bufs) {
   
@@ -18357,6 +18754,7 @@ var ASM_CONSTS = {
       GLctx['drawBuffers'](bufArray);
     }
   Module["_emscripten_glDrawBuffers"] = _emscripten_glDrawBuffers;
+  _emscripten_glDrawBuffers.sig = 'vii';
 
   function _emscripten_glDrawBuffersEXT(n, bufs) {
   
@@ -18368,6 +18766,7 @@ var ASM_CONSTS = {
       GLctx['drawBuffers'](bufArray);
     }
   Module["_emscripten_glDrawBuffersEXT"] = _emscripten_glDrawBuffersEXT;
+  _emscripten_glDrawBuffersEXT.sig = 'vii';
 
   function _emscripten_glDrawBuffersWEBGL(n, bufs) {
   
@@ -18379,21 +18778,25 @@ var ASM_CONSTS = {
       GLctx['drawBuffers'](bufArray);
     }
   Module["_emscripten_glDrawBuffersWEBGL"] = _emscripten_glDrawBuffersWEBGL;
+  _emscripten_glDrawBuffersWEBGL.sig = 'vii';
 
   function _emscripten_glColorMask(red, green, blue, alpha) {
       GLctx.colorMask(!!red, !!green, !!blue, !!alpha);
     }
   Module["_emscripten_glColorMask"] = _emscripten_glColorMask;
+  _emscripten_glColorMask.sig = 'viiii';
 
   function _emscripten_glDepthMask(flag) {
       GLctx.depthMask(!!flag);
     }
   Module["_emscripten_glDepthMask"] = _emscripten_glDepthMask;
+  _emscripten_glDepthMask.sig = 'vi';
 
   function _emscripten_glSampleCoverage(value, invert) {
       GLctx.sampleCoverage(value, !!invert);
     }
   Module["_emscripten_glSampleCoverage"] = _emscripten_glSampleCoverage;
+  _emscripten_glSampleCoverage.sig = 'vii';
 
   function _emscripten_glMultiDrawArrays(mode, firsts, counts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
@@ -18405,6 +18808,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawArrays"] = _emscripten_glMultiDrawArrays;
+  _emscripten_glMultiDrawArrays.sig = 'viiii';
 
   function _emscripten_glMultiDrawArraysANGLE(mode, firsts, counts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
@@ -18416,6 +18820,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawArraysANGLE"] = _emscripten_glMultiDrawArraysANGLE;
+  _emscripten_glMultiDrawArraysANGLE.sig = 'viiii';
 
   function _emscripten_glMultiDrawArraysWEBGL(mode, firsts, counts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysWEBGL'](
@@ -18427,6 +18832,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawArraysWEBGL"] = _emscripten_glMultiDrawArraysWEBGL;
+  _emscripten_glMultiDrawArraysWEBGL.sig = 'viiii';
 
   function _emscripten_glMultiDrawArraysInstancedANGLE(mode, firsts, counts, instanceCounts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysInstancedWEBGL'](
@@ -18440,6 +18846,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawArraysInstancedANGLE"] = _emscripten_glMultiDrawArraysInstancedANGLE;
+  _emscripten_glMultiDrawArraysInstancedANGLE.sig = 'viiiii';
 
   function _emscripten_glMultiDrawArraysInstancedWEBGL(mode, firsts, counts, instanceCounts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawArraysInstancedWEBGL'](
@@ -18453,6 +18860,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawArraysInstancedWEBGL"] = _emscripten_glMultiDrawArraysInstancedWEBGL;
+  _emscripten_glMultiDrawArraysInstancedWEBGL.sig = 'viiiii';
 
   function _emscripten_glMultiDrawElements(mode, counts, type, offsets, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
@@ -18465,6 +18873,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawElements"] = _emscripten_glMultiDrawElements;
+  _emscripten_glMultiDrawElements.sig = 'viiiii';
 
   function _emscripten_glMultiDrawElementsANGLE(mode, counts, type, offsets, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
@@ -18477,6 +18886,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawElementsANGLE"] = _emscripten_glMultiDrawElementsANGLE;
+  _emscripten_glMultiDrawElementsANGLE.sig = 'viiiii';
 
   function _emscripten_glMultiDrawElementsWEBGL(mode, counts, type, offsets, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsWEBGL'](
@@ -18489,6 +18899,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawElementsWEBGL"] = _emscripten_glMultiDrawElementsWEBGL;
+  _emscripten_glMultiDrawElementsWEBGL.sig = 'viiiii';
 
   function _emscripten_glMultiDrawElementsInstancedANGLE(mode, counts, type, offsets, instanceCounts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsInstancedWEBGL'](
@@ -18503,6 +18914,7 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawElementsInstancedANGLE"] = _emscripten_glMultiDrawElementsInstancedANGLE;
+  _emscripten_glMultiDrawElementsInstancedANGLE.sig = 'viiiiii';
 
   function _emscripten_glMultiDrawElementsInstancedWEBGL(mode, counts, type, offsets, instanceCounts, drawcount) {
       GLctx.multiDrawWebgl['multiDrawElementsInstancedWEBGL'](
@@ -18517,135 +18929,179 @@ var ASM_CONSTS = {
         drawcount);
     }
   Module["_emscripten_glMultiDrawElementsInstancedWEBGL"] = _emscripten_glMultiDrawElementsInstancedWEBGL;
+  _emscripten_glMultiDrawElementsInstancedWEBGL.sig = 'viiiiii';
 
   function _emscripten_glFinish() { GLctx['finish']() }
   Module["_emscripten_glFinish"] = _emscripten_glFinish;
+  _emscripten_glFinish.sig = 'v';
 
   function _emscripten_glFlush() { GLctx['flush']() }
   Module["_emscripten_glFlush"] = _emscripten_glFlush;
+  _emscripten_glFlush.sig = 'v';
 
   function _emscripten_glClearDepth(x0) { GLctx['clearDepth'](x0) }
   Module["_emscripten_glClearDepth"] = _emscripten_glClearDepth;
+  _emscripten_glClearDepth.sig = 'vi';
 
   function _emscripten_glClearDepthf(x0) { GLctx['clearDepth'](x0) }
   Module["_emscripten_glClearDepthf"] = _emscripten_glClearDepthf;
+  _emscripten_glClearDepthf.sig = 'vi';
 
   function _emscripten_glDepthFunc(x0) { GLctx['depthFunc'](x0) }
   Module["_emscripten_glDepthFunc"] = _emscripten_glDepthFunc;
+  _emscripten_glDepthFunc.sig = 'vi';
 
   function _emscripten_glEnable(x0) { GLctx['enable'](x0) }
   Module["_emscripten_glEnable"] = _emscripten_glEnable;
+  _emscripten_glEnable.sig = 'vi';
 
   function _emscripten_glDisable(x0) { GLctx['disable'](x0) }
   Module["_emscripten_glDisable"] = _emscripten_glDisable;
+  _emscripten_glDisable.sig = 'vi';
 
   function _emscripten_glFrontFace(x0) { GLctx['frontFace'](x0) }
   Module["_emscripten_glFrontFace"] = _emscripten_glFrontFace;
+  _emscripten_glFrontFace.sig = 'vi';
 
   function _emscripten_glCullFace(x0) { GLctx['cullFace'](x0) }
   Module["_emscripten_glCullFace"] = _emscripten_glCullFace;
+  _emscripten_glCullFace.sig = 'vi';
 
   function _emscripten_glClear(x0) { GLctx['clear'](x0) }
   Module["_emscripten_glClear"] = _emscripten_glClear;
+  _emscripten_glClear.sig = 'vi';
 
   function _emscripten_glLineWidth(x0) { GLctx['lineWidth'](x0) }
   Module["_emscripten_glLineWidth"] = _emscripten_glLineWidth;
+  _emscripten_glLineWidth.sig = 'vi';
 
   function _emscripten_glClearStencil(x0) { GLctx['clearStencil'](x0) }
   Module["_emscripten_glClearStencil"] = _emscripten_glClearStencil;
+  _emscripten_glClearStencil.sig = 'vi';
 
   function _emscripten_glStencilMask(x0) { GLctx['stencilMask'](x0) }
   Module["_emscripten_glStencilMask"] = _emscripten_glStencilMask;
+  _emscripten_glStencilMask.sig = 'vi';
 
   function _emscripten_glCheckFramebufferStatus(x0) { return GLctx['checkFramebufferStatus'](x0) }
   Module["_emscripten_glCheckFramebufferStatus"] = _emscripten_glCheckFramebufferStatus;
+  _emscripten_glCheckFramebufferStatus.sig = 'ii';
 
   function _emscripten_glGenerateMipmap(x0) { GLctx['generateMipmap'](x0) }
   Module["_emscripten_glGenerateMipmap"] = _emscripten_glGenerateMipmap;
+  _emscripten_glGenerateMipmap.sig = 'vi';
 
   function _emscripten_glActiveTexture(x0) { GLctx['activeTexture'](x0) }
   Module["_emscripten_glActiveTexture"] = _emscripten_glActiveTexture;
+  _emscripten_glActiveTexture.sig = 'vi';
 
   function _emscripten_glBlendEquation(x0) { GLctx['blendEquation'](x0) }
   Module["_emscripten_glBlendEquation"] = _emscripten_glBlendEquation;
+  _emscripten_glBlendEquation.sig = 'vi';
 
   function _emscripten_glIsEnabled(x0) { return GLctx['isEnabled'](x0) }
   Module["_emscripten_glIsEnabled"] = _emscripten_glIsEnabled;
+  _emscripten_glIsEnabled.sig = 'ii';
 
   function _emscripten_glBlendFunc(x0, x1) { GLctx['blendFunc'](x0, x1) }
   Module["_emscripten_glBlendFunc"] = _emscripten_glBlendFunc;
+  _emscripten_glBlendFunc.sig = 'vii';
 
   function _emscripten_glBlendEquationSeparate(x0, x1) { GLctx['blendEquationSeparate'](x0, x1) }
   Module["_emscripten_glBlendEquationSeparate"] = _emscripten_glBlendEquationSeparate;
+  _emscripten_glBlendEquationSeparate.sig = 'vii';
 
   function _emscripten_glDepthRange(x0, x1) { GLctx['depthRange'](x0, x1) }
   Module["_emscripten_glDepthRange"] = _emscripten_glDepthRange;
+  _emscripten_glDepthRange.sig = 'vii';
 
   function _emscripten_glDepthRangef(x0, x1) { GLctx['depthRange'](x0, x1) }
   Module["_emscripten_glDepthRangef"] = _emscripten_glDepthRangef;
+  _emscripten_glDepthRangef.sig = 'vii';
 
   function _emscripten_glStencilMaskSeparate(x0, x1) { GLctx['stencilMaskSeparate'](x0, x1) }
   Module["_emscripten_glStencilMaskSeparate"] = _emscripten_glStencilMaskSeparate;
+  _emscripten_glStencilMaskSeparate.sig = 'vii';
 
   function _emscripten_glHint(x0, x1) { GLctx['hint'](x0, x1) }
   Module["_emscripten_glHint"] = _emscripten_glHint;
+  _emscripten_glHint.sig = 'vii';
 
   function _emscripten_glPolygonOffset(x0, x1) { GLctx['polygonOffset'](x0, x1) }
   Module["_emscripten_glPolygonOffset"] = _emscripten_glPolygonOffset;
+  _emscripten_glPolygonOffset.sig = 'vii';
 
   function _emscripten_glVertexAttrib1f(x0, x1) { GLctx['vertexAttrib1f'](x0, x1) }
   Module["_emscripten_glVertexAttrib1f"] = _emscripten_glVertexAttrib1f;
+  _emscripten_glVertexAttrib1f.sig = 'vii';
 
   function _emscripten_glTexParameteri(x0, x1, x2) { GLctx['texParameteri'](x0, x1, x2) }
   Module["_emscripten_glTexParameteri"] = _emscripten_glTexParameteri;
+  _emscripten_glTexParameteri.sig = 'viii';
 
   function _emscripten_glTexParameterf(x0, x1, x2) { GLctx['texParameterf'](x0, x1, x2) }
   Module["_emscripten_glTexParameterf"] = _emscripten_glTexParameterf;
+  _emscripten_glTexParameterf.sig = 'viii';
 
   function _emscripten_glVertexAttrib2f(x0, x1, x2) { GLctx['vertexAttrib2f'](x0, x1, x2) }
   Module["_emscripten_glVertexAttrib2f"] = _emscripten_glVertexAttrib2f;
+  _emscripten_glVertexAttrib2f.sig = 'viii';
 
   function _emscripten_glStencilFunc(x0, x1, x2) { GLctx['stencilFunc'](x0, x1, x2) }
   Module["_emscripten_glStencilFunc"] = _emscripten_glStencilFunc;
+  _emscripten_glStencilFunc.sig = 'viii';
 
   function _emscripten_glStencilOp(x0, x1, x2) { GLctx['stencilOp'](x0, x1, x2) }
   Module["_emscripten_glStencilOp"] = _emscripten_glStencilOp;
+  _emscripten_glStencilOp.sig = 'viii';
 
   function _emscripten_glViewport(x0, x1, x2, x3) { GLctx['viewport'](x0, x1, x2, x3) }
   Module["_emscripten_glViewport"] = _emscripten_glViewport;
+  _emscripten_glViewport.sig = 'viiii';
 
   function _emscripten_glClearColor(x0, x1, x2, x3) { GLctx['clearColor'](x0, x1, x2, x3) }
   Module["_emscripten_glClearColor"] = _emscripten_glClearColor;
+  _emscripten_glClearColor.sig = 'viiii';
 
   function _emscripten_glScissor(x0, x1, x2, x3) { GLctx['scissor'](x0, x1, x2, x3) }
   Module["_emscripten_glScissor"] = _emscripten_glScissor;
+  _emscripten_glScissor.sig = 'viiii';
 
   function _emscripten_glVertexAttrib3f(x0, x1, x2, x3) { GLctx['vertexAttrib3f'](x0, x1, x2, x3) }
   Module["_emscripten_glVertexAttrib3f"] = _emscripten_glVertexAttrib3f;
+  _emscripten_glVertexAttrib3f.sig = 'viiii';
 
   function _emscripten_glRenderbufferStorage(x0, x1, x2, x3) { GLctx['renderbufferStorage'](x0, x1, x2, x3) }
   Module["_emscripten_glRenderbufferStorage"] = _emscripten_glRenderbufferStorage;
+  _emscripten_glRenderbufferStorage.sig = 'viiii';
 
   function _emscripten_glBlendFuncSeparate(x0, x1, x2, x3) { GLctx['blendFuncSeparate'](x0, x1, x2, x3) }
   Module["_emscripten_glBlendFuncSeparate"] = _emscripten_glBlendFuncSeparate;
+  _emscripten_glBlendFuncSeparate.sig = 'viiii';
 
   function _emscripten_glBlendColor(x0, x1, x2, x3) { GLctx['blendColor'](x0, x1, x2, x3) }
   Module["_emscripten_glBlendColor"] = _emscripten_glBlendColor;
+  _emscripten_glBlendColor.sig = 'vffff';
 
   function _emscripten_glStencilFuncSeparate(x0, x1, x2, x3) { GLctx['stencilFuncSeparate'](x0, x1, x2, x3) }
   Module["_emscripten_glStencilFuncSeparate"] = _emscripten_glStencilFuncSeparate;
+  _emscripten_glStencilFuncSeparate.sig = 'viiii';
 
   function _emscripten_glStencilOpSeparate(x0, x1, x2, x3) { GLctx['stencilOpSeparate'](x0, x1, x2, x3) }
   Module["_emscripten_glStencilOpSeparate"] = _emscripten_glStencilOpSeparate;
+  _emscripten_glStencilOpSeparate.sig = 'viiii';
 
   function _emscripten_glVertexAttrib4f(x0, x1, x2, x3, x4) { GLctx['vertexAttrib4f'](x0, x1, x2, x3, x4) }
   Module["_emscripten_glVertexAttrib4f"] = _emscripten_glVertexAttrib4f;
+  _emscripten_glVertexAttrib4f.sig = 'viiiii';
 
   function _emscripten_glCopyTexImage2D(x0, x1, x2, x3, x4, x5, x6, x7) { GLctx['copyTexImage2D'](x0, x1, x2, x3, x4, x5, x6, x7) }
   Module["_emscripten_glCopyTexImage2D"] = _emscripten_glCopyTexImage2D;
+  _emscripten_glCopyTexImage2D.sig = 'viiiiiiii';
 
   function _emscripten_glCopyTexSubImage2D(x0, x1, x2, x3, x4, x5, x6, x7) { GLctx['copyTexSubImage2D'](x0, x1, x2, x3, x4, x5, x6, x7) }
   Module["_emscripten_glCopyTexSubImage2D"] = _emscripten_glCopyTexSubImage2D;
+  _emscripten_glCopyTexSubImage2D.sig = 'viiiiiiii';
 
   function writeGLArray(arr, dst, dstLength, heapType) {
       assert(arr);
@@ -18682,23 +19138,25 @@ var ASM_CONSTS = {
 
   function _emscripten_webgl_do_create_context(target, attributes) {
       assert(attributes);
-      var contextAttributes = {};
       var a = attributes >> 2;
-      contextAttributes['alpha'] = !!HEAP32[a + (0>>2)];
-      contextAttributes['depth'] = !!HEAP32[a + (4>>2)];
-      contextAttributes['stencil'] = !!HEAP32[a + (8>>2)];
-      contextAttributes['antialias'] = !!HEAP32[a + (12>>2)];
-      contextAttributes['premultipliedAlpha'] = !!HEAP32[a + (16>>2)];
-      contextAttributes['preserveDrawingBuffer'] = !!HEAP32[a + (20>>2)];
       var powerPreference = HEAP32[a + (24>>2)];
-      contextAttributes['powerPreference'] = __emscripten_webgl_power_preferences[powerPreference];
-      contextAttributes['failIfMajorPerformanceCaveat'] = !!HEAP32[a + (28>>2)];
-      contextAttributes.majorVersion = HEAP32[a + (32>>2)];
-      contextAttributes.minorVersion = HEAP32[a + (36>>2)];
-      contextAttributes.enableExtensionsByDefault = HEAP32[a + (40>>2)];
-      contextAttributes.explicitSwapControl = HEAP32[a + (44>>2)];
-      contextAttributes.proxyContextToMainThread = HEAP32[a + (48>>2)];
-      contextAttributes.renderViaOffscreenBackBuffer = HEAP32[a + (52>>2)];
+      var contextAttributes = {
+        'alpha': !!HEAP32[a + (0>>2)],
+        'depth': !!HEAP32[a + (4>>2)],
+        'stencil': !!HEAP32[a + (8>>2)],
+        'antialias': !!HEAP32[a + (12>>2)],
+        'premultipliedAlpha': !!HEAP32[a + (16>>2)],
+        'preserveDrawingBuffer': !!HEAP32[a + (20>>2)],
+        'powerPreference': __emscripten_webgl_power_preferences[powerPreference],
+        'failIfMajorPerformanceCaveat': !!HEAP32[a + (28>>2)],
+        // The following are not predefined WebGL context attributes in the WebGL specification, so the property names can be minified by Closure.
+        majorVersion: HEAP32[a + (32>>2)],
+        minorVersion: HEAP32[a + (36>>2)],
+        enableExtensionsByDefault: HEAP32[a + (40>>2)],
+        explicitSwapControl: HEAP32[a + (44>>2)],
+        proxyContextToMainThread: HEAP32[a + (48>>2)],
+        renderViaOffscreenBackBuffer: HEAP32[a + (52>>2)]
+      };
   
       var canvas = findCanvasEventTarget(target);
   
@@ -18719,6 +19177,7 @@ var ASM_CONSTS = {
   return _emscripten_webgl_do_create_context(a0,a1);
   }
   Module["_emscripten_webgl_create_context"] = _emscripten_webgl_create_context;
+  _emscripten_webgl_create_context.sig = 'iii';
 
   function _emscripten_webgl_do_get_current_context() {
       return GL.currentContext ? GL.currentContext.handle : 0;
@@ -18729,6 +19188,7 @@ var ASM_CONSTS = {
   return _emscripten_webgl_do_get_current_context();
   }
   Module["_emscripten_webgl_get_current_context"] = _emscripten_webgl_get_current_context;
+  _emscripten_webgl_get_current_context.sig = 'i';
 
   function _emscripten_webgl_do_commit_frame() {
       if (!GL.currentContext || !GL.currentContext.GLctx) {
@@ -18749,6 +19209,7 @@ var ASM_CONSTS = {
   return _emscripten_webgl_do_commit_frame();
   }
   Module["_emscripten_webgl_commit_frame"] = _emscripten_webgl_commit_frame;
+  _emscripten_webgl_commit_frame.sig = 'i';
 
 
   function _emscripten_webgl_make_context_current(contextHandle) {
@@ -18769,6 +19230,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_webgl_get_drawing_buffer_size"] = _emscripten_webgl_get_drawing_buffer_size;
+  _emscripten_webgl_get_drawing_buffer_size.sig = 'iiii';
 
 
   function _emscripten_webgl_get_context_attributes(c, a) {
@@ -18794,12 +19256,14 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_webgl_get_context_attributes"] = _emscripten_webgl_get_context_attributes;
+  _emscripten_webgl_get_context_attributes.sig = 'iii';
 
   function _emscripten_webgl_destroy_context(contextHandle) {
       if (GL.currentContext == contextHandle) GL.currentContext = 0;
       GL.deleteContext(contextHandle);
     }
   Module["_emscripten_webgl_destroy_context"] = _emscripten_webgl_destroy_context;
+  _emscripten_webgl_destroy_context.sig = 'vi';
 
   function _emscripten_webgl_destroy_context_before_on_calling_thread(contextHandle) {
       if (_emscripten_webgl_get_current_context() == contextHandle) _emscripten_webgl_make_context_current(0);
@@ -18825,6 +19289,7 @@ var ASM_CONSTS = {
       return !!ext;
     }
   Module["_emscripten_webgl_enable_extension"] = _emscripten_webgl_enable_extension;
+  _emscripten_webgl_enable_extension.sig = 'iii';
 
   function _emscripten_supports_offscreencanvas() {
       // TODO: Add a new build mode, e.g. OFFSCREENCANVAS_SUPPORT=2, which
@@ -18857,99 +19322,118 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_emscripten_set_webglcontextlost_callback_on_thread"] = _emscripten_set_webglcontextlost_callback_on_thread;
+  _emscripten_set_webglcontextlost_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_set_webglcontextrestored_callback_on_thread(target, userData, useCapture, callbackfunc, targetThread) {
       __registerWebGlEventCallback(target, userData, useCapture, callbackfunc, 32, "webglcontextrestored", targetThread);
       return 0;
     }
   Module["_emscripten_set_webglcontextrestored_callback_on_thread"] = _emscripten_set_webglcontextrestored_callback_on_thread;
+  _emscripten_set_webglcontextrestored_callback_on_thread.sig = 'iiiiii';
 
   function _emscripten_is_webgl_context_lost(contextHandle) {
       return !GL.contexts[contextHandle] || GL.contexts[contextHandle].GLctx.isContextLost(); // No context ~> lost context.
     }
   Module["_emscripten_is_webgl_context_lost"] = _emscripten_is_webgl_context_lost;
+  _emscripten_is_webgl_context_lost.sig = 'ii';
 
   function _emscripten_webgl_get_supported_extensions() {
       return stringToNewUTF8(GLctx.getSupportedExtensions().join(' '));
     }
   Module["_emscripten_webgl_get_supported_extensions"] = _emscripten_webgl_get_supported_extensions;
+  _emscripten_webgl_get_supported_extensions.sig = 'i';
 
   function _emscripten_webgl_get_program_parameter_d(program, param) {
       return GLctx.getProgramParameter(GL.programs[program], param);
     }
   Module["_emscripten_webgl_get_program_parameter_d"] = _emscripten_webgl_get_program_parameter_d;
+  _emscripten_webgl_get_program_parameter_d.sig = 'fii';
 
   function _emscripten_webgl_get_program_info_log_utf8(program) {
       return stringToNewUTF8(GLctx.getProgramInfoLog(GL.programs[program]));
     }
   Module["_emscripten_webgl_get_program_info_log_utf8"] = _emscripten_webgl_get_program_info_log_utf8;
+  _emscripten_webgl_get_program_info_log_utf8.sig = 'ii';
 
   function _emscripten_webgl_get_shader_parameter_d(shader, param) {
       return GLctx.getShaderParameter(GL.shaders[shader], param);
     }
   Module["_emscripten_webgl_get_shader_parameter_d"] = _emscripten_webgl_get_shader_parameter_d;
+  _emscripten_webgl_get_shader_parameter_d.sig = 'fii';
 
   function _emscripten_webgl_get_shader_info_log_utf8(shader) {
       return stringToNewUTF8(GLctx.getShaderInfoLog(GL.shaders[shader]));
     }
   Module["_emscripten_webgl_get_shader_info_log_utf8"] = _emscripten_webgl_get_shader_info_log_utf8;
+  _emscripten_webgl_get_shader_info_log_utf8.sig = 'ii';
 
   function _emscripten_webgl_get_shader_source_utf8(shader) {
       return stringToNewUTF8(GLctx.getShaderSource(GL.shaders[shader]));
     }
   Module["_emscripten_webgl_get_shader_source_utf8"] = _emscripten_webgl_get_shader_source_utf8;
+  _emscripten_webgl_get_shader_source_utf8.sig = 'ii';
 
   function _emscripten_webgl_get_vertex_attrib_d(index, param) {
       return GLctx.getVertexAttrib(index, param);
     }
   Module["_emscripten_webgl_get_vertex_attrib_d"] = _emscripten_webgl_get_vertex_attrib_d;
+  _emscripten_webgl_get_vertex_attrib_d.sig = 'iii';
 
   function _emscripten_webgl_get_vertex_attrib_o(index, param) {
       var obj = GLctx.getVertexAttrib(index, param);
       return obj && obj.name;
     }
   Module["_emscripten_webgl_get_vertex_attrib_o"] = _emscripten_webgl_get_vertex_attrib_o;
+  _emscripten_webgl_get_vertex_attrib_o.sig = 'iii';
 
   function _emscripten_webgl_get_vertex_attrib_v(index, param, dst, dstLength, dstType) {
       return writeGLArray(GLctx.getVertexAttrib(index, param), dst, dstLength, dstType);
     }
   Module["_emscripten_webgl_get_vertex_attrib_v"] = _emscripten_webgl_get_vertex_attrib_v;
+  _emscripten_webgl_get_vertex_attrib_v.sig = 'iiiiii';
 
   function _emscripten_webgl_get_uniform_d(program, location) {
       return GLctx.getUniform(GL.programs[program], GL.uniforms[location]);
     }
   Module["_emscripten_webgl_get_uniform_d"] = _emscripten_webgl_get_uniform_d;
+  _emscripten_webgl_get_uniform_d.sig = 'fii';
 
   function _emscripten_webgl_get_uniform_v(program, location, dst, dstLength, dstType) {
       return writeGLArray(GLctx.getUniform(GL.programs[program], GL.uniforms[location]), dst, dstLength, dstType);
     }
   Module["_emscripten_webgl_get_uniform_v"] = _emscripten_webgl_get_uniform_v;
+  _emscripten_webgl_get_uniform_v.sig = 'iiiiii';
 
   function _emscripten_webgl_get_parameter_v(param, dst, dstLength, dstType) {
       return writeGLArray(GLctx.getParameter(param), dst, dstLength, dstType);
     }
   Module["_emscripten_webgl_get_parameter_v"] = _emscripten_webgl_get_parameter_v;
+  _emscripten_webgl_get_parameter_v.sig = 'iiiii';
 
   function _emscripten_webgl_get_parameter_d(param) {
       return GLctx.getParameter(param);
     }
   Module["_emscripten_webgl_get_parameter_d"] = _emscripten_webgl_get_parameter_d;
+  _emscripten_webgl_get_parameter_d.sig = 'fi';
 
   function _emscripten_webgl_get_parameter_o(param) {
       var obj = GLctx.getParameter(param);
       return obj && obj.name;
     }
   Module["_emscripten_webgl_get_parameter_o"] = _emscripten_webgl_get_parameter_o;
+  _emscripten_webgl_get_parameter_o.sig = 'ii';
 
   function _emscripten_webgl_get_parameter_utf8(param) {
       return stringToNewUTF8(GLctx.getParameter(param));
     }
   Module["_emscripten_webgl_get_parameter_utf8"] = _emscripten_webgl_get_parameter_utf8;
+  _emscripten_webgl_get_parameter_utf8.sig = 'ii';
 
   function _emscripten_webgl_get_parameter_i64v(param, dst) {
       writeI53ToI64(dst, GLctx.getParameter(param));
     }
   Module["_emscripten_webgl_get_parameter_i64v"] = _emscripten_webgl_get_parameter_i64v;
+  _emscripten_webgl_get_parameter_i64v.sig = 'vii';
 
   var AL={QUEUE_INTERVAL:25,QUEUE_LOOKAHEAD:0.1,DEVICE_NAME:"Emscripten OpenAL",CAPTURE_DEVICE_NAME:"Emscripten OpenAL capture",ALC_EXTENSIONS:{ALC_SOFT_pause_device:true,ALC_SOFT_HRTF:true},AL_EXTENSIONS:{AL_EXT_float32:true,AL_SOFT_loop_points:true,AL_SOFT_source_length:true,AL_EXT_source_distance_model:true,AL_SOFT_source_spatialize:true},_alcErr:0,alcErr:0,deviceRefCounts:{},alcStringCache:{},paused:false,stringCache:{},contexts:{},currentCtx:null,buffers:{0:{id:0,refCount:0,audioBuf:null,frequency:0,bytesPerSample:2,channels:1,length:0}},paramArray:[],_nextId:1,newId:function() {
         return AL.freeIds.length > 0 ? AL.freeIds.pop() : AL._nextId++;
@@ -20419,6 +20903,7 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_alcCaptureOpenDevice"] = _alcCaptureOpenDevice;
+  _alcCaptureOpenDevice.sig = 'iiiii';
 
   function _alcCaptureCloseDevice(deviceId) {
       var c = AL.requireValidCaptureDevice(deviceId, 'alcCaptureCloseDevice');
@@ -20451,6 +20936,7 @@ var ASM_CONSTS = {
       return true;
     }
   Module["_alcCaptureCloseDevice"] = _alcCaptureCloseDevice;
+  _alcCaptureCloseDevice.sig = 'ii';
 
   function _alcCaptureStart(deviceId) {
       var c = AL.requireValidCaptureDevice(deviceId, 'alcCaptureStart');
@@ -20468,6 +20954,7 @@ var ASM_CONSTS = {
       c.capturePlayhead = 0;
     }
   Module["_alcCaptureStart"] = _alcCaptureStart;
+  _alcCaptureStart.sig = 'vi';
 
   function _alcCaptureStop(deviceId) {
       var c = AL.requireValidCaptureDevice(deviceId, 'alcCaptureStop');
@@ -20476,6 +20963,7 @@ var ASM_CONSTS = {
       c.isCapturing = false;
     }
   Module["_alcCaptureStop"] = _alcCaptureStop;
+  _alcCaptureStop.sig = 'vi';
 
   function _alcCaptureSamples(deviceId, pFrames, requestedFrameCount) {
       var c = AL.requireValidCaptureDevice(deviceId, 'alcCaptureSamples');
@@ -20558,6 +21046,7 @@ var ASM_CONSTS = {
       c.capturedFrameCount = 0;
     }
   Module["_alcCaptureSamples"] = _alcCaptureSamples;
+  _alcCaptureSamples.sig = 'viii';
 
   function _alcOpenDevice(pDeviceName) {
       if (pDeviceName) {
@@ -20576,6 +21065,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alcOpenDevice"] = _alcOpenDevice;
+  _alcOpenDevice.sig = 'ii';
 
   function _alcCloseDevice(deviceId) {
       if (!(deviceId in AL.deviceRefCounts) || AL.deviceRefCounts[deviceId] > 0) {
@@ -20587,6 +21077,7 @@ var ASM_CONSTS = {
       return 1 /* ALC_TRUE */;
     }
   Module["_alcCloseDevice"] = _alcCloseDevice;
+  _alcCloseDevice.sig = 'ii';
 
   function _alcCreateContext(deviceId, pAttrList) {
       if (!(deviceId in AL.deviceRefCounts)) {
@@ -20726,6 +21217,7 @@ var ASM_CONSTS = {
       return ctx.id;
     }
   Module["_alcCreateContext"] = _alcCreateContext;
+  _alcCreateContext.sig = 'iii';
 
   function _alcDestroyContext(contextId) {
       var ctx = AL.contexts[contextId];
@@ -20743,6 +21235,7 @@ var ASM_CONSTS = {
       AL.freeIds.push(contextId);
     }
   Module["_alcDestroyContext"] = _alcDestroyContext;
+  _alcDestroyContext.sig = 'vi';
 
   function _alcGetError(deviceId) {
       var err = AL.alcErr;
@@ -20750,6 +21243,7 @@ var ASM_CONSTS = {
       return err;
     }
   Module["_alcGetError"] = _alcGetError;
+  _alcGetError.sig = 'ii';
 
   function _alcGetCurrentContext() {
       if (AL.currentCtx !== null) {
@@ -20759,6 +21253,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alcGetCurrentContext"] = _alcGetCurrentContext;
+  _alcGetCurrentContext.sig = 'i';
 
   function _alcMakeContextCurrent(contextId) {
       if (contextId === 0) {
@@ -20770,6 +21265,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alcMakeContextCurrent"] = _alcMakeContextCurrent;
+  _alcMakeContextCurrent.sig = 'ii';
 
   function _alcGetContextsDevice(contextId) {
       if (contextId in AL.contexts) {
@@ -20779,6 +21275,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alcGetContextsDevice"] = _alcGetContextsDevice;
+  _alcGetContextsDevice.sig = 'ii';
 
   function _alcProcessContext(contextId) {}
   Module["_alcProcessContext"] = _alcProcessContext;
@@ -20792,10 +21289,11 @@ var ASM_CONSTS = {
       return AL.ALC_EXTENSIONS[name] ? 1 : 0;
     }
   Module["_alcIsExtensionPresent"] = _alcIsExtensionPresent;
+  _alcIsExtensionPresent.sig = 'iii';
 
   function _emscripten_GetAlcProcAddress(
   ) {
-  if (!Module['_emscripten_GetAlcProcAddress']) abort("external function 'emscripten_GetAlcProcAddress' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['_emscripten_GetAlcProcAddress']) abort("external symbol 'emscripten_GetAlcProcAddress' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['_emscripten_GetAlcProcAddress'].apply(null, arguments);
   }
   function _alcGetProcAddress(deviceId, pProcName) {
@@ -20806,6 +21304,7 @@ var ASM_CONSTS = {
       return _emscripten_GetAlcProcAddress(pProcName);
     }
   Module["_alcGetProcAddress"] = _alcGetProcAddress;
+  _alcGetProcAddress.sig = 'iii';
 
   function _alcGetEnumValue(deviceId, pEnumName) {
       // Spec says :
@@ -20864,6 +21363,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alcGetEnumValue"] = _alcGetEnumValue;
+  _alcGetEnumValue.sig = 'iii';
 
   function _alcGetString(deviceId, param) {
       if (AL.alcStringCache[param]) {
@@ -20943,6 +21443,7 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_alcGetString"] = _alcGetString;
+  _alcGetString.sig = 'iii';
 
   function _alcGetIntegerv(deviceId, param, size, pValues) {
       if (size === 0 || !pValues) {
@@ -21059,6 +21560,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alcGetIntegerv"] = _alcGetIntegerv;
+  _alcGetIntegerv.sig = 'viiii';
 
   function _emscripten_alcDevicePauseSOFT(deviceId) {
       if (!(deviceId in AL.deviceRefCounts)) {
@@ -21083,6 +21585,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_alcDevicePauseSOFT"] = _emscripten_alcDevicePauseSOFT;
+  _emscripten_alcDevicePauseSOFT.sig = 'vi';
 
   function _emscripten_alcDeviceResumeSOFT(deviceId) {
       if (!(deviceId in AL.deviceRefCounts)) {
@@ -21106,6 +21609,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_emscripten_alcDeviceResumeSOFT"] = _emscripten_alcDeviceResumeSOFT;
+  _emscripten_alcDeviceResumeSOFT.sig = 'vi';
 
   function _emscripten_alcGetStringiSOFT(deviceId, param, index) {
       if (!(deviceId in AL.deviceRefCounts)) {
@@ -21141,6 +21645,7 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_emscripten_alcGetStringiSOFT"] = _emscripten_alcGetStringiSOFT;
+  _emscripten_alcGetStringiSOFT.sig = 'iiii';
 
   function _emscripten_alcResetDeviceSOFT(deviceId, pAttrList) {
       if (!(deviceId in AL.deviceRefCounts)) {
@@ -21186,6 +21691,7 @@ var ASM_CONSTS = {
       return 1 /* ALC_TRUE */;
     }
   Module["_emscripten_alcResetDeviceSOFT"] = _emscripten_alcResetDeviceSOFT;
+  _emscripten_alcResetDeviceSOFT.sig = 'iii';
 
   function _alGenBuffers(count, pBufferIds) {
       if (!AL.currentCtx) {
@@ -21209,6 +21715,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGenBuffers"] = _alGenBuffers;
+  _alGenBuffers.sig = 'vii';
 
   function _alDeleteBuffers(count, pBufferIds) {
       if (!AL.currentCtx) {
@@ -21247,6 +21754,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alDeleteBuffers"] = _alDeleteBuffers;
+  _alDeleteBuffers.sig = 'vii';
 
   function _alGenSources(count, pSourceIds) {
       if (!AL.currentCtx) {
@@ -21294,6 +21802,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGenSources"] = _alGenSources;
+  _alGenSources.sig = 'vii';
 
   function _alSourcei(sourceId, param, value) {
       switch (param) {
@@ -21320,6 +21829,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSourcei"] = _alSourcei;
+  _alSourcei.sig = 'viii';
   function _alDeleteSources(count, pSourceIds) {
       if (!AL.currentCtx) {
         return;
@@ -21342,6 +21852,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alDeleteSources"] = _alDeleteSources;
+  _alDeleteSources.sig = 'vii';
 
   function _alGetError() {
       if (!AL.currentCtx) {
@@ -21354,6 +21865,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetError"] = _alGetError;
+  _alGetError.sig = 'i';
 
   function _alIsExtensionPresent(pExtName) {
       name = UTF8ToString(pExtName);
@@ -21361,10 +21873,11 @@ var ASM_CONSTS = {
       return AL.AL_EXTENSIONS[name] ? 1 : 0;
     }
   Module["_alIsExtensionPresent"] = _alIsExtensionPresent;
+  _alIsExtensionPresent.sig = 'ii';
 
   function _emscripten_GetAlProcAddress(
   ) {
-  if (!Module['_emscripten_GetAlProcAddress']) abort("external function 'emscripten_GetAlProcAddress' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['_emscripten_GetAlProcAddress']) abort("external symbol 'emscripten_GetAlProcAddress' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['_emscripten_GetAlProcAddress'].apply(null, arguments);
   }
   function _alGetProcAddress(pProcName) {
@@ -21378,6 +21891,7 @@ var ASM_CONSTS = {
       return _emscripten_GetAlProcAddress(pProcName);
     }
   Module["_alGetProcAddress"] = _alGetProcAddress;
+  _alGetProcAddress.sig = 'vi';
 
   function _alGetEnumValue(pEnumName) {
       if (!AL.currentCtx) {
@@ -21480,6 +21994,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetEnumValue"] = _alGetEnumValue;
+  _alGetEnumValue.sig = 'ii';
 
   function _alGetString(param) {
       if (!AL.currentCtx) {
@@ -21537,6 +22052,7 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_alGetString"] = _alGetString;
+  _alGetString.sig = 'ii';
 
   function _alEnable(param) {
       if (!AL.currentCtx) {
@@ -21553,6 +22069,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alEnable"] = _alEnable;
+  _alEnable.sig = 'vi';
 
   function _alDisable(param) {
       if (!AL.currentCtx) {
@@ -21569,6 +22086,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alDisable"] = _alDisable;
+  _alDisable.sig = 'vi';
 
   function _alIsEnabled(param) {
       if (!AL.currentCtx) {
@@ -21583,6 +22101,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alIsEnabled"] = _alIsEnabled;
+  _alIsEnabled.sig = 'ii';
 
   function _alGetDouble(param) {
       var val = AL.getGlobalParam('alGetDouble', param);
@@ -21601,6 +22120,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetDouble"] = _alGetDouble;
+  _alGetDouble.sig = 'di';
 
   function _alGetDoublev(param, pValues) {
       var val = AL.getGlobalParam('alGetDoublev', param);
@@ -21621,6 +22141,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetDoublev"] = _alGetDoublev;
+  _alGetDoublev.sig = 'vii';
 
   function _alGetFloat(param) {
       var val = AL.getGlobalParam('alGetFloat', param);
@@ -21638,6 +22159,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetFloat"] = _alGetFloat;
+  _alGetFloat.sig = 'fi';
 
   function _alGetFloatv(param, pValues) {
       var val = AL.getGlobalParam('alGetFloatv', param);
@@ -21658,6 +22180,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetFloatv"] = _alGetFloatv;
+  _alGetFloatv.sig = 'vii';
 
   function _alGetInteger(param) {
       var val = AL.getGlobalParam('alGetInteger', param);
@@ -21676,6 +22199,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetInteger"] = _alGetInteger;
+  _alGetInteger.sig = 'ii';
 
   function _alGetIntegerv(param, pValues) {
       var val = AL.getGlobalParam('alGetIntegerv', param);
@@ -21696,6 +22220,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetIntegerv"] = _alGetIntegerv;
+  _alGetIntegerv.sig = 'vii';
 
   function _alGetBoolean(param) {
       var val = AL.getGlobalParam('alGetBoolean', param);
@@ -21714,6 +22239,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetBoolean"] = _alGetBoolean;
+  _alGetBoolean.sig = 'ii';
 
   function _alGetBooleanv(param, pValues) {
       var val = AL.getGlobalParam('alGetBooleanv', param);
@@ -21734,21 +22260,25 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetBooleanv"] = _alGetBooleanv;
+  _alGetBooleanv.sig = 'vii';
 
   function _alDistanceModel(model) {
       AL.setGlobalParam('alDistanceModel', 0xD000 /* AL_DISTANCE_MODEL */, model);
     }
   Module["_alDistanceModel"] = _alDistanceModel;
+  _alDistanceModel.sig = 'vi';
 
   function _alSpeedOfSound(value) {
       AL.setGlobalParam('alSpeedOfSound', 0xC003 /* AL_SPEED_OF_SOUND */, value);
     }
   Module["_alSpeedOfSound"] = _alSpeedOfSound;
+  _alSpeedOfSound.sig = 'vi';
 
   function _alDopplerFactor(value) {
       AL.setGlobalParam('alDopplerFactor', 0xC000 /* AL_DOPPLER_FACTOR */, value);
     }
   Module["_alDopplerFactor"] = _alDopplerFactor;
+  _alDopplerFactor.sig = 'vi';
 
   function _alDopplerVelocity(value) {
       warnOnce('alDopplerVelocity() is deprecated, and only kept for compatibility with OpenAL 1.0. Use alSpeedOfSound() instead.');
@@ -21761,6 +22291,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alDopplerVelocity"] = _alDopplerVelocity;
+  _alDopplerVelocity.sig = 'vi';
 
   function _alGetListenerf(param, pValue) {
       var val = AL.getListenerParam('alGetListenerf', param);
@@ -21782,6 +22313,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetListenerf"] = _alGetListenerf;
+  _alGetListenerf.sig = 'vii';
 
   function _alGetListener3f(param, pValue0, pValue1, pValue2) {
       var val = AL.getListenerParam('alGetListener3f', param);
@@ -21806,6 +22338,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetListener3f"] = _alGetListener3f;
+  _alGetListener3f.sig = 'viiii';
 
   function _alGetListenerfv(param, pValues) {
       var val = AL.getListenerParam('alGetListenerfv', param);
@@ -21838,6 +22371,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetListenerfv"] = _alGetListenerfv;
+  _alGetListenerfv.sig = 'vii';
 
   function _alGetListeneri(param, pValue) {
       var val = AL.getListenerParam('alGetListeneri', param);
@@ -21852,6 +22386,7 @@ var ASM_CONSTS = {
       AL.currentCtx.err = 0xA002 /* AL_INVALID_ENUM */;
     }
   Module["_alGetListeneri"] = _alGetListeneri;
+  _alGetListeneri.sig = 'vii';
 
   function _alGetListener3i(param, pValue0, pValue1, pValue2) {
       var val = AL.getListenerParam('alGetListener3i', param);
@@ -21876,6 +22411,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetListener3i"] = _alGetListener3i;
+  _alGetListener3i.sig = 'viiii';
 
   function _alGetListeneriv(param, pValues) {
       var val = AL.getListenerParam('alGetListeneriv', param);
@@ -21908,6 +22444,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetListeneriv"] = _alGetListeneriv;
+  _alGetListeneriv.sig = 'vii';
 
   function _alListenerf(param, value) {
       switch (param) {
@@ -21920,6 +22457,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alListenerf"] = _alListenerf;
+  _alListenerf.sig = 'vif';
 
   function _alListener3f(param, value0, value1, value2) {
       switch (param) {
@@ -21936,6 +22474,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alListener3f"] = _alListener3f;
+  _alListener3f.sig = 'vifff';
 
   function _alListenerfv(param, pValues) {
       if (!AL.currentCtx) {
@@ -21969,11 +22508,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_alListenerfv"] = _alListenerfv;
+  _alListenerfv.sig = 'vii';
 
   function _alListeneri(param, value) {
       AL.setListenerParam('alListeneri', param, null);
     }
   Module["_alListeneri"] = _alListeneri;
+  _alListeneri.sig = 'vii';
 
   function _alListener3i(param, value0, value1, value2) {
       switch (param) {
@@ -21990,6 +22531,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alListener3i"] = _alListener3i;
+  _alListener3i.sig = 'viiii';
 
   function _alListeneriv(param, pValues) {
       if (!AL.currentCtx) {
@@ -22023,6 +22565,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alListeneriv"] = _alListeneriv;
+  _alListeneriv.sig = 'vii';
 
   function _alIsBuffer(bufferId) {
       if (!AL.currentCtx) {
@@ -22039,6 +22582,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alIsBuffer"] = _alIsBuffer;
+  _alIsBuffer.sig = 'ii';
 
   function _alBufferData(bufferId, format, pData, size, freq) {
       if (!AL.currentCtx) {
@@ -22151,6 +22695,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alBufferData"] = _alBufferData;
+  _alBufferData.sig = 'viiiii';
 
   function _alGetBufferf(bufferId, param, pValue) {
       var val = AL.getBufferParam('alGetBufferf', bufferId, param);
@@ -22165,6 +22710,7 @@ var ASM_CONSTS = {
       AL.currentCtx.err = 0xA002 /* AL_INVALID_ENUM */;
     }
   Module["_alGetBufferf"] = _alGetBufferf;
+  _alGetBufferf.sig = 'viii';
 
   function _alGetBuffer3f(bufferId, param, pValue0, pValue1, pValue2) {
       var val = AL.getBufferParam('alGetBuffer3f', bufferId, param);
@@ -22179,6 +22725,7 @@ var ASM_CONSTS = {
       AL.currentCtx.err = 0xA002 /* AL_INVALID_ENUM */;
     }
   Module["_alGetBuffer3f"] = _alGetBuffer3f;
+  _alGetBuffer3f.sig = 'viiiii';
 
   function _alGetBufferfv(bufferId, param, pValues) {
       var val = AL.getBufferParam('alGetBufferfv', bufferId, param);
@@ -22193,6 +22740,7 @@ var ASM_CONSTS = {
       AL.currentCtx.err = 0xA002 /* AL_INVALID_ENUM */;
     }
   Module["_alGetBufferfv"] = _alGetBufferfv;
+  _alGetBufferfv.sig = 'viii';
 
   function _alGetBufferi(bufferId, param, pValue) {
       var val = AL.getBufferParam('alGetBufferi', bufferId, param);
@@ -22217,6 +22765,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetBufferi"] = _alGetBufferi;
+  _alGetBufferi.sig = 'viii';
 
   function _alGetBuffer3i(bufferId, param, pValue0, pValue1, pValue2) {
       var val = AL.getBufferParam('alGetBuffer3i', bufferId, param);
@@ -22231,6 +22780,7 @@ var ASM_CONSTS = {
       AL.currentCtx.err = 0xA002 /* AL_INVALID_ENUM */;
     }
   Module["_alGetBuffer3i"] = _alGetBuffer3i;
+  _alGetBuffer3i.sig = 'viiiii';
 
   function _alGetBufferiv(bufferId, param, pValues) {
       var val = AL.getBufferParam('alGetBufferiv', bufferId, param);
@@ -22259,16 +22809,19 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetBufferiv"] = _alGetBufferiv;
+  _alGetBufferiv.sig = 'viii';
 
   function _alBufferf(bufferId, param, value) {
       AL.setBufferParam('alBufferf', bufferId, param, null);
     }
   Module["_alBufferf"] = _alBufferf;
+  _alBufferf.sig = 'viif';
 
   function _alBuffer3f(bufferId, param, value0, value1, value2) {
       AL.setBufferParam('alBuffer3f', bufferId, param, null);
     }
   Module["_alBuffer3f"] = _alBuffer3f;
+  _alBuffer3f.sig = 'viifff';
 
   function _alBufferfv(bufferId, param, pValues) {
       if (!AL.currentCtx) {
@@ -22282,16 +22835,19 @@ var ASM_CONSTS = {
       AL.setBufferParam('alBufferfv', bufferId, param, null);
     }
   Module["_alBufferfv"] = _alBufferfv;
+  _alBufferfv.sig = 'viii';
 
   function _alBufferi(bufferId, param, value) {
       AL.setBufferParam('alBufferi', bufferId, param, null);
     }
   Module["_alBufferi"] = _alBufferi;
+  _alBufferi.sig = 'viii';
 
   function _alBuffer3i(bufferId, param, value0, value1, value2) {
       AL.setBufferParam('alBuffer3i', bufferId, param, null);
     }
   Module["_alBuffer3i"] = _alBuffer3i;
+  _alBuffer3i.sig = 'viiiii';
 
   function _alBufferiv(bufferId, param, pValues) {
       if (!AL.currentCtx) {
@@ -22314,6 +22870,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alBufferiv"] = _alBufferiv;
+  _alBufferiv.sig = 'viii';
 
   function _alIsSource(sourceId) {
       if (!AL.currentCtx) {
@@ -22327,6 +22884,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alIsSource"] = _alIsSource;
+  _alIsSource.sig = 'ii';
 
   function _alSourceQueueBuffers(sourceId, count, pBufferIds) {
       if (!AL.currentCtx) {
@@ -22395,6 +22953,7 @@ var ASM_CONSTS = {
       AL.scheduleSourceAudio(src);
     }
   Module["_alSourceQueueBuffers"] = _alSourceQueueBuffers;
+  _alSourceQueueBuffers.sig = 'viii';
 
   function _alSourceUnqueueBuffers(sourceId, count, pBufferIds) {
       if (!AL.currentCtx) {
@@ -22431,6 +22990,7 @@ var ASM_CONSTS = {
       AL.scheduleSourceAudio(src);
     }
   Module["_alSourceUnqueueBuffers"] = _alSourceUnqueueBuffers;
+  _alSourceUnqueueBuffers.sig = 'viii';
 
   function _alSourcePlay(sourceId) {
       if (!AL.currentCtx) {
@@ -22444,6 +23004,7 @@ var ASM_CONSTS = {
       AL.setSourceState(src, 0x1012 /* AL_PLAYING */);
     }
   Module["_alSourcePlay"] = _alSourcePlay;
+  _alSourcePlay.sig = 'vi';
 
   function _alSourcePlayv(count, pSourceIds) {
       if (!AL.currentCtx) {
@@ -22464,6 +23025,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSourcePlayv"] = _alSourcePlayv;
+  _alSourcePlayv.sig = 'vii';
 
   function _alSourceStop(sourceId) {
       if (!AL.currentCtx) {
@@ -22477,6 +23039,7 @@ var ASM_CONSTS = {
       AL.setSourceState(src, 0x1014 /* AL_STOPPED */);
     }
   Module["_alSourceStop"] = _alSourceStop;
+  _alSourceStop.sig = 'vi';
 
   function _alSourceStopv(count, pSourceIds) {
       if (!AL.currentCtx) {
@@ -22497,6 +23060,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSourceStopv"] = _alSourceStopv;
+  _alSourceStopv.sig = 'vii';
 
   function _alSourceRewind(sourceId) {
       if (!AL.currentCtx) {
@@ -22513,6 +23077,7 @@ var ASM_CONSTS = {
       AL.setSourceState(src, 0x1011 /* AL_INITIAL */);
     }
   Module["_alSourceRewind"] = _alSourceRewind;
+  _alSourceRewind.sig = 'vi';
 
   function _alSourceRewindv(count, pSourceIds) {
       if (!AL.currentCtx) {
@@ -22533,6 +23098,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSourceRewindv"] = _alSourceRewindv;
+  _alSourceRewindv.sig = 'vii';
 
   function _alSourcePause(sourceId) {
       if (!AL.currentCtx) {
@@ -22546,6 +23112,7 @@ var ASM_CONSTS = {
       AL.setSourceState(src, 0x1013 /* AL_PAUSED */);
     }
   Module["_alSourcePause"] = _alSourcePause;
+  _alSourcePause.sig = 'vi';
 
   function _alSourcePausev(count, pSourceIds) {
       if (!AL.currentCtx) {
@@ -22566,6 +23133,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSourcePausev"] = _alSourcePausev;
+  _alSourcePausev.sig = 'vii';
 
   function _alGetSourcef(sourceId, param, pValue) {
       var val = AL.getSourceParam('alGetSourcef', sourceId, param);
@@ -22600,6 +23168,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetSourcef"] = _alGetSourcef;
+  _alGetSourcef.sig = 'viii';
 
   function _alGetSource3f(sourceId, param, pValue0, pValue1, pValue2) {
       var val = AL.getSourceParam('alGetSource3f', sourceId, param);
@@ -22625,6 +23194,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetSource3f"] = _alGetSource3f;
+  _alGetSource3f.sig = 'viiiii';
 
   function _alGetSourcefv(sourceId, param, pValues) {
       var val = AL.getSourceParam('alGetSourcefv', sourceId, param);
@@ -22666,6 +23236,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetSourcefv"] = _alGetSourcefv;
+  _alGetSourcefv.sig = 'viii';
 
   function _alGetSourcei(sourceId, param, pValue) {
       var val = AL.getSourceParam('alGetSourcei', sourceId, param);
@@ -22705,6 +23276,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetSourcei"] = _alGetSourcei;
+  _alGetSourcei.sig = 'viii';
 
   function _alGetSource3i(source, param, pValue0, pValue1, pValue2) {
       var val = AL.getSourceParam('alGetSource3i', sourceId, param);
@@ -22730,6 +23302,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetSource3i"] = _alGetSource3i;
+  _alGetSource3i.sig = 'viiiii';
 
   function _alGetSourceiv(sourceId, param, pValues) {
       var val = AL.getSourceParam('alGetSourceiv', sourceId, param);
@@ -22776,6 +23349,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alGetSourceiv"] = _alGetSourceiv;
+  _alGetSourceiv.sig = 'viii';
 
   function _alSourcef(sourceId, param, value) {
       switch (param) {
@@ -22801,6 +23375,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSourcef"] = _alSourcef;
+  _alSourcef.sig = 'viif';
 
   function _alSource3f(sourceId, param, value0, value1, value2) {
       switch (param) {
@@ -22818,6 +23393,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSource3f"] = _alSource3f;
+  _alSource3f.sig = 'viifff';
 
   function _alSourcefv(sourceId, param, pValues) {
       if (!AL.currentCtx) {
@@ -22860,6 +23436,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSourcefv"] = _alSourcefv;
+  _alSourcefv.sig = 'viii';
 
 
   function _alSource3i(sourceId, param, value0, value1, value2) {
@@ -22878,6 +23455,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSource3i"] = _alSource3i;
+  _alSource3i.sig = 'viiiii';
 
   function _alSourceiv(source, param, pValues) {
       if (!AL.currentCtx) {
@@ -22921,11 +23499,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_alSourceiv"] = _alSourceiv;
+  _alSourceiv.sig = 'viii';
 
   function _SDL_GetTicks() {
       return (Date.now() - SDL.startTime)|0;
     }
   Module["_SDL_GetTicks"] = _SDL_GetTicks;
+  _SDL_GetTicks.sig = 'i';
   
   function _SDL_LockSurface(surf) {
       var surfData = SDL.surfaces[surf];
@@ -22994,6 +23574,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_LockSurface"] = _SDL_LockSurface;
+  _SDL_LockSurface.sig = 'ii';
   
   /** @suppress{missingProperties} */
   function SDL_ttfContext() { return SDL.ttfContext}
@@ -23960,6 +24541,7 @@ var ASM_CONSTS = {
       return SDL.version;
     }
   Module["_SDL_Linked_Version"] = _SDL_Linked_Version;
+  _SDL_Linked_Version.sig = 'i';
 
   /** @param{number=} initFlags */
   function _SDL_Init(initFlags) {
@@ -24006,6 +24588,7 @@ var ASM_CONSTS = {
       return 0; // success
     }
   Module["_SDL_Init"] = _SDL_Init;
+  _SDL_Init.sig = 'ii';
 
   function _SDL_WasInit() {
       if (SDL.startTime === null) {
@@ -24014,6 +24597,7 @@ var ASM_CONSTS = {
       return 1;
     }
   Module["_SDL_WasInit"] = _SDL_WasInit;
+  _SDL_WasInit.sig = 'i';
 
   function _SDL_GetVideoInfo() {
       // %struct.SDL_VideoInfo = type { i32, i32, %struct.SDL_PixelFormat*, i32, i32 } - 5 fields of quantum size
@@ -24026,6 +24610,7 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_SDL_GetVideoInfo"] = _SDL_GetVideoInfo;
+  _SDL_GetVideoInfo.sig = 'i';
 
   function _SDL_ListModes(format, flags) {
       return -1; // -1 == all modes are ok. TODO
@@ -24064,6 +24649,7 @@ var ASM_CONSTS = {
       return buf;
     }
   Module["_SDL_VideoDriverName"] = _SDL_VideoDriverName;
+  _SDL_VideoDriverName.sig = 'iii';
   function _SDL_AudioDriverName(buf, max_size) {
       return _SDL_VideoDriverName(buf, max_size);
     }
@@ -24113,11 +24699,13 @@ var ASM_CONSTS = {
       return SDL.screen;
     }
   Module["_SDL_SetVideoMode"] = _SDL_SetVideoMode;
+  _SDL_SetVideoMode.sig = 'iiiii';
 
   function _SDL_GetVideoSurface() {
       return SDL.screen;
     }
   Module["_SDL_GetVideoSurface"] = _SDL_GetVideoSurface;
+  _SDL_GetVideoSurface.sig = 'i';
 
   function _SDL_AudioQuit() {
       for (var i = 0; i < SDL.numChannels; ++i) {
@@ -24130,6 +24718,7 @@ var ASM_CONSTS = {
       SDL.music.audio = undefined;
     }
   Module["_SDL_AudioQuit"] = _SDL_AudioQuit;
+  _SDL_AudioQuit.sig = 'v';
 
   function _SDL_VideoQuit() {
       out('SDL_VideoQuit called (and ignored)');
@@ -24253,6 +24842,7 @@ var ASM_CONSTS = {
       // Note that we save the image, so future writes are fast. But, memory is not yet released
     }
   Module["_SDL_UnlockSurface"] = _SDL_UnlockSurface;
+  _SDL_UnlockSurface.sig = 'vi';
 
   function _SDL_Flip(surf) {
       // We actually do this in Unlock, since the screen surface has as its canvas
@@ -24285,6 +24875,7 @@ var ASM_CONSTS = {
       icon = icon && UTF8ToString(icon);
     }
   Module["_SDL_WM_SetCaption"] = _SDL_WM_SetCaption;
+  _SDL_WM_SetCaption.sig = 'vii';
 
   function _SDL_EnableKeyRepeat(delay, interval) {
       // TODO
@@ -24299,6 +24890,7 @@ var ASM_CONSTS = {
       return SDL.keyboardState;
     }
   Module["_SDL_GetKeyboardState"] = _SDL_GetKeyboardState;
+  _SDL_GetKeyboardState.sig = 'ii';
 
   function _SDL_GetKeyState() {
       return _SDL_GetKeyboardState();
@@ -24312,11 +24904,13 @@ var ASM_CONSTS = {
       return SDL.keyName;
     }
   Module["_SDL_GetKeyName"] = _SDL_GetKeyName;
+  _SDL_GetKeyName.sig = 'ii';
 
   function _SDL_GetModState() {
       return SDL.modState;
     }
   Module["_SDL_GetModState"] = _SDL_GetModState;
+  _SDL_GetModState.sig = 'i';
 
   function _SDL_GetMouseState(x, y) {
       if (x) HEAP32[((x)>>2)]=Browser.mouseX;
@@ -24324,6 +24918,7 @@ var ASM_CONSTS = {
       return SDL.buttonState;
     }
   Module["_SDL_GetMouseState"] = _SDL_GetMouseState;
+  _SDL_GetMouseState.sig = 'iii';
 
   function _SDL_WarpMouse(x, y) {
       return; // TODO: implement this in a non-buggy way. Need to keep relative mouse movements correct after calling this
@@ -24337,6 +24932,7 @@ var ASM_CONSTS = {
       */
     }
   Module["_SDL_WarpMouse"] = _SDL_WarpMouse;
+  _SDL_WarpMouse.sig = 'vii';
 
   function _SDL_ShowCursor(toggle) {
       switch (toggle) {
@@ -24361,6 +24957,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_ShowCursor"] = _SDL_ShowCursor;
+  _SDL_ShowCursor.sig = 'ii';
 
   function _SDL_GetError() {
       if (!SDL.errorMessage) {
@@ -24369,6 +24966,7 @@ var ASM_CONSTS = {
       return SDL.errorMessage;
     }
   Module["_SDL_GetError"] = _SDL_GetError;
+  _SDL_GetError.sig = 'i';
 
   function _SDL_SetError() {}
   Module["_SDL_SetError"] = _SDL_SetError;
@@ -24377,16 +24975,19 @@ var ASM_CONSTS = {
       return _malloc(size);
     }
   Module["_SDL_malloc"] = _SDL_malloc;
+  _SDL_malloc.sig = 'ii';
 
   function _SDL_free(ptr) {
       _free(ptr);
     }
   Module["_SDL_free"] = _SDL_free;
+  _SDL_free.sig = 'vi';
 
   function _SDL_CreateRGBSurface(flags, width, height, depth, rmask, gmask, bmask, amask) {
       return SDL.makeSurface(width, height, flags, false, 'CreateRGBSurface', rmask, gmask, bmask, amask);
     }
   Module["_SDL_CreateRGBSurface"] = _SDL_CreateRGBSurface;
+  _SDL_CreateRGBSurface.sig = 'iiiiiiiii';
 
   function _SDL_CreateRGBSurfaceFrom(pixels, width, height, depth, pitch, rmask, gmask, bmask, amask) {
       var surf = SDL.makeSurface(width, height, 0, false, 'CreateRGBSurfaceFrom', rmask, gmask, bmask, amask);
@@ -24416,6 +25017,7 @@ var ASM_CONSTS = {
       return surf;
     }
   Module["_SDL_CreateRGBSurfaceFrom"] = _SDL_CreateRGBSurfaceFrom;
+  _SDL_CreateRGBSurfaceFrom.sig = 'iiiiiiiiii';
 
   /** @param {number=} format @param {number=} flags */
   function _SDL_ConvertSurface(surf, format, flags) {
@@ -24433,6 +25035,7 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_SDL_ConvertSurface"] = _SDL_ConvertSurface;
+  _SDL_ConvertSurface.sig = 'iiii';
 
   function _SDL_DisplayFormatAlpha(surf) {
       return _SDL_ConvertSurface(surf);
@@ -24443,16 +25046,19 @@ var ASM_CONSTS = {
       if (surf) SDL.freeSurface(surf);
     }
   Module["_SDL_FreeSurface"] = _SDL_FreeSurface;
+  _SDL_FreeSurface.sig = 'vi';
 
   function _SDL_UpperBlit(src, srcrect, dst, dstrect) {
       return SDL.blitSurface(src, srcrect, dst, dstrect, false);
     }
   Module["_SDL_UpperBlit"] = _SDL_UpperBlit;
+  _SDL_UpperBlit.sig = 'iiiii';
 
   function _SDL_UpperBlitScaled(src, srcrect, dst, dstrect) {
       return SDL.blitSurface(src, srcrect, dst, dstrect, true);
     }
   Module["_SDL_UpperBlitScaled"] = _SDL_UpperBlitScaled;
+  _SDL_UpperBlitScaled.sig = 'iiiii';
 
   function _SDL_LowerBlit(a0,a1,a2,a3
   ) {
@@ -24474,6 +25080,7 @@ var ASM_CONSTS = {
       SDL.updateRect(rect, r);
     }
   Module["_SDL_GetClipRect"] = _SDL_GetClipRect;
+  _SDL_GetClipRect.sig = 'vii';
 
   function _SDL_SetClipRect(surf, rect) {
       var surfData = SDL.surfaces[surf];
@@ -24485,6 +25092,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_SetClipRect"] = _SDL_SetClipRect;
+  _SDL_SetClipRect.sig = 'vii';
 
   function _SDL_FillRect(surf, rect, color) {
       var surfData = SDL.surfaces[surf];
@@ -24514,16 +25122,19 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_FillRect"] = _SDL_FillRect;
+  _SDL_FillRect.sig = 'iiii';
 
   function _SDL_BlitSurface(src, srcrect, dst, dstrect) {
       return SDL.blitSurface(src, srcrect, dst, dstrect, false);
     }
   Module["_SDL_BlitSurface"] = _SDL_BlitSurface;
+  _SDL_BlitSurface.sig = 'iiiii';
 
   function _SDL_BlitScaled(src, srcrect, dst, dstrect) {
       return SDL.blitSurface(src, srcrect, dst, dstrect, true);
     }
   Module["_SDL_BlitScaled"] = _SDL_BlitScaled;
+  _SDL_BlitScaled.sig = 'iiiii';
 
   function _zoomSurface(src, x, y, smooth) {
       var srcData = SDL.surfaces[src];
@@ -24570,6 +25181,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_SetAlpha"] = _SDL_SetAlpha;
+  _SDL_SetAlpha.sig = 'iiii';
 
   function _SDL_SetColorKey(surf, flag, key) {
       // SetColorKey assigns one color to be rendered as transparent. I don't
@@ -24585,6 +25197,7 @@ var ASM_CONSTS = {
       return SDL.pollEvent(ptr);
     }
   Module["_SDL_PollEvent"] = _SDL_PollEvent;
+  _SDL_PollEvent.sig = 'ii';
 
   function _SDL_PushEvent(ptr) {
       var copy = _malloc(28);
@@ -24593,6 +25206,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_PushEvent"] = _SDL_PushEvent;
+  _SDL_PushEvent.sig = 'ii';
 
   function _SDL_PeepEvents(events, requestedEventCount, action, from, to) {
       switch(action) {
@@ -24624,6 +25238,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_PeepEvents"] = _SDL_PeepEvents;
+  _SDL_PeepEvents.sig = 'iiiiii';
 
   function _SDL_PumpEvents(){
       SDL.events.forEach(function(event) {
@@ -24631,6 +25246,7 @@ var ASM_CONSTS = {
       });
     }
   Module["_SDL_PumpEvents"] = _SDL_PumpEvents;
+  _SDL_PumpEvents.sig = 'v';
 
   function _emscripten_SDL_SetEventHandler(handler, userdata) {
       SDL.eventHandler = handler;
@@ -24640,6 +25256,7 @@ var ASM_CONSTS = {
       if (!SDL.eventHandlerTemp) SDL.eventHandlerTemp = _malloc(28);
     }
   Module["_emscripten_SDL_SetEventHandler"] = _emscripten_SDL_SetEventHandler;
+  _emscripten_SDL_SetEventHandler.sig = 'vii';
 
   function _SDL_SetColors(surf, colors, firstColor, nColors) {
       var surfData = SDL.surfaces[surf];
@@ -24665,6 +25282,7 @@ var ASM_CONSTS = {
       return 1;
     }
   Module["_SDL_SetColors"] = _SDL_SetColors;
+  _SDL_SetColors.sig = 'iiiii';
 
   function _SDL_SetPalette(surf, flags, colors, firstColor, nColors) {
       return _SDL_SetColors(surf, colors, firstColor, nColors);
@@ -24677,6 +25295,7 @@ var ASM_CONSTS = {
       return r&0xff|(g&0xff)<<8|(b&0xff)<<16|0xff000000;
     }
   Module["_SDL_MapRGB"] = _SDL_MapRGB;
+  _SDL_MapRGB.sig = 'iiiii';
 
   function _SDL_MapRGBA(fmt, r, g, b, a) {
       SDL.checkPixelFormat(fmt);
@@ -24684,6 +25303,7 @@ var ASM_CONSTS = {
       return r&0xff|(g&0xff)<<8|(b&0xff)<<16|(a&0xff)<<24;
     }
   Module["_SDL_MapRGBA"] = _SDL_MapRGBA;
+  _SDL_MapRGBA.sig = 'iiiiii';
 
   function _SDL_GetRGB(pixel, fmt, r, g, b) {
       SDL.checkPixelFormat(fmt);
@@ -24699,6 +25319,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_GetRGB"] = _SDL_GetRGB;
+  _SDL_GetRGB.sig = 'viiiii';
 
   function _SDL_GetRGBA(pixel, fmt, r, g, b, a) {
       SDL.checkPixelFormat(fmt);
@@ -24717,6 +25338,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_GetRGBA"] = _SDL_GetRGBA;
+  _SDL_GetRGBA.sig = 'viiiiii';
 
   function _SDL_GetAppState() {
       var state = 0;
@@ -24732,6 +25354,7 @@ var ASM_CONSTS = {
       return state;
     }
   Module["_SDL_GetAppState"] = _SDL_GetAppState;
+  _SDL_GetAppState.sig = 'i';
 
   function _SDL_WM_GrabInput() {}
   Module["_SDL_WM_GrabInput"] = _SDL_WM_GrabInput;
@@ -24748,6 +25371,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_WM_ToggleFullScreen"] = _SDL_WM_ToggleFullScreen;
+  _SDL_WM_ToggleFullScreen.sig = 'ii';
 
   function _IMG_Init(flags) {
       return flags; // We support JPG, PNG, TIF because browsers do
@@ -24761,6 +25385,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_FreeRW"] = _SDL_FreeRW;
+  _SDL_FreeRW.sig = 'vi';
   function _IMG_Load_RW(rwopsID, freeSrc) {
       try {
         // stb_image integration support
@@ -24893,6 +25518,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_IMG_Load_RW"] = _IMG_Load_RW;
+  _IMG_Load_RW.sig = 'iii';
 
   /** @param {number=} mode */
   function _SDL_RWFromFile(_name, mode) {
@@ -24902,12 +25528,14 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_SDL_RWFromFile"] = _SDL_RWFromFile;
+  _SDL_RWFromFile.sig = 'iii';
   function _IMG_Load(filename){
       var rwops = _SDL_RWFromFile(filename);
       var result = _IMG_Load_RW(rwops, 1);
       return result;
     }
   Module["_IMG_Load"] = _IMG_Load;
+  _IMG_Load.sig = 'ii';
   function _SDL_LoadBMP(a0
   ) {
   return _IMG_Load(a0);
@@ -25132,6 +25760,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_OpenAudio"] = _SDL_OpenAudio;
+  _SDL_OpenAudio.sig = 'iii';
 
   function _SDL_PauseAudio(pauseOn) {
       if (!SDL.audio) {
@@ -25151,6 +25780,7 @@ var ASM_CONSTS = {
       SDL.audio.paused = pauseOn;
     }
   Module["_SDL_PauseAudio"] = _SDL_PauseAudio;
+  _SDL_PauseAudio.sig = 'vi';
 
   function _SDL_CloseAudio() {
       if (SDL.audio) {
@@ -25165,6 +25795,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_CloseAudio"] = _SDL_CloseAudio;
+  _SDL_CloseAudio.sig = 'v';
 
   function _SDL_LockAudio() {}
   Module["_SDL_LockAudio"] = _SDL_LockAudio;
@@ -25206,11 +25837,13 @@ var ASM_CONSTS = {
       SDL.textInput = true;
     }
   Module["_SDL_StartTextInput"] = _SDL_StartTextInput;
+  _SDL_StartTextInput.sig = 'v';
 
   function _SDL_StopTextInput() {
       SDL.textInput = false;
     }
   Module["_SDL_StopTextInput"] = _SDL_StopTextInput;
+  _SDL_StopTextInput.sig = 'v';
 
   function _Mix_Init(flags) {
       if (!flags) return 0;
@@ -25233,6 +25866,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_Mix_OpenAudio"] = _Mix_OpenAudio;
+  _Mix_OpenAudio.sig = 'iiiii';
 
   function _Mix_CloseAudio(
   ) {
@@ -25245,11 +25879,13 @@ var ASM_CONSTS = {
       return num;
     }
   Module["_Mix_AllocateChannels"] = _Mix_AllocateChannels;
+  _Mix_AllocateChannels.sig = 'ii';
 
   function _Mix_ChannelFinished(func) {
       SDL.channelFinished = func;
     }
   Module["_Mix_ChannelFinished"] = _Mix_ChannelFinished;
+  _Mix_ChannelFinished.sig = 'vi';
 
   function _Mix_Volume(channel, volume) {
       if (channel == -1) {
@@ -25261,6 +25897,7 @@ var ASM_CONSTS = {
       return SDL.setGetVolume(SDL.channels[channel], volume);
     }
   Module["_Mix_Volume"] = _Mix_Volume;
+  _Mix_Volume.sig = 'iii';
 
   function _Mix_SetPanning(channel, left, right) {
       // SDL API uses [0-255], while PannerNode has an (x, y, z) position.
@@ -25275,6 +25912,7 @@ var ASM_CONSTS = {
       return 1;
     }
   Module["_Mix_SetPanning"] = _Mix_SetPanning;
+  _Mix_SetPanning.sig = 'iiii';
 
   /** @param {number|boolean=} freesrc */
   function _Mix_LoadWAV_RW(rwopsID, freesrc) {
@@ -25359,6 +25997,7 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_Mix_LoadWAV_RW"] = _Mix_LoadWAV_RW;
+  _Mix_LoadWAV_RW.sig = 'iii';
 
   function _Mix_LoadWAV(filename) {
       var rwops = _SDL_RWFromFile(filename);
@@ -25367,6 +26006,7 @@ var ASM_CONSTS = {
       return result;
     }
   Module["_Mix_LoadWAV"] = _Mix_LoadWAV;
+  _Mix_LoadWAV.sig = 'ii';
 
   function _Mix_QuickLoad_RAW(mem, len) {
       var audio;
@@ -25400,16 +26040,19 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_Mix_QuickLoad_RAW"] = _Mix_QuickLoad_RAW;
+  _Mix_QuickLoad_RAW.sig = 'iii';
 
   function _Mix_FreeChunk(id) {
       SDL.audios[id] = null;
     }
   Module["_Mix_FreeChunk"] = _Mix_FreeChunk;
+  _Mix_FreeChunk.sig = 'vi';
 
   function _Mix_ReserveChannels(num) {
       SDL.channelMinimumNumber = num;
     }
   Module["_Mix_ReserveChannels"] = _Mix_ReserveChannels;
+  _Mix_ReserveChannels.sig = 'ii';
 
   function _Mix_PlayChannel(channel, id, loops) {
       // TODO: handle fixed amount of N loops. Currently loops either 0 or infinite times.
@@ -25463,6 +26106,7 @@ var ASM_CONSTS = {
       return channel;
     }
   Module["_Mix_PlayChannel"] = _Mix_PlayChannel;
+  _Mix_PlayChannel.sig = 'iiii';
 
   function _Mix_PlayChannelTimed(a0,a1,a2
   ) {
@@ -25494,6 +26138,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_Mix_HaltChannel"] = _Mix_HaltChannel;
+  _Mix_HaltChannel.sig = 'ii';
 
   function _Mix_HaltMusic() {
       var audio = SDL.music.audio;
@@ -25509,6 +26154,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_Mix_HaltMusic"] = _Mix_HaltMusic;
+  _Mix_HaltMusic.sig = 'i';
   function _Mix_HookMusicFinished(func) {
       SDL.hookMusicFinished = func;
       if (SDL.music.audio) { // ensure the callback will be called, if a music is already playing
@@ -25516,11 +26162,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_Mix_HookMusicFinished"] = _Mix_HookMusicFinished;
+  _Mix_HookMusicFinished.sig = 'vi';
 
   function _Mix_VolumeMusic(volume) {
       return SDL.setGetVolume(SDL.music, volume);
     }
   Module["_Mix_VolumeMusic"] = _Mix_VolumeMusic;
+  _Mix_VolumeMusic.sig = 'ii';
 
   /** @param {number|boolean=} a1 */
   function _Mix_LoadMUS_RW(a0,a1
@@ -25536,6 +26184,7 @@ var ASM_CONSTS = {
       return result;
     }
   Module["_Mix_LoadMUS"] = _Mix_LoadMUS;
+  _Mix_LoadMUS.sig = 'ii';
 
   function _Mix_FreeMusic(a0
   ) {
@@ -25570,18 +26219,21 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_Mix_PlayMusic"] = _Mix_PlayMusic;
+  _Mix_PlayMusic.sig = 'iii';
 
   function _Mix_PauseMusic() {
       var audio = SDL.music.audio;
       if (audio) audio.pause();
     }
   Module["_Mix_PauseMusic"] = _Mix_PauseMusic;
+  _Mix_PauseMusic.sig = 'v';
 
   function _Mix_ResumeMusic() {
       var audio = SDL.music.audio;
       if (audio) audio.play();
     }
   Module["_Mix_ResumeMusic"] = _Mix_ResumeMusic;
+  _Mix_ResumeMusic.sig = 'v';
 
 
   function _Mix_FadeInMusicPos(a0,a1
@@ -25600,6 +26252,7 @@ var ASM_CONSTS = {
       return (SDL.music.audio && !SDL.music.audio.paused) ? 1 : 0;
     }
   Module["_Mix_PlayingMusic"] = _Mix_PlayingMusic;
+  _Mix_PlayingMusic.sig = 'i';
 
   function _Mix_Playing(channel) {
       if (channel === -1) {
@@ -25616,6 +26269,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_Mix_Playing"] = _Mix_Playing;
+  _Mix_Playing.sig = 'ii';
 
   function _Mix_Pause(channel) {
       if (channel === -1) {
@@ -25632,6 +26286,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_Mix_Pause"] = _Mix_Pause;
+  _Mix_Pause.sig = 'vi';
 
   function _Mix_Paused(channel) {
       if (channel === -1) {
@@ -25648,11 +26303,13 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_Mix_Paused"] = _Mix_Paused;
+  _Mix_Paused.sig = 'ii';
 
   function _Mix_PausedMusic() {
       return (SDL.music.audio && SDL.music.audio.paused) ? 1 : 0;
     }
   Module["_Mix_PausedMusic"] = _Mix_PausedMusic;
+  _Mix_PausedMusic.sig = 'i';
 
   function _Mix_Resume(channel) {
       if (channel === -1) {
@@ -25665,6 +26322,7 @@ var ASM_CONSTS = {
       if (info && info.audio) info.audio.play();
     }
   Module["_Mix_Resume"] = _Mix_Resume;
+  _Mix_Resume.sig = 'vi';
 
   function _TTF_Init() {
       // OffscreenCanvas 2D is faster than Canvas for text operations, so we use
@@ -25680,6 +26338,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_TTF_Init"] = _TTF_Init;
+  _TTF_Init.sig = 'i';
 
   function _TTF_OpenFont(filename, size) {
       filename = PATH.normalize(UTF8ToString(filename));
@@ -25691,11 +26350,13 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_TTF_OpenFont"] = _TTF_OpenFont;
+  _TTF_OpenFont.sig = 'iii';
 
   function _TTF_CloseFont(font) {
       SDL.fonts[font] = null;
     }
   Module["_TTF_CloseFont"] = _TTF_CloseFont;
+  _TTF_CloseFont.sig = 'vi';
 
   function _TTF_RenderText_Solid(font, text, color) {
       // XXX the font and color are ignored
@@ -25719,6 +26380,7 @@ var ASM_CONSTS = {
       return surf;
     }
   Module["_TTF_RenderText_Solid"] = _TTF_RenderText_Solid;
+  _TTF_RenderText_Solid.sig = 'iiii';
 
   function _TTF_RenderText_Blended(a0,a1,a2
   ) {
@@ -25749,6 +26411,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_TTF_SizeText"] = _TTF_SizeText;
+  _TTF_SizeText.sig = 'iiiii';
   function _TTF_SizeUTF8(a0,a1,a2,a3
   ) {
   return _TTF_SizeText(a0,a1,a2,a3);
@@ -25777,24 +26440,28 @@ var ASM_CONSTS = {
       }
     }
   Module["_TTF_GlyphMetrics"] = _TTF_GlyphMetrics;
+  _TTF_GlyphMetrics.sig = 'iiiiiiii';
 
   function _TTF_FontAscent(font) {
       var fontData = SDL.fonts[font];
       return (fontData.size*0.98)|0; // XXX
     }
   Module["_TTF_FontAscent"] = _TTF_FontAscent;
+  _TTF_FontAscent.sig = 'ii';
 
   function _TTF_FontDescent(font) {
       var fontData = SDL.fonts[font];
       return (fontData.size*0.02)|0; // XXX
     }
   Module["_TTF_FontDescent"] = _TTF_FontDescent;
+  _TTF_FontDescent.sig = 'ii';
 
   function _TTF_FontHeight(font) {
       var fontData = SDL.fonts[font];
       return fontData.size;
     }
   Module["_TTF_FontHeight"] = _TTF_FontHeight;
+  _TTF_FontHeight.sig = 'ii';
 
   function _TTF_FontLineSkip(a0
   ) {
@@ -25925,6 +26592,7 @@ var ASM_CONSTS = {
       SDL.glAttributes[attr] = value;
     }
   Module["_SDL_GL_SetAttribute"] = _SDL_GL_SetAttribute;
+  _SDL_GL_SetAttribute.sig = 'iii';
 
   function _SDL_GL_GetAttribute(attr, value) {
       if (!(attr in SDL.glAttributes)) {
@@ -25936,10 +26604,11 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_GL_GetAttribute"] = _SDL_GL_GetAttribute;
+  _SDL_GL_GetAttribute.sig = 'iii';
 
   function _emscripten_GetProcAddress(
   ) {
-  if (!Module['_emscripten_GetProcAddress']) abort("external function 'emscripten_GetProcAddress' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
+  if (!Module['_emscripten_GetProcAddress']) abort("external symbol 'emscripten_GetProcAddress' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");
   return Module['_emscripten_GetProcAddress'].apply(null, arguments);
   }
   function _SDL_GL_GetProcAddress(name_) {
@@ -25951,11 +26620,13 @@ var ASM_CONSTS = {
       if (Browser.doSwapBuffers) Browser.doSwapBuffers(); // in workers, this is used to send out a buffered frame
     }
   Module["_SDL_GL_SwapBuffers"] = _SDL_GL_SwapBuffers;
+  _SDL_GL_SwapBuffers.sig = 'v';
 
   function _SDL_GL_ExtensionSupported(extension) {
       return Module.ctx.getExtension(extension) | 0;
     }
   Module["_SDL_GL_ExtensionSupported"] = _SDL_GL_ExtensionSupported;
+  _SDL_GL_ExtensionSupported.sig = 'ii';
 
   function _SDL_DestroyWindow(window) {}
   Module["_SDL_DestroyWindow"] = _SDL_DestroyWindow;
@@ -25965,6 +26636,7 @@ var ASM_CONSTS = {
 
   function _SDL_GetWindowFlags() {}
   Module["_SDL_GetWindowFlags"] = _SDL_GetWindowFlags;
+  _SDL_GetWindowFlags.sig = 'iii';
 
   function _SDL_GL_SwapWindow(window) {}
   Module["_SDL_GL_SwapWindow"] = _SDL_GL_SwapWindow;
@@ -25980,6 +26652,7 @@ var ASM_CONSTS = {
       else return 0;
     }
   Module["_SDL_GL_GetSwapInterval"] = _SDL_GL_GetSwapInterval;
+  _SDL_GL_GetSwapInterval.sig = 'ii';
 
   function _SDL_GL_SetSwapInterval(state) {
       _emscripten_set_main_loop_timing(1/*EM_TIMING_RAF*/, state);
@@ -25990,6 +26663,7 @@ var ASM_CONSTS = {
       if (title) document.title = UTF8ToString(title);
     }
   Module["_SDL_SetWindowTitle"] = _SDL_SetWindowTitle;
+  _SDL_SetWindowTitle.sig = 'vii';
 
   function _SDL_GetWindowSize(window, width, height){
       var w = Module['canvas'].width;
@@ -25998,6 +26672,7 @@ var ASM_CONSTS = {
       if (height) HEAP32[((height)>>2)]=h;
     }
   Module["_SDL_GetWindowSize"] = _SDL_GetWindowSize;
+  _SDL_GetWindowSize.sig = 'viii';
 
   function _SDL_LogSetOutputFunction(callback, userdata) {}
   Module["_SDL_LogSetOutputFunction"] = _SDL_LogSetOutputFunction;
@@ -26011,21 +26686,10 @@ var ASM_CONSTS = {
       }
     }
   Module["_SDL_SetWindowFullscreen"] = _SDL_SetWindowFullscreen;
+  _SDL_SetWindowFullscreen.sig = 'iii';
 
   function _SDL_ClearError() {}
   Module["_SDL_ClearError"] = _SDL_ClearError;
-
-  function _SDL_getenv(a0
-  ) {
-  return _getenv(a0);
-  }
-  Module["_SDL_getenv"] = _SDL_getenv;
-
-  function _SDL_putenv(a0
-  ) {
-  return _putenv(a0);
-  }
-  Module["_SDL_putenv"] = _SDL_putenv;
 
   function _SDL_SetGamma(r, g, b) {
       return -1;
@@ -26047,6 +26711,7 @@ var ASM_CONSTS = {
       return count;
     }
   Module["_SDL_NumJoysticks"] = _SDL_NumJoysticks;
+  _SDL_NumJoysticks.sig = 'i';
 
   function _SDL_JoystickName(deviceIndex) {
       var gamepad = SDL.getGamepad(deviceIndex);
@@ -26060,6 +26725,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_JoystickName"] = _SDL_JoystickName;
+  _SDL_JoystickName.sig = 'ii';
 
   function _SDL_JoystickOpen(deviceIndex) {
       var gamepad = SDL.getGamepad(deviceIndex);
@@ -26072,11 +26738,13 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_JoystickOpen"] = _SDL_JoystickOpen;
+  _SDL_JoystickOpen.sig = 'ii';
 
   function _SDL_JoystickOpened(deviceIndex) {
       return SDL.lastJoystickState.hasOwnProperty(deviceIndex+1) ? 1 : 0;
     }
   Module["_SDL_JoystickOpened"] = _SDL_JoystickOpened;
+  _SDL_JoystickOpened.sig = 'ii';
 
   function _SDL_JoystickIndex(joystick) {
       // joystick pointers are simply the deviceIndex+1.
@@ -26092,6 +26760,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_JoystickNumAxes"] = _SDL_JoystickNumAxes;
+  _SDL_JoystickNumAxes.sig = 'ii';
 
   function _SDL_JoystickNumBalls(joystick) { return 0; }
   Module["_SDL_JoystickNumBalls"] = _SDL_JoystickNumBalls;
@@ -26107,11 +26776,13 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_JoystickNumButtons"] = _SDL_JoystickNumButtons;
+  _SDL_JoystickNumButtons.sig = 'ii';
 
   function _SDL_JoystickUpdate() {
       SDL.queryJoysticks();
     }
   Module["_SDL_JoystickUpdate"] = _SDL_JoystickUpdate;
+  _SDL_JoystickUpdate.sig = 'v';
 
   function _SDL_JoystickEventState(state) {
       if (state < 0) {
@@ -26121,6 +26792,7 @@ var ASM_CONSTS = {
       return SDL.joystickEventState = state;
     }
   Module["_SDL_JoystickEventState"] = _SDL_JoystickEventState;
+  _SDL_JoystickEventState.sig = 'ii';
 
   function _SDL_JoystickGetAxis(joystick, axis) {
       var gamepad = SDL.getGamepad(joystick - 1);
@@ -26130,6 +26802,7 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_JoystickGetAxis"] = _SDL_JoystickGetAxis;
+  _SDL_JoystickGetAxis.sig = 'iii';
 
   function _SDL_JoystickGetHat(joystick, hat) { return 0; }
   Module["_SDL_JoystickGetHat"] = _SDL_JoystickGetHat;
@@ -26145,11 +26818,13 @@ var ASM_CONSTS = {
       return 0;
     }
   Module["_SDL_JoystickGetButton"] = _SDL_JoystickGetButton;
+  _SDL_JoystickGetButton.sig = 'iii';
 
   function _SDL_JoystickClose(joystick) {
       delete SDL.lastJoystickState[joystick];
     }
   Module["_SDL_JoystickClose"] = _SDL_JoystickClose;
+  _SDL_JoystickClose.sig = 'vi';
 
   function _SDL_InitSubSystem(flags) { return 0 }
   Module["_SDL_InitSubSystem"] = _SDL_InitSubSystem;
@@ -26160,6 +26835,7 @@ var ASM_CONSTS = {
       return id;
     }
   Module["_SDL_RWFromConstMem"] = _SDL_RWFromConstMem;
+  _SDL_RWFromConstMem.sig = 'iii';
 
   function _SDL_RWFromMem(a0,a1
   ) {
@@ -26186,6 +26862,7 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_SDL_EnableUNICODE"] = _SDL_EnableUNICODE;
+  _SDL_EnableUNICODE.sig = 'ii';
 
   function _SDL_AddTimer(interval, callback, param) {
       return window.setTimeout(function() {
@@ -26193,12 +26870,14 @@ var ASM_CONSTS = {
       }, interval);
     }
   Module["_SDL_AddTimer"] = _SDL_AddTimer;
+  _SDL_AddTimer.sig = 'iiii';
 
   function _SDL_RemoveTimer(id) {
       window.clearTimeout(id);
       return true;
     }
   Module["_SDL_RemoveTimer"] = _SDL_RemoveTimer;
+  _SDL_RemoveTimer.sig = 'ii';
 
   function _SDL_CreateThread() {
       throw 'SDL threads cannot be supported in the web platform because they assume shared state. See emscripten_create_worker etc. for a message-passing concurrency model that does let you run code in another thread.'
@@ -26289,6 +26968,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_glutPostRedisplay"] = _glutPostRedisplay;
+  _glutPostRedisplay.sig = 'v';
   var GLUT={initTime:null,idleFunc:null,displayFunc:null,keyboardFunc:null,keyboardUpFunc:null,specialFunc:null,specialUpFunc:null,reshapeFunc:null,motionFunc:null,passiveMotionFunc:null,mouseFunc:null,buttons:0,modifiers:0,initWindowWidth:256,initWindowHeight:256,initDisplayMode:18,windowX:0,windowY:0,windowWidth:0,windowHeight:0,requestedAnimationFrame:false,saveModifiers:function(event) {
         GLUT.modifiers = 0;
         if (event['shiftKey'])
@@ -26544,6 +27224,7 @@ var ASM_CONSTS = {
 
   function _glutGetModifiers() { return GLUT.modifiers; }
   Module["_glutGetModifiers"] = _glutGetModifiers;
+  _glutGetModifiers.sig = 'i';
 
   function _glutInit(argcp, argv) {
       // Ignore arguments
@@ -26602,17 +27283,20 @@ var ASM_CONSTS = {
       });
     }
   Module["_glutInit"] = _glutInit;
+  _glutInit.sig = 'vii';
 
   function _glutInitWindowSize(width, height) {
       Browser.setCanvasSize( GLUT.initWindowWidth = width,
                              GLUT.initWindowHeight = height );
     }
   Module["_glutInitWindowSize"] = _glutInitWindowSize;
+  _glutInitWindowSize.sig = 'vii';
 
   function _glutInitWindowPosition(x, y) {
       // Ignore for now
     }
   Module["_glutInitWindowPosition"] = _glutInitWindowPosition;
+  _glutInitWindowPosition.sig = 'vii';
 
   function _glutGet(type) {
       switch (type) {
@@ -26667,56 +27351,67 @@ var ASM_CONSTS = {
       GLUT.idleFunc = func;
     }
   Module["_glutIdleFunc"] = _glutIdleFunc;
+  _glutIdleFunc.sig = 'vi';
 
   function _glutTimerFunc(msec, func, value) {
       Browser.safeSetTimeout(function() { wasmTable.get(func)(value); }, msec);
     }
   Module["_glutTimerFunc"] = _glutTimerFunc;
+  _glutTimerFunc.sig = 'viii';
 
   function _glutDisplayFunc(func) {
       GLUT.displayFunc = func;
     }
   Module["_glutDisplayFunc"] = _glutDisplayFunc;
+  _glutDisplayFunc.sig = 'vi';
 
   function _glutKeyboardFunc(func) {
       GLUT.keyboardFunc = func;
     }
   Module["_glutKeyboardFunc"] = _glutKeyboardFunc;
+  _glutKeyboardFunc.sig = 'vi';
 
   function _glutKeyboardUpFunc(func) {
       GLUT.keyboardUpFunc = func;
     }
   Module["_glutKeyboardUpFunc"] = _glutKeyboardUpFunc;
+  _glutKeyboardUpFunc.sig = 'vi';
 
   function _glutSpecialFunc(func) {
       GLUT.specialFunc = func;
     }
   Module["_glutSpecialFunc"] = _glutSpecialFunc;
+  _glutSpecialFunc.sig = 'vi';
 
   function _glutSpecialUpFunc(func) {
       GLUT.specialUpFunc = func;
     }
   Module["_glutSpecialUpFunc"] = _glutSpecialUpFunc;
+  _glutSpecialUpFunc.sig = 'vi';
 
   function _glutReshapeFunc(func) {
       GLUT.reshapeFunc = func;
     }
   Module["_glutReshapeFunc"] = _glutReshapeFunc;
+  _glutReshapeFunc.sig = 'vi';
 
   function _glutMotionFunc(func) {
       GLUT.motionFunc = func;
     }
   Module["_glutMotionFunc"] = _glutMotionFunc;
+  _glutMotionFunc.sig = 'vi';
 
   function _glutPassiveMotionFunc(func) {
       GLUT.passiveMotionFunc = func;
     }
   Module["_glutPassiveMotionFunc"] = _glutPassiveMotionFunc;
+  _glutPassiveMotionFunc.sig = 'vi';
 
   function _glutMouseFunc(func) {
       GLUT.mouseFunc = func;
     }
   Module["_glutMouseFunc"] = _glutMouseFunc;
+  _glutMouseFunc.sig = 'vi';
 
   function _glutSetCursor(cursor) {
       var cursorStyle = 'auto';
@@ -26793,6 +27488,7 @@ var ASM_CONSTS = {
       Module['canvas'].style.cursor = cursorStyle;
     }
   Module["_glutSetCursor"] = _glutSetCursor;
+  _glutSetCursor.sig = 'vi';
 
   function _glutCreateWindow(name) {
       var contextAttributes = {
@@ -26805,12 +27501,14 @@ var ASM_CONSTS = {
       return Module.ctx ? 1 /* a new GLUT window ID for the created context */ : 0 /* failure */;
     }
   Module["_glutCreateWindow"] = _glutCreateWindow;
+  _glutCreateWindow.sig = 'ii';
 
   function _glutDestroyWindow(name) {
       Module.ctx = Browser.destroyContext(Module['canvas'], true, true);
       return 1;
     }
   Module["_glutDestroyWindow"] = _glutDestroyWindow;
+  _glutDestroyWindow.sig = 'ii';
 
   function _glutReshapeWindow(width, height) {
       Browser.exitFullscreen();
@@ -26822,6 +27520,7 @@ var ASM_CONSTS = {
       _glutPostRedisplay();
     }
   Module["_glutReshapeWindow"] = _glutReshapeWindow;
+  _glutReshapeWindow.sig = 'vi';
 
   function _glutPositionWindow(x, y) {
       Browser.exitFullscreen();
@@ -26829,6 +27528,7 @@ var ASM_CONSTS = {
       _glutPostRedisplay();
     }
   Module["_glutPositionWindow"] = _glutPositionWindow;
+  _glutPositionWindow.sig = 'vii';
 
   function _glutFullScreen() {
       GLUT.windowX = 0; // TODO
@@ -26841,14 +27541,17 @@ var ASM_CONSTS = {
       Browser.requestFullscreen(/*lockPointer=*/false, /*resizeCanvas=*/false);
     }
   Module["_glutFullScreen"] = _glutFullScreen;
+  _glutFullScreen.sig = 'v';
 
   function _glutInitDisplayMode(mode) {
       GLUT.initDisplayMode = mode;
     }
   Module["_glutInitDisplayMode"] = _glutInitDisplayMode;
+  _glutInitDisplayMode.sig = 'vi';
 
   function _glutSwapBuffers() {}
   Module["_glutSwapBuffers"] = _glutSwapBuffers;
+  _glutSwapBuffers.sig = 'v';
 
 
   function _glutMainLoop() {
@@ -26857,6 +27560,7 @@ var ASM_CONSTS = {
       throw 'unwind';
     }
   Module["_glutMainLoop"] = _glutMainLoop;
+  _glutMainLoop.sig = 'v';
 
   function _XOpenDisplay() {
       return 1; // We support 1 display, the canvas
@@ -26960,6 +27664,7 @@ var ASM_CONSTS = {
   //      return 0; // EGL_NO_DISPLAY
     }
   Module["_eglGetDisplay"] = _eglGetDisplay;
+  _eglGetDisplay.sig = 'ii';
 
   function _eglInitialize(display, majorVersion, minorVersion) {
       if (display == 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -26979,6 +27684,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_eglInitialize"] = _eglInitialize;
+  _eglInitialize.sig = 'iiii';
 
   function _eglTerminate(display) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -26993,16 +27699,19 @@ var ASM_CONSTS = {
       return 1;
     }
   Module["_eglTerminate"] = _eglTerminate;
+  _eglTerminate.sig = 'ii';
 
   function _eglGetConfigs(display, configs, config_size, numConfigs) {
       return EGL.chooseConfig(display, 0, configs, config_size, numConfigs);
     }
   Module["_eglGetConfigs"] = _eglGetConfigs;
+  _eglGetConfigs.sig = 'iiiii';
 
   function _eglChooseConfig(display, attrib_list, configs, config_size, numConfigs) {
       return EGL.chooseConfig(display, attrib_list, configs, config_size, numConfigs);
     }
   Module["_eglChooseConfig"] = _eglChooseConfig;
+  _eglChooseConfig.sig = 'iiiiii';
 
   function _eglGetConfigAttrib(display, config, attribute, value) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -27119,6 +27828,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_eglGetConfigAttrib"] = _eglGetConfigAttrib;
+  _eglGetConfigAttrib.sig = 'iiiii';
 
   function _eglCreateWindowSurface(display, config, win, attrib_list) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -27137,6 +27847,7 @@ var ASM_CONSTS = {
       return 62006; /* Magic ID for Emscripten 'default surface' */
     }
   Module["_eglCreateWindowSurface"] = _eglCreateWindowSurface;
+  _eglCreateWindowSurface.sig = 'iiiii';
 
   function _eglDestroySurface(display, surface) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -27157,6 +27868,7 @@ var ASM_CONSTS = {
       return 1; /* Magic ID for Emscripten 'default surface' */
     }
   Module["_eglDestroySurface"] = _eglDestroySurface;
+  _eglDestroySurface.sig = 'iii';
 
   function _eglCreateContext(display, config, hmm, contextAttribs) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -27207,6 +27919,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_eglCreateContext"] = _eglCreateContext;
+  _eglCreateContext.sig = 'iiiii';
 
   function _eglDestroyContext(display, context) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -27226,6 +27939,7 @@ var ASM_CONSTS = {
       return 1 /* EGL_TRUE */;
     }
   Module["_eglDestroyContext"] = _eglDestroyContext;
+  _eglDestroyContext.sig = 'iii';
 
   function _eglQuerySurface(display, surface, attribute, value) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -27291,6 +28005,7 @@ var ASM_CONSTS = {
       }
     }
   Module["_eglQuerySurface"] = _eglQuerySurface;
+  _eglQuerySurface.sig = 'iiiii';
 
   function _eglQueryContext(display, context, attribute, value) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -27329,11 +28044,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_eglQueryContext"] = _eglQueryContext;
+  _eglQueryContext.sig = 'iiiii';
 
   function _eglGetError() {
       return EGL.errorCode;
     }
   Module["_eglGetError"] = _eglGetError;
+  _eglGetError.sig = 'i';
 
   function _eglQueryString(display, name) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -27357,6 +28074,7 @@ var ASM_CONSTS = {
       return ret;
     }
   Module["_eglQueryString"] = _eglQueryString;
+  _eglQueryString.sig = 'iii';
 
   function _eglBindAPI(api) {
       if (api == 0x30A0 /* EGL_OPENGL_ES_API */) {
@@ -27368,24 +28086,28 @@ var ASM_CONSTS = {
       }
     }
   Module["_eglBindAPI"] = _eglBindAPI;
+  _eglBindAPI.sig = 'ii';
 
   function _eglQueryAPI() {
       EGL.setErrorCode(0x3000 /* EGL_SUCCESS */);
       return 0x30A0; // EGL_OPENGL_ES_API
     }
   Module["_eglQueryAPI"] = _eglQueryAPI;
+  _eglQueryAPI.sig = 'i';
 
   function _eglWaitClient() {
       EGL.setErrorCode(0x3000 /* EGL_SUCCESS */);
       return 1;
     }
   Module["_eglWaitClient"] = _eglWaitClient;
+  _eglWaitClient.sig = 'i';
 
   function _eglWaitNative(nativeEngineId) {
       EGL.setErrorCode(0x3000 /* EGL_SUCCESS */);
       return 1;
     }
   Module["_eglWaitNative"] = _eglWaitNative;
+  _eglWaitNative.sig = 'ii';
 
   function _eglWaitGL(
   ) {
@@ -27405,6 +28127,7 @@ var ASM_CONSTS = {
       return 1;
     }
   Module["_eglSwapInterval"] = _eglSwapInterval;
+  _eglSwapInterval.sig = 'iii';
 
   function _eglMakeCurrent(display, draw, read, context) {
       if (display != 62000 /* Magic ID for Emscripten 'default display' */) {
@@ -27430,11 +28153,13 @@ var ASM_CONSTS = {
       return 1 /* EGL_TRUE */;
     }
   Module["_eglMakeCurrent"] = _eglMakeCurrent;
+  _eglMakeCurrent.sig = 'iiiii';
 
   function _eglGetCurrentContext() {
       return EGL.currentContext;
     }
   Module["_eglGetCurrentContext"] = _eglGetCurrentContext;
+  _eglGetCurrentContext.sig = 'i';
 
   function _eglGetCurrentSurface(readdraw) {
       if (readdraw == 0x305A /* EGL_READ */) {
@@ -27447,11 +28172,13 @@ var ASM_CONSTS = {
       }
     }
   Module["_eglGetCurrentSurface"] = _eglGetCurrentSurface;
+  _eglGetCurrentSurface.sig = 'ii';
 
   function _eglGetCurrentDisplay() {
       return EGL.currentContext ? 62000 /* Magic ID for Emscripten 'default display' */ : 0;
     }
   Module["_eglGetCurrentDisplay"] = _eglGetCurrentDisplay;
+  _eglGetCurrentDisplay.sig = 'i';
 
   function _eglSwapBuffers() {
   
@@ -27472,11 +28199,13 @@ var ASM_CONSTS = {
       return 0 /* EGL_FALSE */;
     }
   Module["_eglSwapBuffers"] = _eglSwapBuffers;
+  _eglSwapBuffers.sig = 'iii';
 
   function _eglGetProcAddress(name_) {
       return _emscripten_GetProcAddress(name_);
     }
   Module["_eglGetProcAddress"] = _eglGetProcAddress;
+  _eglGetProcAddress.sig = 'ii';
 
   function _eglReleaseThread() {
       // Equivalent to eglMakeCurrent with EGL_NO_CONTEXT and EGL_NO_SURFACE.
@@ -27490,6 +28219,7 @@ var ASM_CONSTS = {
       return 1 /* EGL_TRUE */;
     }
   Module["_eglReleaseThread"] = _eglReleaseThread;
+  _eglReleaseThread.sig = 'i';
 
   var GLFW={WindowFromId:function(id) {
         if (id <= 0 || !GLFW.windows) return null;
@@ -27826,7 +28556,7 @@ var ASM_CONSTS = {
                   buttonsCount: gamepad.buttons.length,
                   axesCount: gamepad.axes.length,
                   buttons: allocate(new Array(gamepad.buttons.length), ALLOC_NORMAL),
-                  axes: allocate(new Array(gamepad.axes.length*4), 'float', ALLOC_NORMAL)
+                  axes: allocate(new Array(gamepad.axes.length*4), ALLOC_NORMAL)
                 };
   
                 if (GLFW.joystickFunc) {
@@ -28119,18 +28849,23 @@ var ASM_CONSTS = {
         for (i = 0; i < GLFW.windows.length && GLFW.windows[i] == null; i++) {
           // no-op
         }
+        var useWebGL = GLFW.hints[0x00022001] > 0; // Use WebGL when we are told to based on GLFW_CLIENT_API
         if (i == GLFW.windows.length) {
-          var contextAttributes = {
-            antialias: (GLFW.hints[0x0002100D] > 1), // GLFW_SAMPLES
-            depth: (GLFW.hints[0x00021005] > 0),     // GLFW_DEPTH_BITS
-            stencil: (GLFW.hints[0x00021006] > 0),   // GLFW_STENCIL_BITS
-            alpha: (GLFW.hints[0x00021004] > 0)      // GLFW_ALPHA_BITS
+          if (useWebGL) {
+            var contextAttributes = {
+              antialias: (GLFW.hints[0x0002100D] > 1), // GLFW_SAMPLES
+              depth: (GLFW.hints[0x00021005] > 0),     // GLFW_DEPTH_BITS
+              stencil: (GLFW.hints[0x00021006] > 0),   // GLFW_STENCIL_BITS
+              alpha: (GLFW.hints[0x00021004] > 0)      // GLFW_ALPHA_BITS
+            }
+            Module.ctx = Browser.createContext(Module['canvas'], true, true, contextAttributes);
+          } else {
+            Browser.init();
           }
-          Module.ctx = Browser.createContext(Module['canvas'], true, true, contextAttributes);
         }
   
         // If context creation failed, do not return a valid window
-        if (!Module.ctx) return 0;
+        if (!Module.ctx && useWebGL) return 0;
   
         // Get non alive id
         var win = new GLFW_Window(id, width, height, title, monitor, share);
@@ -29020,240 +29755,6 @@ var ASM_CONSTS = {
   Module["_emscripten_is_main_browser_thread"] = _emscripten_is_main_browser_thread;
 
 
-  function _pthread_mutexattr_setschedparam() {}
-  Module["_pthread_mutexattr_setschedparam"] = _pthread_mutexattr_setschedparam;
-
-  function _pthread_mutexattr_setprotocol() {}
-  Module["_pthread_mutexattr_setprotocol"] = _pthread_mutexattr_setprotocol;
-
-
-
-  function _pthread_mutexattr_setpshared(attr, pshared) {
-      // XXX implement if/when getpshared is required
-      return 0;
-    }
-  Module["_pthread_mutexattr_setpshared"] = _pthread_mutexattr_setpshared;
-
-
-
-
-  function _pthread_condattr_init() { return 0; }
-  Module["_pthread_condattr_init"] = _pthread_condattr_init;
-
-  function _pthread_condattr_destroy() { return 0; }
-  Module["_pthread_condattr_destroy"] = _pthread_condattr_destroy;
-
-  function _pthread_condattr_setclock() { return 0; }
-  Module["_pthread_condattr_setclock"] = _pthread_condattr_setclock;
-
-  function _pthread_condattr_setpshared() { return 0; }
-  Module["_pthread_condattr_setpshared"] = _pthread_condattr_setpshared;
-
-  function _pthread_condattr_getclock() { return 0; }
-  Module["_pthread_condattr_getclock"] = _pthread_condattr_getclock;
-
-  function _pthread_condattr_getpshared() { return 0; }
-  Module["_pthread_condattr_getpshared"] = _pthread_condattr_getpshared;
-
-  function _pthread_attr_init(attr) {
-      /* int pthread_attr_init(pthread_attr_t *attr); */
-      //FIXME: should allocate a pthread_attr_t
-      return 0;
-    }
-  Module["_pthread_attr_init"] = _pthread_attr_init;
-
-  function _pthread_getattr_np(thread, attr) {
-      /* int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr); */
-      //FIXME: should fill in attributes of the given thread in pthread_attr_t
-      return 0;
-    }
-  Module["_pthread_getattr_np"] = _pthread_getattr_np;
-
-  function _pthread_attr_destroy(attr) {
-      /* int pthread_attr_destroy(pthread_attr_t *attr); */
-      //FIXME: should destroy the pthread_attr_t struct
-      return 0;
-    }
-  Module["_pthread_attr_destroy"] = _pthread_attr_destroy;
-
-  function _pthread_attr_getstack(attr, stackaddr, stacksize) {
-      /* int pthread_attr_getstack(const pthread_attr_t *restrict attr,
-         void **restrict stackaddr, size_t *restrict stacksize); */
-      /*FIXME: assumes that there is only one thread, and that attr is the
-        current thread*/
-      HEAP32[((stackaddr)>>2)]=STACK_BASE;
-      HEAP32[((stacksize)>>2)]=TOTAL_STACK;
-      return 0;
-    }
-  Module["_pthread_attr_getstack"] = _pthread_attr_getstack;
-
-  function _pthread_attr_getdetachstate(attr, detachstate) {
-      /* int pthread_attr_getdetachstate(const pthread_attr_t *attr, int *detachstate); */
-      return 0;
-    }
-  Module["_pthread_attr_getdetachstate"] = _pthread_attr_getdetachstate;
-
-
-  function _pthread_setcanceltype() { return 0; }
-  Module["_pthread_setcanceltype"] = _pthread_setcanceltype;
-
-
-
-
-  function _pthread_rwlock_init() { return 0; }
-  Module["_pthread_rwlock_init"] = _pthread_rwlock_init;
-
-  function _pthread_rwlock_destroy() { return 0; }
-  Module["_pthread_rwlock_destroy"] = _pthread_rwlock_destroy;
-
-  function _pthread_rwlock_rdlock() { return 0; }
-  Module["_pthread_rwlock_rdlock"] = _pthread_rwlock_rdlock;
-
-  function _pthread_rwlock_tryrdlock() { return 0; }
-  Module["_pthread_rwlock_tryrdlock"] = _pthread_rwlock_tryrdlock;
-
-  function _pthread_rwlock_timedrdlock() { return 0; }
-  Module["_pthread_rwlock_timedrdlock"] = _pthread_rwlock_timedrdlock;
-
-  function _pthread_rwlock_wrlock() { return 0; }
-  Module["_pthread_rwlock_wrlock"] = _pthread_rwlock_wrlock;
-
-  function _pthread_rwlock_trywrlock() { return 0; }
-  Module["_pthread_rwlock_trywrlock"] = _pthread_rwlock_trywrlock;
-
-  function _pthread_rwlock_timedwrlock() { return 0; }
-  Module["_pthread_rwlock_timedwrlock"] = _pthread_rwlock_timedwrlock;
-
-  function _pthread_rwlock_unlock() { return 0; }
-  Module["_pthread_rwlock_unlock"] = _pthread_rwlock_unlock;
-
-  function _pthread_rwlockattr_init() { return 0; }
-  Module["_pthread_rwlockattr_init"] = _pthread_rwlockattr_init;
-
-  function _pthread_rwlockattr_destroy() { return 0; }
-  Module["_pthread_rwlockattr_destroy"] = _pthread_rwlockattr_destroy;
-
-  function _pthread_rwlockattr_setpshared() { return 0; }
-  Module["_pthread_rwlockattr_setpshared"] = _pthread_rwlockattr_setpshared;
-
-  function _pthread_rwlockattr_getpshared() { return 0; }
-  Module["_pthread_rwlockattr_getpshared"] = _pthread_rwlockattr_getpshared;
-
-  function _pthread_spin_init() { return 0; }
-  Module["_pthread_spin_init"] = _pthread_spin_init;
-
-  function _pthread_spin_destroy() { return 0; }
-  Module["_pthread_spin_destroy"] = _pthread_spin_destroy;
-
-  function _pthread_spin_lock() { return 0; }
-  Module["_pthread_spin_lock"] = _pthread_spin_lock;
-
-  function _pthread_spin_trylock() { return 0; }
-  Module["_pthread_spin_trylock"] = _pthread_spin_trylock;
-
-  function _pthread_spin_unlock() { return 0; }
-  Module["_pthread_spin_unlock"] = _pthread_spin_unlock;
-
-  function _pthread_attr_setdetachstate() {}
-  Module["_pthread_attr_setdetachstate"] = _pthread_attr_setdetachstate;
-
-  function _pthread_attr_setschedparam() {}
-  Module["_pthread_attr_setschedparam"] = _pthread_attr_setschedparam;
-
-  function _pthread_attr_setstacksize() {}
-  Module["_pthread_attr_setstacksize"] = _pthread_attr_setstacksize;
-
-  function _pthread_create() {
-      return 6;
-    }
-  Module["_pthread_create"] = _pthread_create;
-
-  function _pthread_cancel() {}
-  Module["_pthread_cancel"] = _pthread_cancel;
-
-  function _pthread_exit(status) {
-      _exit(status);
-    }
-  Module["_pthread_exit"] = _pthread_exit;
-
-
-
-
-  function _sem_init() {}
-  Module["_sem_init"] = _sem_init;
-
-  function _sem_post() {}
-  Module["_sem_post"] = _sem_post;
-
-  function _sem_wait() {}
-  Module["_sem_wait"] = _sem_wait;
-
-  function _sem_trywait() {}
-  Module["_sem_trywait"] = _sem_trywait;
-
-  function _sem_destroy() {}
-  Module["_sem_destroy"] = _sem_destroy;
-
-  function _emscripten_main_browser_thread_id() { return _pthread_self(); }
-  Module["_emscripten_main_browser_thread_id"] = _emscripten_main_browser_thread_id;
-
-
-
-  function _llvm_memory_barrier(){}
-  Module["_llvm_memory_barrier"] = _llvm_memory_barrier;
-
-  function _llvm_atomic_load_add_i32_p0i32(ptr, delta) {
-      var ret = HEAP32[((ptr)>>2)];
-      HEAP32[((ptr)>>2)]=ret+delta;
-      return ret;
-    }
-  Module["_llvm_atomic_load_add_i32_p0i32"] = _llvm_atomic_load_add_i32_p0i32;
-
-  function _i64Add(a, b, c, d) {
-      /*
-        x = a + b*2^32
-        y = c + d*2^32
-        result = l + h*2^32
-      */
-      a = a|0; b = b|0; c = c|0; d = d|0;
-      var l = 0, h = 0;
-      l = (a + c)>>>0;
-      h = (b + d + (((l>>>0) < (a>>>0))|0))>>>0; // Add carry from low word to high word on overflow.
-      return ((setTempRet0((h) | 0),l|0)|0);
-    }
-  Module["_i64Add"] = _i64Add;
-
-  function _i64Subtract(a, b, c, d) {
-      a = a|0; b = b|0; c = c|0; d = d|0;
-      var l = 0, h = 0;
-      l = (a - c)>>>0;
-      h = (b - d)>>>0;
-      h = (b - d - (((c>>>0) > (a>>>0))|0))>>>0; // Borrow one from high word to low word on underflow.
-      return ((setTempRet0((h) | 0),l|0)|0);
-    }
-  Module["_i64Subtract"] = _i64Subtract;
-
-  function ___atomic_is_lock_free(size, ptr) {
-      return size <= 4 && (size & (size-1)) == 0 && (ptr&(size-1)) == 0;
-    }
-  Module["___atomic_is_lock_free"] = ___atomic_is_lock_free;
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -29374,7 +29875,7 @@ function intArrayToString(array) {
 
 
 
-__ATINIT__.push({ func: function() { ___assign_got_enties() } }, { func: function() { ___wasm_call_ctors() } });
+__ATINIT__.push({ func: function() { ___wasm_call_ctors() } });
 var asmLibraryArg = {
   "Add": _Add,
   "_Unwind_GetIP": __Unwind_GetIP,
@@ -29391,6 +29892,7 @@ var asmLibraryArg = {
   "__map_file": ___map_file,
   "__memory_base": 1024,
   "__posix_spawnx": ___posix_spawnx,
+  "__pthread_once": ___pthread_once,
   "__stack_pointer": __stack_pointer,
   "__sys__newselect": ___sys__newselect,
   "__sys_access": ___sys_access,
@@ -29456,13 +29958,8 @@ var asmLibraryArg = {
   "__sys_pipe": ___sys_pipe,
   "__sys_pipe2": ___sys_pipe2,
   "__sys_poll": ___sys_poll,
-  "__sys_pread64": ___sys_pread64,
-  "__sys_preadv": ___sys_preadv,
   "__sys_prlimit64": ___sys_prlimit64,
   "__sys_pselect6": ___sys_pselect6,
-  "__sys_pwrite64": ___sys_pwrite64,
-  "__sys_pwritev": ___sys_pwritev,
-  "__sys_read": ___sys_read,
   "__sys_readlink": ___sys_readlink,
   "__sys_readlinkat": ___sys_readlinkat,
   "__sys_recvmmsg": ___sys_recvmmsg,
@@ -29490,41 +29987,36 @@ var asmLibraryArg = {
   "__sys_utimensat": ___sys_utimensat,
   "__sys_wait4": ___sys_wait4,
   "__table_base": 1,
-  "__wait": ___wait,
   "_exit": __exit,
   "abort": _abort,
   "clock_gettime": _clock_gettime,
   "emscripten_memcpy_big": _emscripten_memcpy_big,
   "emscripten_resize_heap": _emscripten_resize_heap,
-  "emscripten_stack_get_end": _emscripten_stack_get_end,
+  "emscripten_thread_sleep": _emscripten_thread_sleep,
   "environ_get": _environ_get,
   "environ_sizes_get": _environ_sizes_get,
   "execve": _execve,
   "exit": _exit,
   "fd_close": _fd_close,
   "fd_fdstat_get": _fd_fdstat_get,
+  "fd_pread": _fd_pread,
+  "fd_pwrite": _fd_pwrite,
   "fd_read": _fd_read,
   "fd_seek": _fd_seek,
   "fd_sync": _fd_sync,
   "fd_write": _fd_write,
   "fork": _fork,
-  "g$__heap_base": _g$__heap_base,
   "getTempRet0": getTempRet0,
   "getentropy": _getentropy,
   "getnameinfo": _getnameinfo,
   "gmtime_r": _gmtime_r,
   "inet_addr": _inet_addr,
   "memory": wasmMemory,
-  "nanosleep": _nanosleep,
   "pathconf": _pathconf,
   "pthread_cleanup_pop": _pthread_cleanup_pop,
   "pthread_cleanup_push": _pthread_cleanup_push,
-  "pthread_detach": _pthread_detach,
+  "pthread_create": _pthread_create,
   "pthread_join": _pthread_join,
-  "pthread_mutexattr_destroy": _pthread_mutexattr_destroy,
-  "pthread_mutexattr_init": _pthread_mutexattr_init,
-  "pthread_mutexattr_settype": _pthread_mutexattr_settype,
-  "pthread_setcancelstate": _pthread_setcancelstate,
   "pthread_sigmask": _pthread_sigmask,
   "setTempRet0": setTempRet0,
   "setitimer": _setitimer,
@@ -29537,9 +30029,6 @@ var asmLibraryArg = {
 var asm = createWasm();
 /** @type {function(...*):?} */
 var ___wasm_call_ctors = Module["___wasm_call_ctors"] = createExportWrapper("__wasm_call_ctors");
-
-/** @type {function(...*):?} */
-var ___wasm_apply_relocs = Module["___wasm_apply_relocs"] = createExportWrapper("__wasm_apply_relocs");
 
 /** @type {function(...*):?} */
 var ___original_main = Module["___original_main"] = createExportWrapper("__original_main");
@@ -30295,7 +30784,7 @@ var ___ctype_b_loc = Module["___ctype_b_loc"] = createExportWrapper("__ctype_b_l
 var ___ctype_get_mb_cur_max = Module["___ctype_get_mb_cur_max"] = createExportWrapper("__ctype_get_mb_cur_max");
 
 /** @type {function(...*):?} */
-var _pthread_self = Module["_pthread_self"] = createExportWrapper("pthread_self");
+var ___pthread_self = Module["___pthread_self"] = createExportWrapper("__pthread_self");
 
 /** @type {function(...*):?} */
 var ___ctype_tolower_loc = Module["___ctype_tolower_loc"] = createExportWrapper("__ctype_tolower_loc");
@@ -31295,6 +31784,9 @@ var _ffsll = Module["_ffsll"] = createExportWrapper("ffsll");
 
 /** @type {function(...*):?} */
 var _fmtmsg = Module["_fmtmsg"] = createExportWrapper("fmtmsg");
+
+/** @type {function(...*):?} */
+var _pthread_setcancelstate = Module["_pthread_setcancelstate"] = createExportWrapper("pthread_setcancelstate");
 
 /** @type {function(...*):?} */
 var _dprintf = Module["_dprintf"] = createExportWrapper("dprintf");
@@ -32392,6 +32884,9 @@ var _fileno_unlocked = Module["_fileno_unlocked"] = createExportWrapper("fileno_
 var _ftrylockfile = Module["_ftrylockfile"] = createExportWrapper("ftrylockfile");
 
 /** @type {function(...*):?} */
+var ___wait = Module["___wait"] = createExportWrapper("__wait");
+
+/** @type {function(...*):?} */
 var _fmemopen = Module["_fmemopen"] = createExportWrapper("fmemopen");
 
 /** @type {function(...*):?} */
@@ -33304,6 +33799,9 @@ var _setuid = Module["_setuid"] = createExportWrapper("setuid");
 var _sleep = Module["_sleep"] = createExportWrapper("sleep");
 
 /** @type {function(...*):?} */
+var _nanosleep = Module["_nanosleep"] = createExportWrapper("nanosleep");
+
+/** @type {function(...*):?} */
 var _symlink = Module["_symlink"] = createExportWrapper("symlink");
 
 /** @type {function(...*):?} */
@@ -33335,6 +33833,9 @@ var _ualarm = Module["_ualarm"] = createExportWrapper("ualarm");
 
 /** @type {function(...*):?} */
 var _unlinkat = Module["_unlinkat"] = createExportWrapper("unlinkat");
+
+/** @type {function(...*):?} */
+var _usleep = Module["_usleep"] = createExportWrapper("usleep");
 
 /** @type {function(...*):?} */
 var _writev = Module["_writev"] = createExportWrapper("writev");
@@ -33407,6 +33908,397 @@ var __get_daylight = Module["__get_daylight"] = createExportWrapper("_get_daylig
 
 /** @type {function(...*):?} */
 var __get_timezone = Module["__get_timezone"] = createExportWrapper("_get_timezone");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_exchange_u8 = Module["_emscripten_atomic_exchange_u8"] = createExportWrapper("emscripten_atomic_exchange_u8");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_exchange_u16 = Module["_emscripten_atomic_exchange_u16"] = createExportWrapper("emscripten_atomic_exchange_u16");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_exchange_u32 = Module["_emscripten_atomic_exchange_u32"] = createExportWrapper("emscripten_atomic_exchange_u32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_exchange_u64 = Module["_emscripten_atomic_exchange_u64"] = createExportWrapper("emscripten_atomic_exchange_u64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_cas_u8 = Module["_emscripten_atomic_cas_u8"] = createExportWrapper("emscripten_atomic_cas_u8");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_cas_u16 = Module["_emscripten_atomic_cas_u16"] = createExportWrapper("emscripten_atomic_cas_u16");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_cas_u32 = Module["_emscripten_atomic_cas_u32"] = createExportWrapper("emscripten_atomic_cas_u32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_cas_u64 = Module["_emscripten_atomic_cas_u64"] = createExportWrapper("emscripten_atomic_cas_u64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_load_u8 = Module["_emscripten_atomic_load_u8"] = createExportWrapper("emscripten_atomic_load_u8");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_load_u16 = Module["_emscripten_atomic_load_u16"] = createExportWrapper("emscripten_atomic_load_u16");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_load_u32 = Module["_emscripten_atomic_load_u32"] = createExportWrapper("emscripten_atomic_load_u32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_load_f32 = Module["_emscripten_atomic_load_f32"] = createExportWrapper("emscripten_atomic_load_f32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_load_u64 = Module["_emscripten_atomic_load_u64"] = createExportWrapper("emscripten_atomic_load_u64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_load_f64 = Module["_emscripten_atomic_load_f64"] = createExportWrapper("emscripten_atomic_load_f64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_store_u8 = Module["_emscripten_atomic_store_u8"] = createExportWrapper("emscripten_atomic_store_u8");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_store_u16 = Module["_emscripten_atomic_store_u16"] = createExportWrapper("emscripten_atomic_store_u16");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_store_u32 = Module["_emscripten_atomic_store_u32"] = createExportWrapper("emscripten_atomic_store_u32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_store_f32 = Module["_emscripten_atomic_store_f32"] = createExportWrapper("emscripten_atomic_store_f32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_store_u64 = Module["_emscripten_atomic_store_u64"] = createExportWrapper("emscripten_atomic_store_u64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_store_f64 = Module["_emscripten_atomic_store_f64"] = createExportWrapper("emscripten_atomic_store_f64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_fence = Module["_emscripten_atomic_fence"] = createExportWrapper("emscripten_atomic_fence");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_or_u8 = Module["_emscripten_atomic_or_u8"] = createExportWrapper("emscripten_atomic_or_u8");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_add_u8 = Module["_emscripten_atomic_add_u8"] = createExportWrapper("emscripten_atomic_add_u8");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_add_u16 = Module["_emscripten_atomic_add_u16"] = createExportWrapper("emscripten_atomic_add_u16");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_add_u32 = Module["_emscripten_atomic_add_u32"] = createExportWrapper("emscripten_atomic_add_u32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_add_u64 = Module["_emscripten_atomic_add_u64"] = createExportWrapper("emscripten_atomic_add_u64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_sub_u8 = Module["_emscripten_atomic_sub_u8"] = createExportWrapper("emscripten_atomic_sub_u8");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_sub_u16 = Module["_emscripten_atomic_sub_u16"] = createExportWrapper("emscripten_atomic_sub_u16");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_sub_u32 = Module["_emscripten_atomic_sub_u32"] = createExportWrapper("emscripten_atomic_sub_u32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_sub_u64 = Module["_emscripten_atomic_sub_u64"] = createExportWrapper("emscripten_atomic_sub_u64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_and_u8 = Module["_emscripten_atomic_and_u8"] = createExportWrapper("emscripten_atomic_and_u8");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_and_u16 = Module["_emscripten_atomic_and_u16"] = createExportWrapper("emscripten_atomic_and_u16");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_and_u32 = Module["_emscripten_atomic_and_u32"] = createExportWrapper("emscripten_atomic_and_u32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_and_u64 = Module["_emscripten_atomic_and_u64"] = createExportWrapper("emscripten_atomic_and_u64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_or_u16 = Module["_emscripten_atomic_or_u16"] = createExportWrapper("emscripten_atomic_or_u16");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_or_u32 = Module["_emscripten_atomic_or_u32"] = createExportWrapper("emscripten_atomic_or_u32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_or_u64 = Module["_emscripten_atomic_or_u64"] = createExportWrapper("emscripten_atomic_or_u64");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_xor_u8 = Module["_emscripten_atomic_xor_u8"] = createExportWrapper("emscripten_atomic_xor_u8");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_xor_u16 = Module["_emscripten_atomic_xor_u16"] = createExportWrapper("emscripten_atomic_xor_u16");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_xor_u32 = Module["_emscripten_atomic_xor_u32"] = createExportWrapper("emscripten_atomic_xor_u32");
+
+/** @type {function(...*):?} */
+var _emscripten_atomic_xor_u64 = Module["_emscripten_atomic_xor_u64"] = createExportWrapper("emscripten_atomic_xor_u64");
+
+/** @type {function(...*):?} */
+var _pthread_self = Module["_pthread_self"] = createExportWrapper("pthread_self");
+
+/** @type {function(...*):?} */
+var _thrd_current = Module["_thrd_current"] = createExportWrapper("thrd_current");
+
+/** @type {function(...*):?} */
+var _thrd_create = Module["_thrd_create"] = createExportWrapper("thrd_create");
+
+/** @type {function(...*):?} */
+var _thrd_exit = Module["_thrd_exit"] = createExportWrapper("thrd_exit");
+
+/** @type {function(...*):?} */
+var _pthread_exit = Module["_pthread_exit"] = createExportWrapper("pthread_exit");
+
+/** @type {function(...*):?} */
+var _thrd_join = Module["_thrd_join"] = createExportWrapper("thrd_join");
+
+/** @type {function(...*):?} */
+var _thrd_sleep = Module["_thrd_sleep"] = createExportWrapper("thrd_sleep");
+
+/** @type {function(...*):?} */
+var _thrd_yield = Module["_thrd_yield"] = createExportWrapper("thrd_yield");
+
+/** @type {function(...*):?} */
+var _call_once = Module["_call_once"] = createExportWrapper("call_once");
+
+/** @type {function(...*):?} */
+var _emscripten_has_threading_support = Module["_emscripten_has_threading_support"] = createExportWrapper("emscripten_has_threading_support");
+
+/** @type {function(...*):?} */
+var _emscripten_num_logical_cores = Module["_emscripten_num_logical_cores"] = createExportWrapper("emscripten_num_logical_cores");
+
+/** @type {function(...*):?} */
+var _emscripten_force_num_logical_cores = Module["_emscripten_force_num_logical_cores"] = createExportWrapper("emscripten_force_num_logical_cores");
+
+/** @type {function(...*):?} */
+var _emscripten_futex_wait = Module["_emscripten_futex_wait"] = createExportWrapper("emscripten_futex_wait");
+
+/** @type {function(...*):?} */
+var _emscripten_futex_wake = Module["_emscripten_futex_wake"] = createExportWrapper("emscripten_futex_wake");
+
+/** @type {function(...*):?} */
+var _emscripten_is_main_runtime_thread = Module["_emscripten_is_main_runtime_thread"] = createExportWrapper("emscripten_is_main_runtime_thread");
+
+/** @type {function(...*):?} */
+var _emscripten_main_thread_process_queued_calls = Module["_emscripten_main_thread_process_queued_calls"] = createExportWrapper("emscripten_main_thread_process_queued_calls");
+
+/** @type {function(...*):?} */
+var _emscripten_current_thread_process_queued_calls = Module["_emscripten_current_thread_process_queued_calls"] = createExportWrapper("emscripten_current_thread_process_queued_calls");
+
+/** @type {function(...*):?} */
+var _pthread_mutex_init = Module["_pthread_mutex_init"] = createExportWrapper("pthread_mutex_init");
+
+/** @type {function(...*):?} */
+var _pthread_mutex_lock = Module["_pthread_mutex_lock"] = createExportWrapper("pthread_mutex_lock");
+
+/** @type {function(...*):?} */
+var _pthread_mutex_unlock = Module["_pthread_mutex_unlock"] = createExportWrapper("pthread_mutex_unlock");
+
+/** @type {function(...*):?} */
+var _pthread_mutex_trylock = Module["_pthread_mutex_trylock"] = createExportWrapper("pthread_mutex_trylock");
+
+/** @type {function(...*):?} */
+var _pthread_mutex_timedlock = Module["_pthread_mutex_timedlock"] = createExportWrapper("pthread_mutex_timedlock");
+
+/** @type {function(...*):?} */
+var _pthread_mutex_destroy = Module["_pthread_mutex_destroy"] = createExportWrapper("pthread_mutex_destroy");
+
+/** @type {function(...*):?} */
+var _pthread_mutex_consistent = Module["_pthread_mutex_consistent"] = createExportWrapper("pthread_mutex_consistent");
+
+/** @type {function(...*):?} */
+var _pthread_barrier_init = Module["_pthread_barrier_init"] = createExportWrapper("pthread_barrier_init");
+
+/** @type {function(...*):?} */
+var _pthread_barrier_destroy = Module["_pthread_barrier_destroy"] = createExportWrapper("pthread_barrier_destroy");
+
+/** @type {function(...*):?} */
+var _pthread_barrier_wait = Module["_pthread_barrier_wait"] = createExportWrapper("pthread_barrier_wait");
+
+/** @type {function(...*):?} */
+var _pthread_key_create = Module["_pthread_key_create"] = createExportWrapper("pthread_key_create");
+
+/** @type {function(...*):?} */
+var _pthread_key_delete = Module["_pthread_key_delete"] = createExportWrapper("pthread_key_delete");
+
+/** @type {function(...*):?} */
+var _pthread_getspecific = Module["_pthread_getspecific"] = createExportWrapper("pthread_getspecific");
+
+/** @type {function(...*):?} */
+var _pthread_setspecific = Module["_pthread_setspecific"] = createExportWrapper("pthread_setspecific");
+
+/** @type {function(...*):?} */
+var _pthread_once = Module["_pthread_once"] = createExportWrapper("pthread_once");
+
+/** @type {function(...*):?} */
+var _pthread_cond_wait = Module["_pthread_cond_wait"] = createExportWrapper("pthread_cond_wait");
+
+/** @type {function(...*):?} */
+var _pthread_cond_signal = Module["_pthread_cond_signal"] = createExportWrapper("pthread_cond_signal");
+
+/** @type {function(...*):?} */
+var _pthread_cond_broadcast = Module["_pthread_cond_broadcast"] = createExportWrapper("pthread_cond_broadcast");
+
+/** @type {function(...*):?} */
+var _pthread_cond_init = Module["_pthread_cond_init"] = createExportWrapper("pthread_cond_init");
+
+/** @type {function(...*):?} */
+var _pthread_cond_destroy = Module["_pthread_cond_destroy"] = createExportWrapper("pthread_cond_destroy");
+
+/** @type {function(...*):?} */
+var _pthread_cond_timedwait = Module["_pthread_cond_timedwait"] = createExportWrapper("pthread_cond_timedwait");
+
+/** @type {function(...*):?} */
+var _pthread_atfork = Module["_pthread_atfork"] = createExportWrapper("pthread_atfork");
+
+/** @type {function(...*):?} */
+var _pthread_cancel = Module["_pthread_cancel"] = createExportWrapper("pthread_cancel");
+
+/** @type {function(...*):?} */
+var _pthread_detach = Module["_pthread_detach"] = createExportWrapper("pthread_detach");
+
+/** @type {function(...*):?} */
+var _emscripten_main_browser_thread_id = Module["_emscripten_main_browser_thread_id"] = createExportWrapper("emscripten_main_browser_thread_id");
+
+/** @type {function(...*):?} */
+var _pthread_equal = Module["_pthread_equal"] = createExportWrapper("pthread_equal");
+
+/** @type {function(...*):?} */
+var _pthread_mutexattr_init = Module["_pthread_mutexattr_init"] = createExportWrapper("pthread_mutexattr_init");
+
+/** @type {function(...*):?} */
+var _pthread_mutexattr_setprotocol = Module["_pthread_mutexattr_setprotocol"] = createExportWrapper("pthread_mutexattr_setprotocol");
+
+/** @type {function(...*):?} */
+var _pthread_mutexattr_settype = Module["_pthread_mutexattr_settype"] = createExportWrapper("pthread_mutexattr_settype");
+
+/** @type {function(...*):?} */
+var _pthread_mutexattr_destroy = Module["_pthread_mutexattr_destroy"] = createExportWrapper("pthread_mutexattr_destroy");
+
+/** @type {function(...*):?} */
+var _pthread_mutexattr_setpshared = Module["_pthread_mutexattr_setpshared"] = createExportWrapper("pthread_mutexattr_setpshared");
+
+/** @type {function(...*):?} */
+var _pthread_condattr_init = Module["_pthread_condattr_init"] = createExportWrapper("pthread_condattr_init");
+
+/** @type {function(...*):?} */
+var _pthread_condattr_destroy = Module["_pthread_condattr_destroy"] = createExportWrapper("pthread_condattr_destroy");
+
+/** @type {function(...*):?} */
+var _pthread_condattr_setclock = Module["_pthread_condattr_setclock"] = createExportWrapper("pthread_condattr_setclock");
+
+/** @type {function(...*):?} */
+var _pthread_condattr_setpshared = Module["_pthread_condattr_setpshared"] = createExportWrapper("pthread_condattr_setpshared");
+
+/** @type {function(...*):?} */
+var _pthread_condattr_getclock = Module["_pthread_condattr_getclock"] = createExportWrapper("pthread_condattr_getclock");
+
+/** @type {function(...*):?} */
+var _pthread_condattr_getpshared = Module["_pthread_condattr_getpshared"] = createExportWrapper("pthread_condattr_getpshared");
+
+/** @type {function(...*):?} */
+var _pthread_attr_init = Module["_pthread_attr_init"] = createExportWrapper("pthread_attr_init");
+
+/** @type {function(...*):?} */
+var _pthread_getattr_np = Module["_pthread_getattr_np"] = createExportWrapper("pthread_getattr_np");
+
+/** @type {function(...*):?} */
+var _pthread_attr_destroy = Module["_pthread_attr_destroy"] = createExportWrapper("pthread_attr_destroy");
+
+/** @type {function(...*):?} */
+var _pthread_attr_getdetachstate = Module["_pthread_attr_getdetachstate"] = createExportWrapper("pthread_attr_getdetachstate");
+
+/** @type {function(...*):?} */
+var _pthread_attr_getstack = Module["_pthread_attr_getstack"] = createExportWrapper("pthread_attr_getstack");
+
+/** @type {function(...*):?} */
+var _emscripten_stack_get_base = Module["_emscripten_stack_get_base"] = function() {
+  return (_emscripten_stack_get_base = Module["_emscripten_stack_get_base"] = Module["asm"]["emscripten_stack_get_base"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_stack_get_end = Module["_emscripten_stack_get_end"] = function() {
+  return (_emscripten_stack_get_end = Module["_emscripten_stack_get_end"] = Module["asm"]["emscripten_stack_get_end"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _pthread_setcanceltype = Module["_pthread_setcanceltype"] = createExportWrapper("pthread_setcanceltype");
+
+/** @type {function(...*):?} */
+var _pthread_rwlock_init = Module["_pthread_rwlock_init"] = createExportWrapper("pthread_rwlock_init");
+
+/** @type {function(...*):?} */
+var _pthread_rwlock_destroy = Module["_pthread_rwlock_destroy"] = createExportWrapper("pthread_rwlock_destroy");
+
+/** @type {function(...*):?} */
+var _pthread_rwlock_rdlock = Module["_pthread_rwlock_rdlock"] = createExportWrapper("pthread_rwlock_rdlock");
+
+/** @type {function(...*):?} */
+var _pthread_rwlock_tryrdlock = Module["_pthread_rwlock_tryrdlock"] = createExportWrapper("pthread_rwlock_tryrdlock");
+
+/** @type {function(...*):?} */
+var _pthread_rwlock_timedrdlock = Module["_pthread_rwlock_timedrdlock"] = createExportWrapper("pthread_rwlock_timedrdlock");
+
+/** @type {function(...*):?} */
+var _pthread_rwlock_wrlock = Module["_pthread_rwlock_wrlock"] = createExportWrapper("pthread_rwlock_wrlock");
+
+/** @type {function(...*):?} */
+var _pthread_rwlock_trywrlock = Module["_pthread_rwlock_trywrlock"] = createExportWrapper("pthread_rwlock_trywrlock");
+
+/** @type {function(...*):?} */
+var _pthread_rwlock_timedwrlock = Module["_pthread_rwlock_timedwrlock"] = createExportWrapper("pthread_rwlock_timedwrlock");
+
+/** @type {function(...*):?} */
+var _pthread_rwlock_unlock = Module["_pthread_rwlock_unlock"] = createExportWrapper("pthread_rwlock_unlock");
+
+/** @type {function(...*):?} */
+var _pthread_rwlockattr_init = Module["_pthread_rwlockattr_init"] = createExportWrapper("pthread_rwlockattr_init");
+
+/** @type {function(...*):?} */
+var _pthread_rwlockattr_destroy = Module["_pthread_rwlockattr_destroy"] = createExportWrapper("pthread_rwlockattr_destroy");
+
+/** @type {function(...*):?} */
+var _pthread_rwlockattr_setpshared = Module["_pthread_rwlockattr_setpshared"] = createExportWrapper("pthread_rwlockattr_setpshared");
+
+/** @type {function(...*):?} */
+var _pthread_rwlockattr_getpshared = Module["_pthread_rwlockattr_getpshared"] = createExportWrapper("pthread_rwlockattr_getpshared");
+
+/** @type {function(...*):?} */
+var _pthread_spin_init = Module["_pthread_spin_init"] = createExportWrapper("pthread_spin_init");
+
+/** @type {function(...*):?} */
+var _pthread_spin_destroy = Module["_pthread_spin_destroy"] = createExportWrapper("pthread_spin_destroy");
+
+/** @type {function(...*):?} */
+var _pthread_spin_lock = Module["_pthread_spin_lock"] = createExportWrapper("pthread_spin_lock");
+
+/** @type {function(...*):?} */
+var _pthread_spin_trylock = Module["_pthread_spin_trylock"] = createExportWrapper("pthread_spin_trylock");
+
+/** @type {function(...*):?} */
+var _pthread_spin_unlock = Module["_pthread_spin_unlock"] = createExportWrapper("pthread_spin_unlock");
+
+/** @type {function(...*):?} */
+var _pthread_attr_setdetachstate = Module["_pthread_attr_setdetachstate"] = createExportWrapper("pthread_attr_setdetachstate");
+
+/** @type {function(...*):?} */
+var _pthread_attr_setschedparam = Module["_pthread_attr_setschedparam"] = createExportWrapper("pthread_attr_setschedparam");
+
+/** @type {function(...*):?} */
+var _pthread_attr_setstacksize = Module["_pthread_attr_setstacksize"] = createExportWrapper("pthread_attr_setstacksize");
+
+/** @type {function(...*):?} */
+var _sem_init = Module["_sem_init"] = createExportWrapper("sem_init");
+
+/** @type {function(...*):?} */
+var _sem_post = Module["_sem_post"] = createExportWrapper("sem_post");
+
+/** @type {function(...*):?} */
+var _sem_wait = Module["_sem_wait"] = createExportWrapper("sem_wait");
+
+/** @type {function(...*):?} */
+var _sem_trywait = Module["_sem_trywait"] = createExportWrapper("sem_trywait");
+
+/** @type {function(...*):?} */
+var _sem_destroy = Module["_sem_destroy"] = createExportWrapper("sem_destroy");
 
 /** @type {function(...*):?} */
 var ___absvdi2 = Module["___absvdi2"] = createExportWrapper("__absvdi2");
@@ -33748,24 +34640,6 @@ var ___divxc3 = Module["___divxc3"] = createExportWrapper("__divxc3");
 var ___emutls_get_address = Module["___emutls_get_address"] = createExportWrapper("__emutls_get_address");
 
 /** @type {function(...*):?} */
-var _pthread_once = Module["_pthread_once"] = createExportWrapper("pthread_once");
-
-/** @type {function(...*):?} */
-var _pthread_mutex_lock = Module["_pthread_mutex_lock"] = createExportWrapper("pthread_mutex_lock");
-
-/** @type {function(...*):?} */
-var _pthread_mutex_unlock = Module["_pthread_mutex_unlock"] = createExportWrapper("pthread_mutex_unlock");
-
-/** @type {function(...*):?} */
-var _pthread_getspecific = Module["_pthread_getspecific"] = createExportWrapper("pthread_getspecific");
-
-/** @type {function(...*):?} */
-var _pthread_setspecific = Module["_pthread_setspecific"] = createExportWrapper("pthread_setspecific");
-
-/** @type {function(...*):?} */
-var _pthread_key_create = Module["_pthread_key_create"] = createExportWrapper("pthread_key_create");
-
-/** @type {function(...*):?} */
 var ___enable_execute_stack = Module["___enable_execute_stack"] = createExportWrapper("__enable_execute_stack");
 
 /** @type {function(...*):?} */
@@ -34096,13 +34970,24 @@ var stackRestore = Module["stackRestore"] = createExportWrapper("stackRestore");
 var stackAlloc = Module["stackAlloc"] = createExportWrapper("stackAlloc");
 
 /** @type {function(...*):?} */
-var _emscripten_stack_init = Module["_emscripten_stack_init"] = createExportWrapper("emscripten_stack_init");
+var _emscripten_stack_get_current = Module["_emscripten_stack_get_current"] = function() {
+  return (_emscripten_stack_get_current = Module["_emscripten_stack_get_current"] = Module["asm"]["emscripten_stack_get_current"]).apply(null, arguments);
+};
 
 /** @type {function(...*):?} */
-var _emscripten_stack_get_current = Module["_emscripten_stack_get_current"] = createExportWrapper("emscripten_stack_get_current");
+var _emscripten_stack_init = Module["_emscripten_stack_init"] = function() {
+  return (_emscripten_stack_init = Module["_emscripten_stack_init"] = Module["asm"]["emscripten_stack_init"]).apply(null, arguments);
+};
 
 /** @type {function(...*):?} */
-var _emscripten_stack_get_free = Module["_emscripten_stack_get_free"] = createExportWrapper("emscripten_stack_get_free");
+var _emscripten_stack_set_limits = Module["_emscripten_stack_set_limits"] = function() {
+  return (_emscripten_stack_set_limits = Module["_emscripten_stack_set_limits"] = Module["asm"]["emscripten_stack_set_limits"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var _emscripten_stack_get_free = Module["_emscripten_stack_get_free"] = function() {
+  return (_emscripten_stack_get_free = Module["_emscripten_stack_get_free"] = Module["asm"]["emscripten_stack_get_free"]).apply(null, arguments);
+};
 
 /** @type {function(...*):?} */
 var _saveSetjmp = Module["_saveSetjmp"] = createExportWrapper("saveSetjmp");
@@ -34714,16 +35599,10 @@ var __ZNSt3__218condition_variable10notify_oneEv = Module["__ZNSt3__218condition
 var __ZNSt3__223__libcpp_condvar_signalEP14pthread_cond_t = Module["__ZNSt3__223__libcpp_condvar_signalEP14pthread_cond_t"] = createExportWrapper("_ZNSt3__223__libcpp_condvar_signalEP14pthread_cond_t");
 
 /** @type {function(...*):?} */
-var _pthread_cond_signal = Module["_pthread_cond_signal"] = createExportWrapper("pthread_cond_signal");
-
-/** @type {function(...*):?} */
 var __ZNSt3__218condition_variable10notify_allEv = Module["__ZNSt3__218condition_variable10notify_allEv"] = createExportWrapper("_ZNSt3__218condition_variable10notify_allEv");
 
 /** @type {function(...*):?} */
 var __ZNSt3__226__libcpp_condvar_broadcastEP14pthread_cond_t = Module["__ZNSt3__226__libcpp_condvar_broadcastEP14pthread_cond_t"] = createExportWrapper("_ZNSt3__226__libcpp_condvar_broadcastEP14pthread_cond_t");
-
-/** @type {function(...*):?} */
-var _pthread_cond_broadcast = Module["_pthread_cond_broadcast"] = createExportWrapper("pthread_cond_broadcast");
 
 /** @type {function(...*):?} */
 var __ZNSt3__218condition_variable4waitERNS_11unique_lockINS_5mutexEEE = Module["__ZNSt3__218condition_variable4waitERNS_11unique_lockINS_5mutexEEE"] = createExportWrapper("_ZNSt3__218condition_variable4waitERNS_11unique_lockINS_5mutexEEE");
@@ -34739,9 +35618,6 @@ var __ZNSt3__25mutex13native_handleEv = Module["__ZNSt3__25mutex13native_handleE
 
 /** @type {function(...*):?} */
 var __ZNSt3__221__libcpp_condvar_waitEP14pthread_cond_tP15pthread_mutex_t = Module["__ZNSt3__221__libcpp_condvar_waitEP14pthread_cond_tP15pthread_mutex_t"] = createExportWrapper("_ZNSt3__221__libcpp_condvar_waitEP14pthread_cond_tP15pthread_mutex_t");
-
-/** @type {function(...*):?} */
-var _pthread_cond_wait = Module["_pthread_cond_wait"] = createExportWrapper("pthread_cond_wait");
 
 /** @type {function(...*):?} */
 var __ZNSt3__218condition_variable15__do_timed_waitERNS_11unique_lockINS_5mutexEEENS_6chrono10time_pointINS5_12system_clockENS5_8durationIxNS_5ratioILx1ELx1000000000EEEEEEE = Module["__ZNSt3__218condition_variable15__do_timed_waitERNS_11unique_lockINS_5mutexEEENS_6chrono10time_pointINS5_12system_clockENS5_8durationIxNS_5ratioILx1ELx1000000000EEEEEEE"] = createExportWrapper("_ZNSt3__218condition_variable15__do_timed_waitERNS_11unique_lockINS_5mutexEEENS_6chrono10time_pointINS5_12system_clockENS5_8durationIxNS_5ratioILx1ELx1000000000EEEEEEE");
@@ -34766,9 +35642,6 @@ var __ZNSt3__26chronoltIxNS_5ratioILx1ELx1000000000EEExS3_EEbRKNS0_8durationIT_T
 
 /** @type {function(...*):?} */
 var __ZNKSt3__26chrono15__duration_castINS0_8durationIxNS_5ratioILx1ELx1000000000EEEEENS2_IxNS3_ILx1ELx1EEEEES4_Lb1ELb0EEclERKS5_ = Module["__ZNKSt3__26chrono15__duration_castINS0_8durationIxNS_5ratioILx1ELx1000000000EEEEENS2_IxNS3_ILx1ELx1EEEEES4_Lb1ELb0EEclERKS5_"] = createExportWrapper("_ZNKSt3__26chrono15__duration_castINS0_8durationIxNS_5ratioILx1ELx1000000000EEEEENS2_IxNS3_ILx1ELx1EEEEES4_Lb1ELb0EEclERKS5_");
-
-/** @type {function(...*):?} */
-var _pthread_cond_timedwait = Module["_pthread_cond_timedwait"] = createExportWrapper("pthread_cond_timedwait");
 
 /** @type {function(...*):?} */
 var __ZNSt3__225notify_all_at_thread_exitERNS_18condition_variableENS_11unique_lockINS_5mutexEEE = Module["__ZNSt3__225notify_all_at_thread_exitERNS_18condition_variableENS_11unique_lockINS_5mutexEEE"] = createExportWrapper("_ZNSt3__225notify_all_at_thread_exitERNS_18condition_variableENS_11unique_lockINS_5mutexEEE");
@@ -34811,9 +35684,6 @@ var __ZNSt3__218condition_variableD2Ev = Module["__ZNSt3__218condition_variableD
 
 /** @type {function(...*):?} */
 var __ZNSt3__224__libcpp_condvar_destroyEP14pthread_cond_t = Module["__ZNSt3__224__libcpp_condvar_destroyEP14pthread_cond_t"] = createExportWrapper("_ZNSt3__224__libcpp_condvar_destroyEP14pthread_cond_t");
-
-/** @type {function(...*):?} */
-var _pthread_cond_destroy = Module["_pthread_cond_destroy"] = createExportWrapper("pthread_cond_destroy");
 
 /** @type {function(...*):?} */
 var __ZNSt3__218condition_variableD1Ev = Module["__ZNSt3__218condition_variableD1Ev"] = createExportWrapper("_ZNSt3__218condition_variableD1Ev");
@@ -41413,9 +42283,6 @@ var __ZNSt3__222__libcpp_mutex_trylockEP15pthread_mutex_t = Module["__ZNSt3__222
 var __ZNSt3__211this_thread5yieldEv = Module["__ZNSt3__211this_thread5yieldEv"] = createExportWrapper("_ZNSt3__211this_thread5yieldEv");
 
 /** @type {function(...*):?} */
-var _pthread_mutex_trylock = Module["_pthread_mutex_trylock"] = createExportWrapper("pthread_mutex_trylock");
-
-/** @type {function(...*):?} */
 var __ZNSt3__221__libcpp_thread_yieldEv = Module["__ZNSt3__221__libcpp_thread_yieldEv"] = createExportWrapper("_ZNSt3__221__libcpp_thread_yieldEv");
 
 /** @type {function(...*):?} */
@@ -41462,12 +42329,6 @@ var __ZNSt3__215recursive_mutexC2Ev = Module["__ZNSt3__215recursive_mutexC2Ev"] 
 
 /** @type {function(...*):?} */
 var __ZNSt3__229__libcpp_recursive_mutex_initEP15pthread_mutex_t = Module["__ZNSt3__229__libcpp_recursive_mutex_initEP15pthread_mutex_t"] = createExportWrapper("_ZNSt3__229__libcpp_recursive_mutex_initEP15pthread_mutex_t");
-
-/** @type {function(...*):?} */
-var _pthread_mutex_init = Module["_pthread_mutex_init"] = createExportWrapper("pthread_mutex_init");
-
-/** @type {function(...*):?} */
-var _pthread_mutex_destroy = Module["_pthread_mutex_destroy"] = createExportWrapper("pthread_mutex_destroy");
 
 /** @type {function(...*):?} */
 var __ZNSt3__215recursive_mutexD2Ev = Module["__ZNSt3__215recursive_mutexD2Ev"] = createExportWrapper("_ZNSt3__215recursive_mutexD2Ev");
@@ -41546,9 +42407,6 @@ var __ZNSt3__221recursive_timed_mutex6unlockEv = Module["__ZNSt3__221recursive_t
 
 /** @type {function(...*):?} */
 var __ZNSt3__211__thread_id7__resetEv = Module["__ZNSt3__211__thread_id7__resetEv"] = createExportWrapper("_ZNSt3__211__thread_id7__resetEv");
-
-/** @type {function(...*):?} */
-var _pthread_equal = Module["_pthread_equal"] = createExportWrapper("pthread_equal");
 
 /** @type {function(...*):?} */
 var __ZNSt3__215recursive_mutexC1Ev = Module["__ZNSt3__215recursive_mutexC1Ev"] = createExportWrapper("_ZNSt3__215recursive_mutexC1Ev");
@@ -46447,192 +47305,6 @@ var _emscripten_get_sbrk_ptr = Module["_emscripten_get_sbrk_ptr"] = createExport
 var _brk = Module["_brk"] = createExportWrapper("brk");
 
 /** @type {function(...*):?} */
-var _emscripten_has_threading_support = Module["_emscripten_has_threading_support"] = createExportWrapper("emscripten_has_threading_support");
-
-/** @type {function(...*):?} */
-var _emscripten_num_logical_cores = Module["_emscripten_num_logical_cores"] = createExportWrapper("emscripten_num_logical_cores");
-
-/** @type {function(...*):?} */
-var _emscripten_force_num_logical_cores = Module["_emscripten_force_num_logical_cores"] = createExportWrapper("emscripten_force_num_logical_cores");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_exchange_u8 = Module["_emscripten_atomic_exchange_u8"] = createExportWrapper("emscripten_atomic_exchange_u8");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_exchange_u16 = Module["_emscripten_atomic_exchange_u16"] = createExportWrapper("emscripten_atomic_exchange_u16");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_exchange_u32 = Module["_emscripten_atomic_exchange_u32"] = createExportWrapper("emscripten_atomic_exchange_u32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_exchange_u64 = Module["_emscripten_atomic_exchange_u64"] = createExportWrapper("emscripten_atomic_exchange_u64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_cas_u8 = Module["_emscripten_atomic_cas_u8"] = createExportWrapper("emscripten_atomic_cas_u8");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_cas_u16 = Module["_emscripten_atomic_cas_u16"] = createExportWrapper("emscripten_atomic_cas_u16");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_cas_u32 = Module["_emscripten_atomic_cas_u32"] = createExportWrapper("emscripten_atomic_cas_u32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_cas_u64 = Module["_emscripten_atomic_cas_u64"] = createExportWrapper("emscripten_atomic_cas_u64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_load_u8 = Module["_emscripten_atomic_load_u8"] = createExportWrapper("emscripten_atomic_load_u8");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_load_u16 = Module["_emscripten_atomic_load_u16"] = createExportWrapper("emscripten_atomic_load_u16");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_load_u32 = Module["_emscripten_atomic_load_u32"] = createExportWrapper("emscripten_atomic_load_u32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_load_f32 = Module["_emscripten_atomic_load_f32"] = createExportWrapper("emscripten_atomic_load_f32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_load_u64 = Module["_emscripten_atomic_load_u64"] = createExportWrapper("emscripten_atomic_load_u64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_load_f64 = Module["_emscripten_atomic_load_f64"] = createExportWrapper("emscripten_atomic_load_f64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_store_u8 = Module["_emscripten_atomic_store_u8"] = createExportWrapper("emscripten_atomic_store_u8");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_store_u16 = Module["_emscripten_atomic_store_u16"] = createExportWrapper("emscripten_atomic_store_u16");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_store_u32 = Module["_emscripten_atomic_store_u32"] = createExportWrapper("emscripten_atomic_store_u32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_store_f32 = Module["_emscripten_atomic_store_f32"] = createExportWrapper("emscripten_atomic_store_f32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_store_u64 = Module["_emscripten_atomic_store_u64"] = createExportWrapper("emscripten_atomic_store_u64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_store_f64 = Module["_emscripten_atomic_store_f64"] = createExportWrapper("emscripten_atomic_store_f64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_fence = Module["_emscripten_atomic_fence"] = createExportWrapper("emscripten_atomic_fence");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_add_u8 = Module["_emscripten_atomic_add_u8"] = createExportWrapper("emscripten_atomic_add_u8");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_add_u16 = Module["_emscripten_atomic_add_u16"] = createExportWrapper("emscripten_atomic_add_u16");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_add_u32 = Module["_emscripten_atomic_add_u32"] = createExportWrapper("emscripten_atomic_add_u32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_add_u64 = Module["_emscripten_atomic_add_u64"] = createExportWrapper("emscripten_atomic_add_u64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_sub_u8 = Module["_emscripten_atomic_sub_u8"] = createExportWrapper("emscripten_atomic_sub_u8");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_sub_u16 = Module["_emscripten_atomic_sub_u16"] = createExportWrapper("emscripten_atomic_sub_u16");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_sub_u32 = Module["_emscripten_atomic_sub_u32"] = createExportWrapper("emscripten_atomic_sub_u32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_sub_u64 = Module["_emscripten_atomic_sub_u64"] = createExportWrapper("emscripten_atomic_sub_u64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_and_u8 = Module["_emscripten_atomic_and_u8"] = createExportWrapper("emscripten_atomic_and_u8");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_and_u16 = Module["_emscripten_atomic_and_u16"] = createExportWrapper("emscripten_atomic_and_u16");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_and_u32 = Module["_emscripten_atomic_and_u32"] = createExportWrapper("emscripten_atomic_and_u32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_and_u64 = Module["_emscripten_atomic_and_u64"] = createExportWrapper("emscripten_atomic_and_u64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_or_u8 = Module["_emscripten_atomic_or_u8"] = createExportWrapper("emscripten_atomic_or_u8");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_or_u16 = Module["_emscripten_atomic_or_u16"] = createExportWrapper("emscripten_atomic_or_u16");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_or_u32 = Module["_emscripten_atomic_or_u32"] = createExportWrapper("emscripten_atomic_or_u32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_or_u64 = Module["_emscripten_atomic_or_u64"] = createExportWrapper("emscripten_atomic_or_u64");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_xor_u8 = Module["_emscripten_atomic_xor_u8"] = createExportWrapper("emscripten_atomic_xor_u8");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_xor_u16 = Module["_emscripten_atomic_xor_u16"] = createExportWrapper("emscripten_atomic_xor_u16");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_xor_u32 = Module["_emscripten_atomic_xor_u32"] = createExportWrapper("emscripten_atomic_xor_u32");
-
-/** @type {function(...*):?} */
-var _emscripten_atomic_xor_u64 = Module["_emscripten_atomic_xor_u64"] = createExportWrapper("emscripten_atomic_xor_u64");
-
-/** @type {function(...*):?} */
-var __emscripten_atomic_fetch_and_add_u64 = Module["__emscripten_atomic_fetch_and_add_u64"] = createExportWrapper("_emscripten_atomic_fetch_and_add_u64");
-
-/** @type {function(...*):?} */
-var __emscripten_atomic_fetch_and_sub_u64 = Module["__emscripten_atomic_fetch_and_sub_u64"] = createExportWrapper("_emscripten_atomic_fetch_and_sub_u64");
-
-/** @type {function(...*):?} */
-var __emscripten_atomic_fetch_and_and_u64 = Module["__emscripten_atomic_fetch_and_and_u64"] = createExportWrapper("_emscripten_atomic_fetch_and_and_u64");
-
-/** @type {function(...*):?} */
-var __emscripten_atomic_fetch_and_or_u64 = Module["__emscripten_atomic_fetch_and_or_u64"] = createExportWrapper("_emscripten_atomic_fetch_and_or_u64");
-
-/** @type {function(...*):?} */
-var __emscripten_atomic_fetch_and_xor_u64 = Module["__emscripten_atomic_fetch_and_xor_u64"] = createExportWrapper("_emscripten_atomic_fetch_and_xor_u64");
-
-/** @type {function(...*):?} */
-var _emscripten_futex_wait = Module["_emscripten_futex_wait"] = createExportWrapper("emscripten_futex_wait");
-
-/** @type {function(...*):?} */
-var _emscripten_futex_wake = Module["_emscripten_futex_wake"] = createExportWrapper("emscripten_futex_wake");
-
-/** @type {function(...*):?} */
-var _emscripten_is_main_runtime_thread = Module["_emscripten_is_main_runtime_thread"] = createExportWrapper("emscripten_is_main_runtime_thread");
-
-/** @type {function(...*):?} */
-var _emscripten_main_thread_process_queued_calls = Module["_emscripten_main_thread_process_queued_calls"] = createExportWrapper("emscripten_main_thread_process_queued_calls");
-
-/** @type {function(...*):?} */
-var _emscripten_current_thread_process_queued_calls = Module["_emscripten_current_thread_process_queued_calls"] = createExportWrapper("emscripten_current_thread_process_queued_calls");
-
-/** @type {function(...*):?} */
-var _pthread_mutex_timedlock = Module["_pthread_mutex_timedlock"] = createExportWrapper("pthread_mutex_timedlock");
-
-/** @type {function(...*):?} */
-var _pthread_mutex_consistent = Module["_pthread_mutex_consistent"] = createExportWrapper("pthread_mutex_consistent");
-
-/** @type {function(...*):?} */
-var _pthread_barrier_init = Module["_pthread_barrier_init"] = createExportWrapper("pthread_barrier_init");
-
-/** @type {function(...*):?} */
-var _pthread_barrier_destroy = Module["_pthread_barrier_destroy"] = createExportWrapper("pthread_barrier_destroy");
-
-/** @type {function(...*):?} */
-var _pthread_barrier_wait = Module["_pthread_barrier_wait"] = createExportWrapper("pthread_barrier_wait");
-
-/** @type {function(...*):?} */
-var _pthread_key_delete = Module["_pthread_key_delete"] = createExportWrapper("pthread_key_delete");
-
-/** @type {function(...*):?} */
-var _pthread_cond_init = Module["_pthread_cond_init"] = createExportWrapper("pthread_cond_init");
-
-/** @type {function(...*):?} */
-var _pthread_atfork = Module["_pthread_atfork"] = createExportWrapper("pthread_atfork");
-
-/** @type {function(...*):?} */
 var _fmin = Module["_fmin"] = createExportWrapper("fmin");
 
 /** @type {function(...*):?} */
@@ -46678,6 +47350,9 @@ var ___signbitf = Module["___signbitf"] = createExportWrapper("__signbitf");
 var ___signbit = Module["___signbit"] = createExportWrapper("__signbit");
 
 /** @type {function(...*):?} */
+var _emscripten_scan_stack = Module["_emscripten_scan_stack"] = createExportWrapper("emscripten_scan_stack");
+
+/** @type {function(...*):?} */
 var ___towrite = Module["___towrite"] = createExportWrapper("__towrite");
 
 /** @type {function(...*):?} */
@@ -46721,6 +47396,12 @@ var _getsockopt = Module["_getsockopt"] = createExportWrapper("getsockopt");
 
 /** @type {function(...*):?} */
 var _freeaddrinfo = Module["_freeaddrinfo"] = createExportWrapper("freeaddrinfo");
+
+/** @type {function(...*):?} */
+var ___wasm_apply_data_relocs = Module["___wasm_apply_data_relocs"] = createExportWrapper("__wasm_apply_data_relocs");
+
+/** @type {function(...*):?} */
+var ___wasm_apply_global_relocs = Module["___wasm_apply_global_relocs"] = createExportWrapper("__wasm_apply_global_relocs");
 
 /** @type {function(...*):?} */
 var dynCall_jiji = Module["dynCall_jiji"] = createExportWrapper("dynCall_jiji");
@@ -47174,6 +47855,33 @@ var _orig$truncate = Module["_orig$truncate"] = createExportWrapper("orig$trunca
 
 /** @type {function(...*):?} */
 var _orig$truncate64 = Module["_orig$truncate64"] = createExportWrapper("orig$truncate64");
+
+/** @type {function(...*):?} */
+var _orig$emscripten_atomic_exchange_u64 = Module["_orig$emscripten_atomic_exchange_u64"] = createExportWrapper("orig$emscripten_atomic_exchange_u64");
+
+/** @type {function(...*):?} */
+var _orig$emscripten_atomic_cas_u64 = Module["_orig$emscripten_atomic_cas_u64"] = createExportWrapper("orig$emscripten_atomic_cas_u64");
+
+/** @type {function(...*):?} */
+var _orig$emscripten_atomic_load_u64 = Module["_orig$emscripten_atomic_load_u64"] = createExportWrapper("orig$emscripten_atomic_load_u64");
+
+/** @type {function(...*):?} */
+var _orig$emscripten_atomic_store_u64 = Module["_orig$emscripten_atomic_store_u64"] = createExportWrapper("orig$emscripten_atomic_store_u64");
+
+/** @type {function(...*):?} */
+var _orig$emscripten_atomic_add_u64 = Module["_orig$emscripten_atomic_add_u64"] = createExportWrapper("orig$emscripten_atomic_add_u64");
+
+/** @type {function(...*):?} */
+var _orig$emscripten_atomic_sub_u64 = Module["_orig$emscripten_atomic_sub_u64"] = createExportWrapper("orig$emscripten_atomic_sub_u64");
+
+/** @type {function(...*):?} */
+var _orig$emscripten_atomic_and_u64 = Module["_orig$emscripten_atomic_and_u64"] = createExportWrapper("orig$emscripten_atomic_and_u64");
+
+/** @type {function(...*):?} */
+var _orig$emscripten_atomic_or_u64 = Module["_orig$emscripten_atomic_or_u64"] = createExportWrapper("orig$emscripten_atomic_or_u64");
+
+/** @type {function(...*):?} */
+var _orig$emscripten_atomic_xor_u64 = Module["_orig$emscripten_atomic_xor_u64"] = createExportWrapper("orig$emscripten_atomic_xor_u64");
 
 /** @type {function(...*):?} */
 var _orig$__absvdi2 = Module["_orig$__absvdi2"] = createExportWrapper("orig$__absvdi2");
@@ -47758,52 +48466,7 @@ var _orig$_ZN10__cxxabiv119__getExceptionClassEPK17_Unwind_Exception = Module["_
 var _orig$_ZN10__cxxabiv119__setExceptionClassEP17_Unwind_Exceptiony = Module["_orig$_ZN10__cxxabiv119__setExceptionClassEP17_Unwind_Exceptiony"] = createExportWrapper("orig$_ZN10__cxxabiv119__setExceptionClassEP17_Unwind_Exceptiony");
 
 /** @type {function(...*):?} */
-var _orig$emscripten_atomic_exchange_u64 = Module["_orig$emscripten_atomic_exchange_u64"] = createExportWrapper("orig$emscripten_atomic_exchange_u64");
-
-/** @type {function(...*):?} */
-var _orig$emscripten_atomic_cas_u64 = Module["_orig$emscripten_atomic_cas_u64"] = createExportWrapper("orig$emscripten_atomic_cas_u64");
-
-/** @type {function(...*):?} */
-var _orig$emscripten_atomic_load_u64 = Module["_orig$emscripten_atomic_load_u64"] = createExportWrapper("orig$emscripten_atomic_load_u64");
-
-/** @type {function(...*):?} */
-var _orig$emscripten_atomic_store_u64 = Module["_orig$emscripten_atomic_store_u64"] = createExportWrapper("orig$emscripten_atomic_store_u64");
-
-/** @type {function(...*):?} */
-var _orig$emscripten_atomic_add_u64 = Module["_orig$emscripten_atomic_add_u64"] = createExportWrapper("orig$emscripten_atomic_add_u64");
-
-/** @type {function(...*):?} */
-var _orig$emscripten_atomic_sub_u64 = Module["_orig$emscripten_atomic_sub_u64"] = createExportWrapper("orig$emscripten_atomic_sub_u64");
-
-/** @type {function(...*):?} */
-var _orig$emscripten_atomic_and_u64 = Module["_orig$emscripten_atomic_and_u64"] = createExportWrapper("orig$emscripten_atomic_and_u64");
-
-/** @type {function(...*):?} */
-var _orig$emscripten_atomic_or_u64 = Module["_orig$emscripten_atomic_or_u64"] = createExportWrapper("orig$emscripten_atomic_or_u64");
-
-/** @type {function(...*):?} */
-var _orig$emscripten_atomic_xor_u64 = Module["_orig$emscripten_atomic_xor_u64"] = createExportWrapper("orig$emscripten_atomic_xor_u64");
-
-/** @type {function(...*):?} */
-var _orig$_emscripten_atomic_fetch_and_add_u64 = Module["_orig$_emscripten_atomic_fetch_and_add_u64"] = createExportWrapper("orig$_emscripten_atomic_fetch_and_add_u64");
-
-/** @type {function(...*):?} */
-var _orig$_emscripten_atomic_fetch_and_sub_u64 = Module["_orig$_emscripten_atomic_fetch_and_sub_u64"] = createExportWrapper("orig$_emscripten_atomic_fetch_and_sub_u64");
-
-/** @type {function(...*):?} */
-var _orig$_emscripten_atomic_fetch_and_and_u64 = Module["_orig$_emscripten_atomic_fetch_and_and_u64"] = createExportWrapper("orig$_emscripten_atomic_fetch_and_and_u64");
-
-/** @type {function(...*):?} */
-var _orig$_emscripten_atomic_fetch_and_or_u64 = Module["_orig$_emscripten_atomic_fetch_and_or_u64"] = createExportWrapper("orig$_emscripten_atomic_fetch_and_or_u64");
-
-/** @type {function(...*):?} */
-var _orig$_emscripten_atomic_fetch_and_xor_u64 = Module["_orig$_emscripten_atomic_fetch_and_xor_u64"] = createExportWrapper("orig$_emscripten_atomic_fetch_and_xor_u64");
-
-/** @type {function(...*):?} */
 var _orig$fminl = Module["_orig$fminl"] = createExportWrapper("orig$fminl");
-
-/** @type {function(...*):?} */
-var ___assign_got_enties = Module["___assign_got_enties"] = createExportWrapper("__assign_got_enties");
 
 var ___progname = Module['___progname'] = 30940;
 var ___progname_full = Module['___progname_full'] = 30944;
@@ -47847,781 +48510,775 @@ var ___env_map = Module['___env_map'] = 175332;
 var _tzname = Module['_tzname'] = 175336;
 var _daylight = Module['_daylight'] = 175344;
 var _timezone = Module['_timezone'] = 175348;
-var ___THREW__ = Module['___THREW__'] = 181416;
-var ___threwValue = Module['___threwValue'] = 181420;
-var __ZNSt3__212__rs_default4__c_E = Module['__ZNSt3__212__rs_default4__c_E'] = 181424;
-var __ZTVSt12bad_any_cast = Module['__ZTVSt12bad_any_cast'] = 183976;
-var __ZTISt12bad_any_cast = Module['__ZTISt12bad_any_cast'] = 184016;
-var __ZTSSt12bad_any_cast = Module['__ZTSSt12bad_any_cast'] = 183996;
-var __ZTVN10__cxxabiv120__si_class_type_infoE = Module['__ZTVN10__cxxabiv120__si_class_type_infoE'] = 224248;
-var __ZTISt8bad_cast = Module['__ZTISt8bad_cast'] = 222244;
-var __ZTVNSt12experimental15fundamentals_v112bad_any_castE = Module['__ZTVNSt12experimental15fundamentals_v112bad_any_castE'] = 184028;
-var __ZTINSt12experimental15fundamentals_v112bad_any_castE = Module['__ZTINSt12experimental15fundamentals_v112bad_any_castE'] = 184100;
-var __ZTSNSt12experimental15fundamentals_v112bad_any_castE = Module['__ZTSNSt12experimental15fundamentals_v112bad_any_castE'] = 184048;
-var __ZNSt3__212placeholders2_1E = Module['__ZNSt3__212placeholders2_1E'] = 184112;
-var __ZNSt3__212placeholders2_2E = Module['__ZNSt3__212placeholders2_2E'] = 184113;
-var __ZNSt3__212placeholders2_3E = Module['__ZNSt3__212placeholders2_3E'] = 184114;
-var __ZNSt3__212placeholders2_4E = Module['__ZNSt3__212placeholders2_4E'] = 184115;
-var __ZNSt3__212placeholders2_5E = Module['__ZNSt3__212placeholders2_5E'] = 184116;
-var __ZNSt3__212placeholders2_6E = Module['__ZNSt3__212placeholders2_6E'] = 184117;
-var __ZNSt3__212placeholders2_7E = Module['__ZNSt3__212placeholders2_7E'] = 184118;
-var __ZNSt3__212placeholders2_8E = Module['__ZNSt3__212placeholders2_8E'] = 184119;
-var __ZNSt3__212placeholders2_9E = Module['__ZNSt3__212placeholders2_9E'] = 184120;
-var __ZNSt3__212placeholders3_10E = Module['__ZNSt3__212placeholders3_10E'] = 184121;
-var __ZNSt3__26chrono12system_clock9is_steadyE = Module['__ZNSt3__26chrono12system_clock9is_steadyE'] = 184328;
-var __ZNSt3__26chrono12steady_clock9is_steadyE = Module['__ZNSt3__26chrono12steady_clock9is_steadyE'] = 184366;
-var __ZNSt3__223__libcpp_debug_functionE = Module['__ZNSt3__223__libcpp_debug_functionE'] = 184604;
-var __ZTVNSt3__28__c_nodeE = Module['__ZTVNSt3__28__c_nodeE'] = 184636;
-var __ZTINSt3__28__c_nodeE = Module['__ZTINSt3__28__c_nodeE'] = 184688;
-var __ZTSNSt3__28__c_nodeE = Module['__ZTSNSt3__28__c_nodeE'] = 184668;
-var __ZTVN10__cxxabiv117__class_type_infoE = Module['__ZTVN10__cxxabiv117__class_type_infoE'] = 224208;
-var __ZTVSt16nested_exception = Module['__ZTVSt16nested_exception'] = 184724;
-var __ZTISt16nested_exception = Module['__ZTISt16nested_exception'] = 184764;
-var __ZTSSt16nested_exception = Module['__ZTSSt16nested_exception'] = 184740;
-var __ZTVNSt3__217bad_function_callE = Module['__ZTVNSt3__217bad_function_callE'] = 184796;
-var __ZTINSt3__217bad_function_callE = Module['__ZTINSt3__217bad_function_callE'] = 184844;
-var __ZTSNSt3__217bad_function_callE = Module['__ZTSNSt3__217bad_function_callE'] = 184816;
-var __ZTISt9exception = Module['__ZTISt9exception'] = 221528;
+var ___data_end = Module['___data_end'] = 229612;
+var ___THREW__ = Module['___THREW__'] = 181432;
+var ___threwValue = Module['___threwValue'] = 181436;
+var __ZNSt3__212__rs_default4__c_E = Module['__ZNSt3__212__rs_default4__c_E'] = 181440;
+var __ZTVSt12bad_any_cast = Module['__ZTVSt12bad_any_cast'] = 183992;
+var __ZTISt12bad_any_cast = Module['__ZTISt12bad_any_cast'] = 184032;
+var __ZTSSt12bad_any_cast = Module['__ZTSSt12bad_any_cast'] = 184012;
+var __ZTVN10__cxxabiv120__si_class_type_infoE = Module['__ZTVN10__cxxabiv120__si_class_type_infoE'] = 224264;
+var __ZTISt8bad_cast = Module['__ZTISt8bad_cast'] = 222260;
+var __ZTVNSt12experimental15fundamentals_v112bad_any_castE = Module['__ZTVNSt12experimental15fundamentals_v112bad_any_castE'] = 184044;
+var __ZTINSt12experimental15fundamentals_v112bad_any_castE = Module['__ZTINSt12experimental15fundamentals_v112bad_any_castE'] = 184116;
+var __ZTSNSt12experimental15fundamentals_v112bad_any_castE = Module['__ZTSNSt12experimental15fundamentals_v112bad_any_castE'] = 184064;
+var __ZNSt3__212placeholders2_1E = Module['__ZNSt3__212placeholders2_1E'] = 184128;
+var __ZNSt3__212placeholders2_2E = Module['__ZNSt3__212placeholders2_2E'] = 184129;
+var __ZNSt3__212placeholders2_3E = Module['__ZNSt3__212placeholders2_3E'] = 184130;
+var __ZNSt3__212placeholders2_4E = Module['__ZNSt3__212placeholders2_4E'] = 184131;
+var __ZNSt3__212placeholders2_5E = Module['__ZNSt3__212placeholders2_5E'] = 184132;
+var __ZNSt3__212placeholders2_6E = Module['__ZNSt3__212placeholders2_6E'] = 184133;
+var __ZNSt3__212placeholders2_7E = Module['__ZNSt3__212placeholders2_7E'] = 184134;
+var __ZNSt3__212placeholders2_8E = Module['__ZNSt3__212placeholders2_8E'] = 184135;
+var __ZNSt3__212placeholders2_9E = Module['__ZNSt3__212placeholders2_9E'] = 184136;
+var __ZNSt3__212placeholders3_10E = Module['__ZNSt3__212placeholders3_10E'] = 184137;
+var __ZNSt3__26chrono12system_clock9is_steadyE = Module['__ZNSt3__26chrono12system_clock9is_steadyE'] = 184344;
+var __ZNSt3__26chrono12steady_clock9is_steadyE = Module['__ZNSt3__26chrono12steady_clock9is_steadyE'] = 184382;
+var __ZNSt3__223__libcpp_debug_functionE = Module['__ZNSt3__223__libcpp_debug_functionE'] = 184620;
+var __ZTVNSt3__28__c_nodeE = Module['__ZTVNSt3__28__c_nodeE'] = 184652;
+var __ZTINSt3__28__c_nodeE = Module['__ZTINSt3__28__c_nodeE'] = 184704;
+var __ZTSNSt3__28__c_nodeE = Module['__ZTSNSt3__28__c_nodeE'] = 184684;
+var __ZTVN10__cxxabiv117__class_type_infoE = Module['__ZTVN10__cxxabiv117__class_type_infoE'] = 224224;
+var __ZTVSt16nested_exception = Module['__ZTVSt16nested_exception'] = 184740;
+var __ZTISt16nested_exception = Module['__ZTISt16nested_exception'] = 184780;
+var __ZTSSt16nested_exception = Module['__ZTSSt16nested_exception'] = 184756;
+var __ZTVNSt3__217bad_function_callE = Module['__ZTVNSt3__217bad_function_callE'] = 184812;
+var __ZTINSt3__217bad_function_callE = Module['__ZTINSt3__217bad_function_callE'] = 184860;
+var __ZTSNSt3__217bad_function_callE = Module['__ZTSNSt3__217bad_function_callE'] = 184832;
+var __ZTISt9exception = Module['__ZTISt9exception'] = 221544;
 var ___dso_handle = Module['___dso_handle'] = 1024;
-var __ZTVNSt3__212future_errorE = Module['__ZTVNSt3__212future_errorE'] = 185216;
-var __ZTVNSt3__217__assoc_sub_stateE = Module['__ZTVNSt3__217__assoc_sub_stateE'] = 185236;
-var __ZTVNSt3__214__shared_countE = Module['__ZTVNSt3__214__shared_countE'] = 202128;
-var __ZTVNSt3__223__future_error_categoryE = Module['__ZTVNSt3__223__future_error_categoryE'] = 185176;
-var __ZTINSt3__223__future_error_categoryE = Module['__ZTINSt3__223__future_error_categoryE'] = 185336;
-var __ZTINSt3__212future_errorE = Module['__ZTINSt3__212future_errorE'] = 185372;
-var __ZTINSt3__217__assoc_sub_stateE = Module['__ZTINSt3__217__assoc_sub_stateE'] = 185288;
-var __ZTSNSt3__217__assoc_sub_stateE = Module['__ZTSNSt3__217__assoc_sub_stateE'] = 185260;
-var __ZTINSt3__214__shared_countE = Module['__ZTINSt3__214__shared_countE'] = 202176;
-var __ZTSNSt3__223__future_error_categoryE = Module['__ZTSNSt3__223__future_error_categoryE'] = 185300;
-var __ZTINSt3__212__do_messageE = Module['__ZTINSt3__212__do_messageE'] = 207212;
-var __ZTSNSt3__212future_errorE = Module['__ZTSNSt3__212future_errorE'] = 185348;
-var __ZTISt11logic_error = Module['__ZTISt11logic_error'] = 221752;
-var __ZTVNSt3__28ios_baseE = Module['__ZTVNSt3__28ios_baseE'] = 186492;
-var __ZTVNSt3__215basic_streambufIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__215basic_streambufIcNS_11char_traitsIcEEEE'] = 185848;
-var __ZTVNSt3__215basic_streambufIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__215basic_streambufIwNS_11char_traitsIwEEEE'] = 185912;
-var __ZTTNSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 186016;
-var __ZNSt3__25ctypeIcE2idE = Module['__ZNSt3__25ctypeIcE2idE'] = 189624;
-var __ZTTNSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTTNSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186064;
-var __ZNSt3__25ctypeIwE2idE = Module['__ZNSt3__25ctypeIwE2idE'] = 189616;
-var __ZTTNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 186112;
-var __ZNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 188908;
-var __ZTTNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTTNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 186160;
-var __ZNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 188924;
-var __ZTTNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 186228;
-var __ZTVNSt3__28ios_base7failureE = Module['__ZTVNSt3__28ios_base7failureE'] = 186348;
-var __ZNSt3__28ios_base9__xindex_E = Module['__ZNSt3__28ios_base9__xindex_E'] = 186480;
-var __ZNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 188856;
-var __ZNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 188900;
-var __ZTINSt3__215basic_streambufIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__215basic_streambufIcNS_11char_traitsIcEEEE'] = 186748;
-var __ZTINSt3__215basic_streambufIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__215basic_streambufIwNS_11char_traitsIwEEEE'] = 186808;
-var __ZTVNSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 185976;
-var __ZTINSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 186864;
-var __ZTVNSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186024;
-var __ZTINSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186936;
-var __ZTVNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 186072;
-var __ZTINSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 187008;
-var __ZTVNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 186120;
-var __ZTINSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 187080;
-var __ZTVNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 186168;
-var __ZTINSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 187232;
-var __ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE = Module['__ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE'] = 187104;
-var __ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE8_NS_13basic_ostreamIcS2_EE = Module['__ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE8_NS_13basic_ostreamIcS2_EE'] = 187144;
-var __ZTVNSt3__219__iostream_categoryE = Module['__ZTVNSt3__219__iostream_categoryE'] = 186308;
-var __ZTINSt3__219__iostream_categoryE = Module['__ZTINSt3__219__iostream_categoryE'] = 187296;
-var __ZTINSt3__28ios_base7failureE = Module['__ZTINSt3__28ios_base7failureE'] = 187336;
-var __ZNSt3__28ios_base9boolalphaE = Module['__ZNSt3__28ios_base9boolalphaE'] = 186368;
-var __ZNSt3__28ios_base3decE = Module['__ZNSt3__28ios_base3decE'] = 186372;
-var __ZNSt3__28ios_base5fixedE = Module['__ZNSt3__28ios_base5fixedE'] = 186376;
-var __ZNSt3__28ios_base3hexE = Module['__ZNSt3__28ios_base3hexE'] = 186380;
-var __ZNSt3__28ios_base8internalE = Module['__ZNSt3__28ios_base8internalE'] = 186384;
-var __ZNSt3__28ios_base4leftE = Module['__ZNSt3__28ios_base4leftE'] = 186388;
-var __ZNSt3__28ios_base3octE = Module['__ZNSt3__28ios_base3octE'] = 186392;
-var __ZNSt3__28ios_base5rightE = Module['__ZNSt3__28ios_base5rightE'] = 186396;
-var __ZNSt3__28ios_base10scientificE = Module['__ZNSt3__28ios_base10scientificE'] = 186400;
-var __ZNSt3__28ios_base8showbaseE = Module['__ZNSt3__28ios_base8showbaseE'] = 186404;
-var __ZNSt3__28ios_base9showpointE = Module['__ZNSt3__28ios_base9showpointE'] = 186408;
-var __ZNSt3__28ios_base7showposE = Module['__ZNSt3__28ios_base7showposE'] = 186412;
-var __ZNSt3__28ios_base6skipwsE = Module['__ZNSt3__28ios_base6skipwsE'] = 186416;
-var __ZNSt3__28ios_base7unitbufE = Module['__ZNSt3__28ios_base7unitbufE'] = 186420;
-var __ZNSt3__28ios_base9uppercaseE = Module['__ZNSt3__28ios_base9uppercaseE'] = 186424;
-var __ZNSt3__28ios_base11adjustfieldE = Module['__ZNSt3__28ios_base11adjustfieldE'] = 186428;
-var __ZNSt3__28ios_base9basefieldE = Module['__ZNSt3__28ios_base9basefieldE'] = 186432;
-var __ZNSt3__28ios_base10floatfieldE = Module['__ZNSt3__28ios_base10floatfieldE'] = 186436;
-var __ZNSt3__28ios_base6badbitE = Module['__ZNSt3__28ios_base6badbitE'] = 186440;
-var __ZNSt3__28ios_base6eofbitE = Module['__ZNSt3__28ios_base6eofbitE'] = 186444;
-var __ZNSt3__28ios_base7failbitE = Module['__ZNSt3__28ios_base7failbitE'] = 186448;
-var __ZNSt3__28ios_base7goodbitE = Module['__ZNSt3__28ios_base7goodbitE'] = 186452;
-var __ZNSt3__28ios_base3appE = Module['__ZNSt3__28ios_base3appE'] = 186456;
-var __ZNSt3__28ios_base3ateE = Module['__ZNSt3__28ios_base3ateE'] = 186460;
-var __ZNSt3__28ios_base6binaryE = Module['__ZNSt3__28ios_base6binaryE'] = 186464;
-var __ZNSt3__28ios_base2inE = Module['__ZNSt3__28ios_base2inE'] = 186468;
-var __ZNSt3__28ios_base3outE = Module['__ZNSt3__28ios_base3outE'] = 186472;
-var __ZNSt3__28ios_base5truncE = Module['__ZNSt3__28ios_base5truncE'] = 186476;
-var __ZTINSt3__28ios_baseE = Module['__ZTINSt3__28ios_baseE'] = 186544;
-var __ZTSNSt3__28ios_baseE = Module['__ZTSNSt3__28ios_baseE'] = 186525;
-var __ZTVNSt3__29basic_iosIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__29basic_iosIcNS_11char_traitsIcEEEE'] = 186552;
-var __ZTINSt3__29basic_iosIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__29basic_iosIcNS_11char_traitsIcEEEE'] = 186612;
-var __ZTSNSt3__29basic_iosIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__29basic_iosIcNS_11char_traitsIcEEEE'] = 186568;
-var __ZTVNSt3__29basic_iosIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__29basic_iosIwNS_11char_traitsIwEEEE'] = 186624;
-var __ZTINSt3__29basic_iosIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__29basic_iosIwNS_11char_traitsIwEEEE'] = 186684;
-var __ZTSNSt3__29basic_iosIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__29basic_iosIwNS_11char_traitsIwEEEE'] = 186640;
-var __ZTSNSt3__215basic_streambufIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__215basic_streambufIcNS_11char_traitsIcEEEE'] = 186696;
-var __ZTSNSt3__215basic_streambufIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__215basic_streambufIwNS_11char_traitsIwEEEE'] = 186756;
-var __ZTSNSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 186816;
-var __ZTVN10__cxxabiv121__vmi_class_type_infoE = Module['__ZTVN10__cxxabiv121__vmi_class_type_infoE'] = 224340;
-var __ZTSNSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186888;
-var __ZTSNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 186960;
-var __ZTSNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 187032;
-var __ZTSNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 187184;
-var __ZTSNSt3__219__iostream_categoryE = Module['__ZTSNSt3__219__iostream_categoryE'] = 187264;
-var __ZTSNSt3__28ios_base7failureE = Module['__ZTSNSt3__28ios_base7failureE'] = 187308;
-var __ZTINSt3__212system_errorE = Module['__ZTINSt3__212system_errorE'] = 207344;
-var __ZNSt3__219__start_std_streamsE = Module['__ZNSt3__219__start_std_streamsE'] = 188028;
-var __ZNSt3__23cinE = Module['__ZNSt3__23cinE'] = 187348;
-var __ZNSt3__24wcinE = Module['__ZNSt3__24wcinE'] = 187436;
-var __ZNSt3__24coutE = Module['__ZNSt3__24coutE'] = 187524;
-var __ZNSt3__25wcoutE = Module['__ZNSt3__25wcoutE'] = 187608;
-var __ZNSt3__24cerrE = Module['__ZNSt3__24cerrE'] = 187692;
-var __ZNSt3__24clogE = Module['__ZNSt3__24clogE'] = 187860;
-var __ZNSt3__25wcerrE = Module['__ZNSt3__25wcerrE'] = 187776;
-var __ZNSt3__25wclogE = Module['__ZNSt3__25wclogE'] = 187944;
-var __ZTVNSt3__210__stdinbufIcEE = Module['__ZTVNSt3__210__stdinbufIcEE'] = 188392;
-var __ZTVNSt3__210__stdinbufIwEE = Module['__ZTVNSt3__210__stdinbufIwEE'] = 188532;
-var __ZTVNSt3__211__stdoutbufIcEE = Module['__ZTVNSt3__211__stdoutbufIcEE'] = 188632;
-var __ZTVNSt3__211__stdoutbufIwEE = Module['__ZTVNSt3__211__stdoutbufIwEE'] = 188736;
-var __ZNSt3__27codecvtIcc11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIcc11__mbstate_tE2idE'] = 189928;
-var __ZNSt3__27codecvtIwc11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIwc11__mbstate_tE2idE'] = 189936;
-var __ZTINSt3__210__stdinbufIcEE = Module['__ZTINSt3__210__stdinbufIcEE'] = 188480;
-var __ZTSNSt3__210__stdinbufIcEE = Module['__ZTSNSt3__210__stdinbufIcEE'] = 188456;
-var __ZTINSt3__210__stdinbufIwEE = Module['__ZTINSt3__210__stdinbufIwEE'] = 188620;
-var __ZTSNSt3__210__stdinbufIwEE = Module['__ZTSNSt3__210__stdinbufIwEE'] = 188596;
-var __ZTINSt3__211__stdoutbufIcEE = Module['__ZTINSt3__211__stdoutbufIcEE'] = 188724;
-var __ZTSNSt3__211__stdoutbufIcEE = Module['__ZTSNSt3__211__stdoutbufIcEE'] = 188696;
-var __ZTINSt3__211__stdoutbufIwEE = Module['__ZTINSt3__211__stdoutbufIwEE'] = 188828;
-var __ZTSNSt3__211__stdoutbufIwEE = Module['__ZTSNSt3__211__stdoutbufIwEE'] = 188800;
-var __ZNSt3__28numpunctIcE2idE = Module['__ZNSt3__28numpunctIcE2idE'] = 190092;
-var __ZNSt3__214__num_get_base5__srcE = Module['__ZNSt3__214__num_get_base5__srcE'] = 188864;
-var __ZNSt3__28numpunctIwE2idE = Module['__ZNSt3__28numpunctIwE2idE'] = 190100;
-var __ZNSt3__210moneypunctIcLb1EE2idE = Module['__ZNSt3__210moneypunctIcLb1EE2idE'] = 189180;
-var __ZNSt3__210moneypunctIcLb0EE2idE = Module['__ZNSt3__210moneypunctIcLb0EE2idE'] = 189168;
-var __ZNSt3__210moneypunctIwLb1EE2idE = Module['__ZNSt3__210moneypunctIwLb1EE2idE'] = 189204;
-var __ZNSt3__210moneypunctIwLb0EE2idE = Module['__ZNSt3__210moneypunctIwLb0EE2idE'] = 189192;
-var __ZTVNSt3__216__narrow_to_utf8ILm32EEE = Module['__ZTVNSt3__216__narrow_to_utf8ILm32EEE'] = 191732;
-var __ZTVNSt3__217__widen_from_utf8ILm32EEE = Module['__ZTVNSt3__217__widen_from_utf8ILm32EEE'] = 191924;
-var __ZTVNSt3__26locale5__impE = Module['__ZTVNSt3__26locale5__impE'] = 189332;
-var __ZTVNSt3__26locale5facetE = Module['__ZTVNSt3__26locale5facetE'] = 191052;
-var __ZNSt3__27collateIcE2idE = Module['__ZNSt3__27collateIcE2idE'] = 188840;
-var __ZNSt3__27collateIwE2idE = Module['__ZNSt3__27collateIwE2idE'] = 188848;
-var __ZNSt3__27codecvtIDsc11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIDsc11__mbstate_tE2idE'] = 190076;
-var __ZNSt3__27codecvtIDic11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIDic11__mbstate_tE2idE'] = 190084;
-var __ZNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 189216;
-var __ZNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 189228;
-var __ZNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 189248;
-var __ZNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 189264;
-var __ZNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 188944;
-var __ZNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 188968;
-var __ZNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 189152;
-var __ZNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 189160;
-var __ZNSt3__28messagesIcE2idE = Module['__ZNSt3__28messagesIcE2idE'] = 189272;
-var __ZNSt3__28messagesIwE2idE = Module['__ZNSt3__28messagesIwE2idE'] = 189280;
-var __ZTVNSt3__214codecvt_bynameIcc11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIcc11__mbstate_tEE'] = 198156;
-var __ZTVNSt3__214codecvt_bynameIwc11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIwc11__mbstate_tEE'] = 198260;
-var __ZTVNSt3__214codecvt_bynameIDsc11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIDsc11__mbstate_tEE'] = 198364;
-var __ZTVNSt3__214codecvt_bynameIDic11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIDic11__mbstate_tEE'] = 198468;
-var __ZTVNSt3__217moneypunct_bynameIcLb0EEE = Module['__ZTVNSt3__217moneypunct_bynameIcLb0EEE'] = 196724;
-var __ZTVNSt3__217moneypunct_bynameIcLb1EEE = Module['__ZTVNSt3__217moneypunct_bynameIcLb1EEE'] = 196828;
-var __ZTVNSt3__217moneypunct_bynameIwLb0EEE = Module['__ZTVNSt3__217moneypunct_bynameIwLb0EEE'] = 196932;
-var __ZTVNSt3__217moneypunct_bynameIwLb1EEE = Module['__ZTVNSt3__217moneypunct_bynameIwLb1EEE'] = 197036;
-var __ZTVNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195148;
-var __ZTVNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195444;
-var __ZTVNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195996;
-var __ZTVNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 196112;
-var __ZTVNSt3__215messages_bynameIcEE = Module['__ZTVNSt3__215messages_bynameIcEE'] = 198004;
-var __ZTVNSt3__215messages_bynameIwEE = Module['__ZTVNSt3__215messages_bynameIwEE'] = 198080;
-var __ZNSt3__26locale2id9__next_idE = Module['__ZNSt3__26locale2id9__next_idE'] = 189380;
-var __ZTVNSt3__214collate_bynameIcEE = Module['__ZTVNSt3__214collate_bynameIcEE'] = 189384;
-var __ZTVNSt3__214collate_bynameIwEE = Module['__ZTVNSt3__214collate_bynameIwEE'] = 189480;
-var __ZTVNSt3__25ctypeIcEE = Module['__ZTVNSt3__25ctypeIcEE'] = 189632;
-var __ZTVNSt3__212ctype_bynameIcEE = Module['__ZTVNSt3__212ctype_bynameIcEE'] = 189684;
-var __ZTVNSt3__212ctype_bynameIwEE = Module['__ZTVNSt3__212ctype_bynameIwEE'] = 189796;
-var __ZTVNSt3__27codecvtIwc11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIwc11__mbstate_tEE'] = 189944;
-var __ZTVNSt3__28numpunctIcEE = Module['__ZTVNSt3__28numpunctIcEE'] = 190108;
-var __ZTVNSt3__28numpunctIwEE = Module['__ZTVNSt3__28numpunctIwEE'] = 190148;
-var __ZTVNSt3__215numpunct_bynameIcEE = Module['__ZTVNSt3__215numpunct_bynameIcEE'] = 190248;
-var __ZTVNSt3__215numpunct_bynameIwEE = Module['__ZTVNSt3__215numpunct_bynameIwEE'] = 190352;
-var __ZTVNSt3__215__time_get_tempIcEE = Module['__ZTVNSt3__215__time_get_tempIcEE'] = 201376;
-var __ZTVNSt3__215__time_get_tempIwEE = Module['__ZTVNSt3__215__time_get_tempIwEE'] = 201472;
-var __ZTVNSt3__27collateIcEE = Module['__ZTVNSt3__27collateIcEE'] = 193696;
-var __ZTVNSt3__27collateIwEE = Module['__ZTVNSt3__27collateIwEE'] = 193728;
-var __ZTVNSt3__25ctypeIwEE = Module['__ZTVNSt3__25ctypeIwEE'] = 191108;
-var __ZTVNSt3__27codecvtIcc11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIcc11__mbstate_tEE'] = 191256;
-var __ZTVNSt3__27codecvtIDsc11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIDsc11__mbstate_tEE'] = 191404;
-var __ZTVNSt3__27codecvtIDic11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIDic11__mbstate_tEE'] = 191520;
-var __ZTVNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 193760;
-var __ZTVNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194004;
-var __ZTVNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194216;
-var __ZTVNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194448;
-var __ZTVNSt3__210moneypunctIcLb0EEE = Module['__ZTVNSt3__210moneypunctIcLb0EEE'] = 196228;
-var __ZTVNSt3__210moneypunctIcLb1EEE = Module['__ZTVNSt3__210moneypunctIcLb1EEE'] = 196376;
-var __ZTVNSt3__210moneypunctIwLb0EEE = Module['__ZTVNSt3__210moneypunctIwLb0EEE'] = 196492;
-var __ZTVNSt3__210moneypunctIwLb1EEE = Module['__ZTVNSt3__210moneypunctIwLb1EEE'] = 196608;
-var __ZTVNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197140;
-var __ZTVNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197304;
-var __ZTVNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197468;
-var __ZTVNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197632;
-var __ZTVNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194648;
-var __ZTVNSt3__220__time_get_c_storageIcEE = Module['__ZTVNSt3__220__time_get_c_storageIcEE'] = 201040;
-var __ZTVNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194912;
-var __ZTVNSt3__220__time_get_c_storageIwEE = Module['__ZTVNSt3__220__time_get_c_storageIwEE'] = 201096;
-var __ZTVNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195712;
-var __ZTVNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195868;
-var __ZTVNSt3__28messagesIcEE = Module['__ZTVNSt3__28messagesIcEE'] = 197796;
-var __ZTVNSt3__28messagesIwEE = Module['__ZTVNSt3__28messagesIwEE'] = 197916;
-var __ZNSt3__210moneypunctIcLb0EE4intlE = Module['__ZNSt3__210moneypunctIcLb0EE4intlE'] = 189176;
-var __ZNSt3__210moneypunctIcLb1EE4intlE = Module['__ZNSt3__210moneypunctIcLb1EE4intlE'] = 189188;
-var __ZNSt3__210moneypunctIwLb0EE4intlE = Module['__ZNSt3__210moneypunctIwLb0EE4intlE'] = 189200;
-var __ZNSt3__210moneypunctIwLb1EE4intlE = Module['__ZNSt3__210moneypunctIwLb1EE4intlE'] = 189212;
-var __ZNSt3__26locale4noneE = Module['__ZNSt3__26locale4noneE'] = 189300;
-var __ZNSt3__26locale7collateE = Module['__ZNSt3__26locale7collateE'] = 189304;
-var __ZNSt3__26locale5ctypeE = Module['__ZNSt3__26locale5ctypeE'] = 189308;
-var __ZNSt3__26locale8monetaryE = Module['__ZNSt3__26locale8monetaryE'] = 189312;
-var __ZNSt3__26locale7numericE = Module['__ZNSt3__26locale7numericE'] = 189316;
-var __ZNSt3__26locale4timeE = Module['__ZNSt3__26locale4timeE'] = 189320;
-var __ZNSt3__26locale8messagesE = Module['__ZNSt3__26locale8messagesE'] = 189324;
-var __ZNSt3__26locale3allE = Module['__ZNSt3__26locale3allE'] = 189328;
-var __ZTINSt3__26locale5__impE = Module['__ZTINSt3__26locale5__impE'] = 193248;
-var __ZTINSt3__214collate_bynameIcEE = Module['__ZTINSt3__214collate_bynameIcEE'] = 193320;
-var __ZTINSt3__214collate_bynameIwEE = Module['__ZTINSt3__214collate_bynameIwEE'] = 193392;
-var __ZNSt3__210ctype_base5spaceE = Module['__ZNSt3__210ctype_base5spaceE'] = 189590;
-var __ZNSt3__210ctype_base5printE = Module['__ZNSt3__210ctype_base5printE'] = 189592;
-var __ZNSt3__210ctype_base5cntrlE = Module['__ZNSt3__210ctype_base5cntrlE'] = 189594;
-var __ZNSt3__210ctype_base5upperE = Module['__ZNSt3__210ctype_base5upperE'] = 189596;
-var __ZNSt3__210ctype_base5lowerE = Module['__ZNSt3__210ctype_base5lowerE'] = 189598;
-var __ZNSt3__210ctype_base5alphaE = Module['__ZNSt3__210ctype_base5alphaE'] = 189600;
-var __ZNSt3__210ctype_base5digitE = Module['__ZNSt3__210ctype_base5digitE'] = 189602;
-var __ZNSt3__210ctype_base5punctE = Module['__ZNSt3__210ctype_base5punctE'] = 189604;
-var __ZNSt3__210ctype_base6xdigitE = Module['__ZNSt3__210ctype_base6xdigitE'] = 189606;
-var __ZNSt3__210ctype_base5blankE = Module['__ZNSt3__210ctype_base5blankE'] = 189608;
-var __ZNSt3__210ctype_base5alnumE = Module['__ZNSt3__210ctype_base5alnumE'] = 189610;
-var __ZNSt3__210ctype_base5graphE = Module['__ZNSt3__210ctype_base5graphE'] = 189612;
-var __ZTINSt3__25ctypeIcEE = Module['__ZTINSt3__25ctypeIcEE'] = 193424;
-var __ZTINSt3__212ctype_bynameIcEE = Module['__ZTINSt3__212ctype_bynameIcEE'] = 193484;
-var __ZTINSt3__212ctype_bynameIwEE = Module['__ZTINSt3__212ctype_bynameIwEE'] = 193524;
-var __ZTINSt3__27codecvtIwc11__mbstate_tEE = Module['__ZTINSt3__27codecvtIwc11__mbstate_tEE'] = 192132;
-var __ZTINSt3__28numpunctIcEE = Module['__ZTINSt3__28numpunctIcEE'] = 193560;
-var __ZTINSt3__28numpunctIwEE = Module['__ZTINSt3__28numpunctIwEE'] = 193596;
-var __ZTINSt3__215numpunct_bynameIcEE = Module['__ZTINSt3__215numpunct_bynameIcEE'] = 193640;
-var __ZTINSt3__215numpunct_bynameIwEE = Module['__ZTINSt3__215numpunct_bynameIwEE'] = 193684;
-var __ZTINSt3__26locale5facetE = Module['__ZTINSt3__26locale5facetE'] = 191096;
-var __ZTSNSt3__26locale5facetE = Module['__ZTSNSt3__26locale5facetE'] = 191072;
-var __ZTINSt3__25ctypeIwEE = Module['__ZTINSt3__25ctypeIwEE'] = 191224;
-var __ZTSNSt3__25ctypeIwEE = Module['__ZTSNSt3__25ctypeIwEE'] = 191176;
-var __ZTSNSt3__210ctype_baseE = Module['__ZTSNSt3__210ctype_baseE'] = 191194;
-var __ZTINSt3__210ctype_baseE = Module['__ZTINSt3__210ctype_baseE'] = 191216;
-var __ZTINSt3__27codecvtIcc11__mbstate_tEE = Module['__ZTINSt3__27codecvtIcc11__mbstate_tEE'] = 191372;
-var __ZTSNSt3__27codecvtIcc11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIcc11__mbstate_tEE'] = 191304;
-var __ZTSNSt3__212codecvt_baseE = Module['__ZTSNSt3__212codecvt_baseE'] = 191338;
-var __ZTINSt3__212codecvt_baseE = Module['__ZTINSt3__212codecvt_baseE'] = 191364;
-var __ZTINSt3__27codecvtIDsc11__mbstate_tEE = Module['__ZTINSt3__27codecvtIDsc11__mbstate_tEE'] = 191488;
-var __ZTSNSt3__27codecvtIDsc11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIDsc11__mbstate_tEE'] = 191452;
-var __ZTINSt3__27codecvtIDic11__mbstate_tEE = Module['__ZTINSt3__27codecvtIDic11__mbstate_tEE'] = 191604;
-var __ZTSNSt3__27codecvtIDic11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIDic11__mbstate_tEE'] = 191568;
-var __ZTVNSt3__216__narrow_to_utf8ILm16EEE = Module['__ZTVNSt3__216__narrow_to_utf8ILm16EEE'] = 191636;
-var __ZTINSt3__216__narrow_to_utf8ILm16EEE = Module['__ZTINSt3__216__narrow_to_utf8ILm16EEE'] = 191720;
-var __ZTSNSt3__216__narrow_to_utf8ILm16EEE = Module['__ZTSNSt3__216__narrow_to_utf8ILm16EEE'] = 191684;
-var __ZTINSt3__216__narrow_to_utf8ILm32EEE = Module['__ZTINSt3__216__narrow_to_utf8ILm32EEE'] = 191816;
-var __ZTSNSt3__216__narrow_to_utf8ILm32EEE = Module['__ZTSNSt3__216__narrow_to_utf8ILm32EEE'] = 191780;
-var __ZTVNSt3__217__widen_from_utf8ILm16EEE = Module['__ZTVNSt3__217__widen_from_utf8ILm16EEE'] = 191828;
-var __ZTINSt3__217__widen_from_utf8ILm16EEE = Module['__ZTINSt3__217__widen_from_utf8ILm16EEE'] = 191912;
-var __ZTSNSt3__217__widen_from_utf8ILm16EEE = Module['__ZTSNSt3__217__widen_from_utf8ILm16EEE'] = 191876;
-var __ZTINSt3__217__widen_from_utf8ILm32EEE = Module['__ZTINSt3__217__widen_from_utf8ILm32EEE'] = 192008;
-var __ZTSNSt3__217__widen_from_utf8ILm32EEE = Module['__ZTSNSt3__217__widen_from_utf8ILm32EEE'] = 191972;
-var __ZTVNSt3__214__codecvt_utf8IwEE = Module['__ZTVNSt3__214__codecvt_utf8IwEE'] = 192020;
-var __ZTINSt3__214__codecvt_utf8IwEE = Module['__ZTINSt3__214__codecvt_utf8IwEE'] = 192164;
-var __ZTSNSt3__214__codecvt_utf8IwEE = Module['__ZTSNSt3__214__codecvt_utf8IwEE'] = 192068;
-var __ZTSNSt3__27codecvtIwc11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIwc11__mbstate_tEE'] = 192096;
-var __ZTVNSt3__214__codecvt_utf8IDsEE = Module['__ZTVNSt3__214__codecvt_utf8IDsEE'] = 192176;
-var __ZTINSt3__214__codecvt_utf8IDsEE = Module['__ZTINSt3__214__codecvt_utf8IDsEE'] = 192256;
-var __ZTSNSt3__214__codecvt_utf8IDsEE = Module['__ZTSNSt3__214__codecvt_utf8IDsEE'] = 192224;
-var __ZTVNSt3__214__codecvt_utf8IDiEE = Module['__ZTVNSt3__214__codecvt_utf8IDiEE'] = 192268;
-var __ZTINSt3__214__codecvt_utf8IDiEE = Module['__ZTINSt3__214__codecvt_utf8IDiEE'] = 192348;
-var __ZTSNSt3__214__codecvt_utf8IDiEE = Module['__ZTSNSt3__214__codecvt_utf8IDiEE'] = 192316;
-var __ZTVNSt3__215__codecvt_utf16IwLb0EEE = Module['__ZTVNSt3__215__codecvt_utf16IwLb0EEE'] = 192360;
-var __ZTINSt3__215__codecvt_utf16IwLb0EEE = Module['__ZTINSt3__215__codecvt_utf16IwLb0EEE'] = 192444;
-var __ZTSNSt3__215__codecvt_utf16IwLb0EEE = Module['__ZTSNSt3__215__codecvt_utf16IwLb0EEE'] = 192408;
-var __ZTVNSt3__215__codecvt_utf16IwLb1EEE = Module['__ZTVNSt3__215__codecvt_utf16IwLb1EEE'] = 192456;
-var __ZTINSt3__215__codecvt_utf16IwLb1EEE = Module['__ZTINSt3__215__codecvt_utf16IwLb1EEE'] = 192540;
-var __ZTSNSt3__215__codecvt_utf16IwLb1EEE = Module['__ZTSNSt3__215__codecvt_utf16IwLb1EEE'] = 192504;
-var __ZTVNSt3__215__codecvt_utf16IDsLb0EEE = Module['__ZTVNSt3__215__codecvt_utf16IDsLb0EEE'] = 192552;
-var __ZTINSt3__215__codecvt_utf16IDsLb0EEE = Module['__ZTINSt3__215__codecvt_utf16IDsLb0EEE'] = 192636;
-var __ZTSNSt3__215__codecvt_utf16IDsLb0EEE = Module['__ZTSNSt3__215__codecvt_utf16IDsLb0EEE'] = 192600;
-var __ZTVNSt3__215__codecvt_utf16IDsLb1EEE = Module['__ZTVNSt3__215__codecvt_utf16IDsLb1EEE'] = 192648;
-var __ZTINSt3__215__codecvt_utf16IDsLb1EEE = Module['__ZTINSt3__215__codecvt_utf16IDsLb1EEE'] = 192732;
-var __ZTSNSt3__215__codecvt_utf16IDsLb1EEE = Module['__ZTSNSt3__215__codecvt_utf16IDsLb1EEE'] = 192696;
-var __ZTVNSt3__215__codecvt_utf16IDiLb0EEE = Module['__ZTVNSt3__215__codecvt_utf16IDiLb0EEE'] = 192744;
-var __ZTINSt3__215__codecvt_utf16IDiLb0EEE = Module['__ZTINSt3__215__codecvt_utf16IDiLb0EEE'] = 192828;
-var __ZTSNSt3__215__codecvt_utf16IDiLb0EEE = Module['__ZTSNSt3__215__codecvt_utf16IDiLb0EEE'] = 192792;
-var __ZTVNSt3__215__codecvt_utf16IDiLb1EEE = Module['__ZTVNSt3__215__codecvt_utf16IDiLb1EEE'] = 192840;
-var __ZTINSt3__215__codecvt_utf16IDiLb1EEE = Module['__ZTINSt3__215__codecvt_utf16IDiLb1EEE'] = 192924;
-var __ZTSNSt3__215__codecvt_utf16IDiLb1EEE = Module['__ZTSNSt3__215__codecvt_utf16IDiLb1EEE'] = 192888;
-var __ZTVNSt3__220__codecvt_utf8_utf16IwEE = Module['__ZTVNSt3__220__codecvt_utf8_utf16IwEE'] = 192936;
-var __ZTINSt3__220__codecvt_utf8_utf16IwEE = Module['__ZTINSt3__220__codecvt_utf8_utf16IwEE'] = 193020;
-var __ZTSNSt3__220__codecvt_utf8_utf16IwEE = Module['__ZTSNSt3__220__codecvt_utf8_utf16IwEE'] = 192984;
-var __ZTVNSt3__220__codecvt_utf8_utf16IDiEE = Module['__ZTVNSt3__220__codecvt_utf8_utf16IDiEE'] = 193032;
-var __ZTINSt3__220__codecvt_utf8_utf16IDiEE = Module['__ZTINSt3__220__codecvt_utf8_utf16IDiEE'] = 193116;
-var __ZTSNSt3__220__codecvt_utf8_utf16IDiEE = Module['__ZTSNSt3__220__codecvt_utf8_utf16IDiEE'] = 193080;
-var __ZTVNSt3__220__codecvt_utf8_utf16IDsEE = Module['__ZTVNSt3__220__codecvt_utf8_utf16IDsEE'] = 193128;
-var __ZTINSt3__220__codecvt_utf8_utf16IDsEE = Module['__ZTINSt3__220__codecvt_utf8_utf16IDsEE'] = 193212;
-var __ZTSNSt3__220__codecvt_utf8_utf16IDsEE = Module['__ZTSNSt3__220__codecvt_utf8_utf16IDsEE'] = 193176;
-var __ZTSNSt3__26locale5__impE = Module['__ZTSNSt3__26locale5__impE'] = 193224;
-var __ZTSNSt3__214collate_bynameIcEE = Module['__ZTSNSt3__214collate_bynameIcEE'] = 193260;
-var __ZTSNSt3__27collateIcEE = Module['__ZTSNSt3__27collateIcEE'] = 193288;
-var __ZTINSt3__27collateIcEE = Module['__ZTINSt3__27collateIcEE'] = 193308;
-var __ZTSNSt3__214collate_bynameIwEE = Module['__ZTSNSt3__214collate_bynameIwEE'] = 193332;
-var __ZTSNSt3__27collateIwEE = Module['__ZTSNSt3__27collateIwEE'] = 193360;
-var __ZTINSt3__27collateIwEE = Module['__ZTINSt3__27collateIwEE'] = 193380;
-var __ZTSNSt3__25ctypeIcEE = Module['__ZTSNSt3__25ctypeIcEE'] = 193404;
-var __ZTSNSt3__212ctype_bynameIcEE = Module['__ZTSNSt3__212ctype_bynameIcEE'] = 193456;
-var __ZTSNSt3__212ctype_bynameIwEE = Module['__ZTSNSt3__212ctype_bynameIwEE'] = 193496;
-var __ZTSNSt3__28numpunctIcEE = Module['__ZTSNSt3__28numpunctIcEE'] = 193536;
-var __ZTSNSt3__28numpunctIwEE = Module['__ZTSNSt3__28numpunctIwEE'] = 193572;
-var __ZTSNSt3__215numpunct_bynameIcEE = Module['__ZTSNSt3__215numpunct_bynameIcEE'] = 193608;
-var __ZTSNSt3__215numpunct_bynameIwEE = Module['__ZTSNSt3__215numpunct_bynameIwEE'] = 193652;
-var __ZTINSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 193972;
-var __ZTSNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 193824;
-var __ZTSNSt3__29__num_getIcEE = Module['__ZTSNSt3__29__num_getIcEE'] = 193892;
-var __ZTSNSt3__214__num_get_baseE = Module['__ZTSNSt3__214__num_get_baseE'] = 193914;
-var __ZTINSt3__214__num_get_baseE = Module['__ZTINSt3__214__num_get_baseE'] = 193940;
-var __ZTINSt3__29__num_getIcEE = Module['__ZTINSt3__29__num_getIcEE'] = 193948;
-var __ZTINSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194184;
-var __ZTSNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194068;
-var __ZTSNSt3__29__num_getIwEE = Module['__ZTSNSt3__29__num_getIwEE'] = 194136;
-var __ZTINSt3__29__num_getIwEE = Module['__ZTINSt3__29__num_getIwEE'] = 194160;
-var __ZTINSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194416;
-var __ZTSNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194268;
-var __ZTSNSt3__29__num_putIcEE = Module['__ZTSNSt3__29__num_putIcEE'] = 194336;
-var __ZTSNSt3__214__num_put_baseE = Module['__ZTSNSt3__214__num_put_baseE'] = 194358;
-var __ZTINSt3__214__num_put_baseE = Module['__ZTINSt3__214__num_put_baseE'] = 194384;
-var __ZTINSt3__29__num_putIcEE = Module['__ZTINSt3__29__num_putIcEE'] = 194392;
-var __ZTINSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194616;
-var __ZTSNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194500;
-var __ZTSNSt3__29__num_putIwEE = Module['__ZTSNSt3__29__num_putIwEE'] = 194568;
-var __ZTINSt3__29__num_putIwEE = Module['__ZTINSt3__29__num_putIwEE'] = 194592;
-var __ZTINSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194872;
-var __ZTSNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194732;
-var __ZTSNSt3__29time_baseE = Module['__ZTSNSt3__29time_baseE'] = 194801;
-var __ZTINSt3__29time_baseE = Module['__ZTINSt3__29time_baseE'] = 194820;
-var __ZTSNSt3__220__time_get_c_storageIcEE = Module['__ZTSNSt3__220__time_get_c_storageIcEE'] = 194828;
-var __ZTINSt3__220__time_get_c_storageIcEE = Module['__ZTINSt3__220__time_get_c_storageIcEE'] = 194864;
-var __ZTINSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195108;
-var __ZTSNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194996;
-var __ZTSNSt3__220__time_get_c_storageIwEE = Module['__ZTSNSt3__220__time_get_c_storageIwEE'] = 195065;
-var __ZTINSt3__220__time_get_c_storageIwEE = Module['__ZTINSt3__220__time_get_c_storageIwEE'] = 195100;
-var __ZTINSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195412;
-var __ZTSNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195260;
-var __ZTSNSt3__218__time_get_storageIcEE = Module['__ZTSNSt3__218__time_get_storageIcEE'] = 195337;
-var __ZTSNSt3__210__time_getE = Module['__ZTSNSt3__210__time_getE'] = 195369;
-var __ZTINSt3__210__time_getE = Module['__ZTINSt3__210__time_getE'] = 195392;
-var __ZTINSt3__218__time_get_storageIcEE = Module['__ZTINSt3__218__time_get_storageIcEE'] = 195400;
-var __ZTINSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195680;
-var __ZTSNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195556;
-var __ZTSNSt3__218__time_get_storageIwEE = Module['__ZTSNSt3__218__time_get_storageIwEE'] = 195633;
-var __ZTINSt3__218__time_get_storageIwEE = Module['__ZTINSt3__218__time_get_storageIwEE'] = 195668;
-var __ZTINSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195836;
-var __ZTSNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195736;
-var __ZTSNSt3__210__time_putE = Module['__ZTSNSt3__210__time_putE'] = 195805;
-var __ZTINSt3__210__time_putE = Module['__ZTINSt3__210__time_putE'] = 195828;
-var __ZTINSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195964;
-var __ZTSNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195892;
-var __ZTINSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 196100;
-var __ZTSNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 196020;
-var __ZTINSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 196216;
-var __ZTSNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 196136;
-var __ZTINSt3__210moneypunctIcLb0EEE = Module['__ZTINSt3__210moneypunctIcLb0EEE'] = 196344;
-var __ZTSNSt3__210moneypunctIcLb0EEE = Module['__ZTSNSt3__210moneypunctIcLb0EEE'] = 196284;
-var __ZTSNSt3__210money_baseE = Module['__ZTSNSt3__210money_baseE'] = 196312;
-var __ZTINSt3__210money_baseE = Module['__ZTINSt3__210money_baseE'] = 196336;
-var __ZTINSt3__210moneypunctIcLb1EEE = Module['__ZTINSt3__210moneypunctIcLb1EEE'] = 196460;
-var __ZTSNSt3__210moneypunctIcLb1EEE = Module['__ZTSNSt3__210moneypunctIcLb1EEE'] = 196432;
-var __ZTINSt3__210moneypunctIwLb0EEE = Module['__ZTINSt3__210moneypunctIwLb0EEE'] = 196576;
-var __ZTSNSt3__210moneypunctIwLb0EEE = Module['__ZTSNSt3__210moneypunctIwLb0EEE'] = 196548;
-var __ZTINSt3__210moneypunctIwLb1EEE = Module['__ZTINSt3__210moneypunctIwLb1EEE'] = 196692;
-var __ZTSNSt3__210moneypunctIwLb1EEE = Module['__ZTSNSt3__210moneypunctIwLb1EEE'] = 196664;
-var __ZTINSt3__217moneypunct_bynameIcLb0EEE = Module['__ZTINSt3__217moneypunct_bynameIcLb0EEE'] = 196816;
-var __ZTSNSt3__217moneypunct_bynameIcLb0EEE = Module['__ZTSNSt3__217moneypunct_bynameIcLb0EEE'] = 196780;
-var __ZTINSt3__217moneypunct_bynameIcLb1EEE = Module['__ZTINSt3__217moneypunct_bynameIcLb1EEE'] = 196920;
-var __ZTSNSt3__217moneypunct_bynameIcLb1EEE = Module['__ZTSNSt3__217moneypunct_bynameIcLb1EEE'] = 196884;
-var __ZTINSt3__217moneypunct_bynameIwLb0EEE = Module['__ZTINSt3__217moneypunct_bynameIwLb0EEE'] = 197024;
-var __ZTSNSt3__217moneypunct_bynameIwLb0EEE = Module['__ZTSNSt3__217moneypunct_bynameIwLb0EEE'] = 196988;
-var __ZTINSt3__217moneypunct_bynameIwLb1EEE = Module['__ZTINSt3__217moneypunct_bynameIwLb1EEE'] = 197128;
-var __ZTSNSt3__217moneypunct_bynameIwLb1EEE = Module['__ZTSNSt3__217moneypunct_bynameIwLb1EEE'] = 197092;
-var __ZTINSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197272;
-var __ZTSNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197168;
-var __ZTSNSt3__211__money_getIcEE = Module['__ZTSNSt3__211__money_getIcEE'] = 197238;
-var __ZTINSt3__211__money_getIcEE = Module['__ZTINSt3__211__money_getIcEE'] = 197264;
-var __ZTINSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197436;
-var __ZTSNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197332;
-var __ZTSNSt3__211__money_getIwEE = Module['__ZTSNSt3__211__money_getIwEE'] = 197402;
-var __ZTINSt3__211__money_getIwEE = Module['__ZTINSt3__211__money_getIwEE'] = 197428;
-var __ZTINSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197600;
-var __ZTSNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197496;
-var __ZTSNSt3__211__money_putIcEE = Module['__ZTSNSt3__211__money_putIcEE'] = 197566;
-var __ZTINSt3__211__money_putIcEE = Module['__ZTINSt3__211__money_putIcEE'] = 197592;
-var __ZTINSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197764;
-var __ZTSNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197660;
-var __ZTSNSt3__211__money_putIwEE = Module['__ZTSNSt3__211__money_putIwEE'] = 197730;
-var __ZTINSt3__211__money_putIwEE = Module['__ZTINSt3__211__money_putIwEE'] = 197756;
-var __ZTINSt3__28messagesIcEE = Module['__ZTINSt3__28messagesIcEE'] = 197884;
-var __ZTSNSt3__28messagesIcEE = Module['__ZTSNSt3__28messagesIcEE'] = 197828;
-var __ZTSNSt3__213messages_baseE = Module['__ZTSNSt3__213messages_baseE'] = 197849;
-var __ZTINSt3__213messages_baseE = Module['__ZTINSt3__213messages_baseE'] = 197876;
-var __ZTINSt3__28messagesIwEE = Module['__ZTINSt3__28messagesIwEE'] = 197972;
-var __ZTSNSt3__28messagesIwEE = Module['__ZTSNSt3__28messagesIwEE'] = 197948;
-var __ZTINSt3__215messages_bynameIcEE = Module['__ZTINSt3__215messages_bynameIcEE'] = 198068;
-var __ZTSNSt3__215messages_bynameIcEE = Module['__ZTSNSt3__215messages_bynameIcEE'] = 198036;
-var __ZTINSt3__215messages_bynameIwEE = Module['__ZTINSt3__215messages_bynameIwEE'] = 198144;
-var __ZTSNSt3__215messages_bynameIwEE = Module['__ZTSNSt3__215messages_bynameIwEE'] = 198112;
-var __ZTINSt3__214codecvt_bynameIcc11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIcc11__mbstate_tEE'] = 198248;
-var __ZTSNSt3__214codecvt_bynameIcc11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIcc11__mbstate_tEE'] = 198204;
-var __ZTINSt3__214codecvt_bynameIwc11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIwc11__mbstate_tEE'] = 198352;
-var __ZTSNSt3__214codecvt_bynameIwc11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIwc11__mbstate_tEE'] = 198308;
-var __ZTINSt3__214codecvt_bynameIDsc11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIDsc11__mbstate_tEE'] = 198456;
-var __ZTSNSt3__214codecvt_bynameIDsc11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIDsc11__mbstate_tEE'] = 198412;
-var __ZTINSt3__214codecvt_bynameIDic11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIDic11__mbstate_tEE'] = 198560;
-var __ZTSNSt3__214codecvt_bynameIDic11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIDic11__mbstate_tEE'] = 198516;
-var __ZTINSt3__215__time_get_tempIcEE = Module['__ZTINSt3__215__time_get_tempIcEE'] = 201460;
-var __ZTSNSt3__215__time_get_tempIcEE = Module['__ZTSNSt3__215__time_get_tempIcEE'] = 201428;
-var __ZTINSt3__215__time_get_tempIwEE = Module['__ZTINSt3__215__time_get_tempIwEE'] = 201572;
-var __ZTSNSt3__215__time_get_tempIwEE = Module['__ZTSNSt3__215__time_get_tempIwEE'] = 201540;
-var __ZNSt3__213allocator_argE = Module['__ZNSt3__213allocator_argE'] = 201584;
-var __ZTSNSt3__214__shared_countE = Module['__ZTSNSt3__214__shared_countE'] = 202148;
-var __ZTVNSt3__219__shared_weak_countE = Module['__ZTVNSt3__219__shared_weak_countE'] = 202184;
-var __ZTINSt3__219__shared_weak_countE = Module['__ZTINSt3__219__shared_weak_countE'] = 202244;
-var __ZTSNSt3__219__shared_weak_countE = Module['__ZTSNSt3__219__shared_weak_countE'] = 202212;
-var __ZTVNSt3__212bad_weak_ptrE = Module['__ZTVNSt3__212bad_weak_ptrE'] = 202268;
-var __ZTINSt3__212bad_weak_ptrE = Module['__ZTINSt3__212bad_weak_ptrE'] = 202312;
-var __ZTSNSt3__212bad_weak_ptrE = Module['__ZTSNSt3__212bad_weak_ptrE'] = 202288;
-var __ZNSt3__210defer_lockE = Module['__ZNSt3__210defer_lockE'] = 202324;
-var __ZNSt3__211try_to_lockE = Module['__ZNSt3__211try_to_lockE'] = 202325;
-var __ZNSt3__210adopt_lockE = Module['__ZNSt3__210adopt_lockE'] = 202326;
-var __ZSt7nothrow = Module['__ZSt7nothrow'] = 202560;
-var __ZTVSt19bad_optional_access = Module['__ZTVSt19bad_optional_access'] = 202584;
-var __ZTISt19bad_optional_access = Module['__ZTISt19bad_optional_access'] = 202628;
-var __ZTSSt19bad_optional_access = Module['__ZTSSt19bad_optional_access'] = 202604;
-var __ZTVNSt12experimental19bad_optional_accessE = Module['__ZTVNSt12experimental19bad_optional_accessE'] = 202640;
-var __ZTINSt12experimental19bad_optional_accessE = Module['__ZTINSt12experimental19bad_optional_accessE'] = 202700;
-var __ZTSNSt12experimental19bad_optional_accessE = Module['__ZTSNSt12experimental19bad_optional_accessE'] = 202660;
-var __ZTVNSt3__211regex_errorE = Module['__ZTVNSt3__211regex_errorE'] = 202788;
-var __ZTINSt3__211regex_errorE = Module['__ZTINSt3__211regex_errorE'] = 203856;
-var __ZTSNSt3__211regex_errorE = Module['__ZTSNSt3__211regex_errorE'] = 203832;
-var __ZTISt13runtime_error = Module['__ZTISt13runtime_error'] = 221992;
-var __ZTVSt11logic_error = Module['__ZTVSt11logic_error'] = 221656;
-var __ZTVSt9exception = Module['__ZTVSt9exception'] = 221492;
-var __ZTVSt13runtime_error = Module['__ZTVSt13runtime_error'] = 221676;
-var __ZNSt3__212basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4nposE = Module['__ZNSt3__212basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4nposE'] = 205812;
-var __ZNSt3__212basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE4nposE = Module['__ZNSt3__212basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE4nposE'] = 205816;
-var __ZTVNSt3__212strstreambufE = Module['__ZTVNSt3__212strstreambufE'] = 206240;
-var __ZTTNSt3__210istrstreamE = Module['__ZTTNSt3__210istrstreamE'] = 206344;
-var __ZTTNSt3__210ostrstreamE = Module['__ZTTNSt3__210ostrstreamE'] = 206400;
-var __ZTTNSt3__29strstreamE = Module['__ZTTNSt3__29strstreamE'] = 206476;
-var __ZTINSt3__212strstreambufE = Module['__ZTINSt3__212strstreambufE'] = 206540;
-var __ZTVNSt3__210istrstreamE = Module['__ZTVNSt3__210istrstreamE'] = 206304;
-var __ZTINSt3__210istrstreamE = Module['__ZTINSt3__210istrstreamE'] = 206616;
-var __ZTCNSt3__210istrstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__210istrstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE'] = 206552;
-var __ZTVNSt3__210ostrstreamE = Module['__ZTVNSt3__210ostrstreamE'] = 206360;
-var __ZTINSt3__210ostrstreamE = Module['__ZTINSt3__210ostrstreamE'] = 206692;
-var __ZTCNSt3__210ostrstreamE0_NS_13basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__210ostrstreamE0_NS_13basic_ostreamIcNS_11char_traitsIcEEEE'] = 206628;
-var __ZTVNSt3__29strstreamE = Module['__ZTVNSt3__29strstreamE'] = 206416;
-var __ZTINSt3__29strstreamE = Module['__ZTINSt3__29strstreamE'] = 206864;
-var __ZTCNSt3__29strstreamE0_NS_14basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__29strstreamE0_NS_14basic_iostreamIcNS_11char_traitsIcEEEE'] = 206704;
-var __ZTCNSt3__29strstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__29strstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE'] = 206764;
-var __ZTCNSt3__29strstreamE8_NS_13basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__29strstreamE8_NS_13basic_ostreamIcNS_11char_traitsIcEEEE'] = 206804;
-var __ZTSNSt3__212strstreambufE = Module['__ZTSNSt3__212strstreambufE'] = 206516;
-var __ZTSNSt3__210istrstreamE = Module['__ZTSNSt3__210istrstreamE'] = 206592;
-var __ZTSNSt3__210ostrstreamE = Module['__ZTSNSt3__210ostrstreamE'] = 206668;
-var __ZTSNSt3__29strstreamE = Module['__ZTSNSt3__29strstreamE'] = 206844;
-var __ZTVNSt3__212system_errorE = Module['__ZTVNSt3__212system_errorE'] = 207056;
-var __ZTVNSt3__224__generic_error_categoryE = Module['__ZTVNSt3__224__generic_error_categoryE'] = 206924;
-var __ZTINSt3__224__generic_error_categoryE = Module['__ZTINSt3__224__generic_error_categoryE'] = 207260;
-var __ZTVNSt3__223__system_error_categoryE = Module['__ZTVNSt3__223__system_error_categoryE'] = 207012;
-var __ZTINSt3__223__system_error_categoryE = Module['__ZTINSt3__223__system_error_categoryE'] = 207308;
-var __ZTVNSt3__214error_categoryE = Module['__ZTVNSt3__214error_categoryE'] = 207080;
-var __ZTINSt3__214error_categoryE = Module['__ZTINSt3__214error_categoryE'] = 207144;
-var __ZTSNSt3__214error_categoryE = Module['__ZTSNSt3__214error_categoryE'] = 207116;
-var __ZTVNSt3__212__do_messageE = Module['__ZTVNSt3__212__do_messageE'] = 207152;
-var __ZTSNSt3__212__do_messageE = Module['__ZTSNSt3__212__do_messageE'] = 207188;
-var __ZTSNSt3__224__generic_error_categoryE = Module['__ZTSNSt3__224__generic_error_categoryE'] = 207224;
-var __ZTSNSt3__223__system_error_categoryE = Module['__ZTSNSt3__223__system_error_categoryE'] = 207272;
-var __ZTSNSt3__212system_errorE = Module['__ZTSNSt3__212system_errorE'] = 207320;
-var __ZNSt3__219piecewise_constructE = Module['__ZNSt3__219piecewise_constructE'] = 207466;
-var __ZTVSt18bad_variant_access = Module['__ZTVSt18bad_variant_access'] = 207488;
-var __ZTISt18bad_variant_access = Module['__ZTISt18bad_variant_access'] = 207532;
-var __ZTSSt18bad_variant_access = Module['__ZTSSt18bad_variant_access'] = 207508;
-var __ZTVNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE = Module['__ZTVNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE'] = 207552;
-var __ZTINSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE = Module['__ZTINSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE'] = 207756;
-var __ZTVNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE = Module['__ZTVNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE'] = 207580;
-var __ZTINSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE = Module['__ZTINSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE'] = 207836;
-var __ZTSNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE = Module['__ZTSNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE'] = 207616;
-var __ZTSNSt12experimental15fundamentals_v13pmr15memory_resourceE = Module['__ZTSNSt12experimental15fundamentals_v13pmr15memory_resourceE'] = 207690;
-var __ZTINSt12experimental15fundamentals_v13pmr15memory_resourceE = Module['__ZTINSt12experimental15fundamentals_v13pmr15memory_resourceE'] = 207748;
-var __ZTSNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE = Module['__ZTSNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE'] = 207768;
-var __ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE = Module['__ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE'] = 208120;
-var __ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE = Module['__ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE'] = 208256;
-var __ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE = Module['__ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE'] = 208236;
-var __ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE = Module['__ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE'] = 208148;
-var __ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE = Module['__ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE'] = 208404;
-var __ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE = Module['__ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE'] = 208284;
-var __ZTVNSt3__24__fs10filesystem16filesystem_errorE = Module['__ZTVNSt3__24__fs10filesystem16filesystem_errorE'] = 208456;
-var __ZTVNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209224;
-var __ZTTNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209264;
-var __ZTVNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209540;
-var __ZTTNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209580;
-var __ZTVNSt3__213basic_filebufIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__213basic_filebufIcNS_11char_traitsIcEEEE'] = 209380;
-var __ZNSt3__24__fs10filesystem16_FilesystemClock9is_steadyE = Module['__ZNSt3__24__fs10filesystem16_FilesystemClock9is_steadyE'] = 208416;
-var __ZTINSt3__24__fs10filesystem16filesystem_errorE = Module['__ZTINSt3__24__fs10filesystem16filesystem_errorE'] = 208988;
-var __ZNSt3__24__fs10filesystem4path19preferred_separatorE = Module['__ZNSt3__24__fs10filesystem4path19preferred_separatorE'] = 208940;
-var __ZTSNSt3__24__fs10filesystem16filesystem_errorE = Module['__ZTSNSt3__24__fs10filesystem16filesystem_errorE'] = 208944;
-var __ZTINSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209368;
-var __ZTCNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE = Module['__ZTCNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE'] = 209280;
-var __ZTSNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209320;
-var __ZTINSt3__213basic_filebufIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__213basic_filebufIcNS_11char_traitsIcEEEE'] = 209492;
-var __ZTSNSt3__213basic_filebufIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__213basic_filebufIcNS_11char_traitsIcEEEE'] = 209444;
-var __ZTINSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209684;
-var __ZTCNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE0_NS_13basic_ostreamIcS2_EE = Module['__ZTCNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE0_NS_13basic_ostreamIcS2_EE'] = 209596;
-var __ZTSNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209636;
-var ___cxa_unexpected_handler = Module['___cxa_unexpected_handler'] = 209724;
-var ___cxa_terminate_handler = Module['___cxa_terminate_handler'] = 209720;
-var ___cxa_new_handler = Module['___cxa_new_handler'] = 220788;
-var __ZTVSt9bad_alloc = Module['__ZTVSt9bad_alloc'] = 221412;
-var __ZTVSt20bad_array_new_length = Module['__ZTVSt20bad_array_new_length'] = 221448;
-var __ZTISt9bad_alloc = Module['__ZTISt9bad_alloc'] = 221604;
-var __ZTISt20bad_array_new_length = Module['__ZTISt20bad_array_new_length'] = 221644;
-var __ZTSSt9exception = Module['__ZTSSt9exception'] = 221512;
-var __ZTVSt13bad_exception = Module['__ZTVSt13bad_exception'] = 221536;
-var __ZTISt13bad_exception = Module['__ZTISt13bad_exception'] = 221576;
-var __ZTSSt13bad_exception = Module['__ZTSSt13bad_exception'] = 221556;
-var __ZTSSt9bad_alloc = Module['__ZTSSt9bad_alloc'] = 221588;
-var __ZTSSt20bad_array_new_length = Module['__ZTSSt20bad_array_new_length'] = 221616;
-var __ZTVSt12domain_error = Module['__ZTVSt12domain_error'] = 221696;
-var __ZTISt12domain_error = Module['__ZTISt12domain_error'] = 221764;
-var __ZTSSt12domain_error = Module['__ZTSSt12domain_error'] = 221716;
-var __ZTSSt11logic_error = Module['__ZTSSt11logic_error'] = 221733;
-var __ZTVSt16invalid_argument = Module['__ZTVSt16invalid_argument'] = 221776;
-var __ZTISt16invalid_argument = Module['__ZTISt16invalid_argument'] = 221820;
-var __ZTSSt16invalid_argument = Module['__ZTSSt16invalid_argument'] = 221796;
-var __ZTVSt12length_error = Module['__ZTVSt12length_error'] = 221832;
-var __ZTISt12length_error = Module['__ZTISt12length_error'] = 221872;
-var __ZTSSt12length_error = Module['__ZTSSt12length_error'] = 221852;
-var __ZTVSt12out_of_range = Module['__ZTVSt12out_of_range'] = 221884;
-var __ZTISt12out_of_range = Module['__ZTISt12out_of_range'] = 221924;
-var __ZTSSt12out_of_range = Module['__ZTSSt12out_of_range'] = 221904;
-var __ZTVSt11range_error = Module['__ZTVSt11range_error'] = 221936;
-var __ZTISt11range_error = Module['__ZTISt11range_error'] = 222004;
-var __ZTSSt11range_error = Module['__ZTSSt11range_error'] = 221956;
-var __ZTSSt13runtime_error = Module['__ZTSSt13runtime_error'] = 221972;
-var __ZTVSt14overflow_error = Module['__ZTVSt14overflow_error'] = 222016;
-var __ZTISt14overflow_error = Module['__ZTISt14overflow_error'] = 222056;
-var __ZTSSt14overflow_error = Module['__ZTSSt14overflow_error'] = 222036;
-var __ZTVSt15underflow_error = Module['__ZTVSt15underflow_error'] = 222068;
-var __ZTISt15underflow_error = Module['__ZTISt15underflow_error'] = 222108;
-var __ZTSSt15underflow_error = Module['__ZTSSt15underflow_error'] = 222088;
-var __ZTVSt8bad_cast = Module['__ZTVSt8bad_cast'] = 222120;
-var __ZTVSt10bad_typeid = Module['__ZTVSt10bad_typeid'] = 222156;
-var __ZTISt10bad_typeid = Module['__ZTISt10bad_typeid'] = 222272;
-var __ZTVSt9type_info = Module['__ZTVSt9type_info'] = 222192;
-var __ZTISt9type_info = Module['__ZTISt9type_info'] = 222224;
-var __ZTSSt9type_info = Module['__ZTSSt9type_info'] = 222208;
-var __ZTSSt8bad_cast = Module['__ZTSSt8bad_cast'] = 222232;
-var __ZTSSt10bad_typeid = Module['__ZTSSt10bad_typeid'] = 222256;
-var __ZTIN10__cxxabiv117__class_type_infoE = Module['__ZTIN10__cxxabiv117__class_type_infoE'] = 222368;
-var __ZTIN10__cxxabiv116__shim_type_infoE = Module['__ZTIN10__cxxabiv116__shim_type_infoE'] = 222320;
-var __ZTIN10__cxxabiv117__pbase_type_infoE = Module['__ZTIN10__cxxabiv117__pbase_type_infoE'] = 222416;
-var __ZTIDn = Module['__ZTIDn'] = 222764;
-var __ZTIN10__cxxabiv119__pointer_type_infoE = Module['__ZTIN10__cxxabiv119__pointer_type_infoE'] = 222464;
-var __ZTIv = Module['__ZTIv'] = 222712;
-var __ZTIN10__cxxabiv120__function_type_infoE = Module['__ZTIN10__cxxabiv120__function_type_infoE'] = 222516;
-var __ZTIN10__cxxabiv129__pointer_to_member_type_infoE = Module['__ZTIN10__cxxabiv129__pointer_to_member_type_infoE'] = 222576;
-var __ZTSN10__cxxabiv116__shim_type_infoE = Module['__ZTSN10__cxxabiv116__shim_type_infoE'] = 222284;
-var __ZTSN10__cxxabiv117__class_type_infoE = Module['__ZTSN10__cxxabiv117__class_type_infoE'] = 222332;
-var __ZTSN10__cxxabiv117__pbase_type_infoE = Module['__ZTSN10__cxxabiv117__pbase_type_infoE'] = 222380;
-var __ZTSN10__cxxabiv119__pointer_type_infoE = Module['__ZTSN10__cxxabiv119__pointer_type_infoE'] = 222428;
-var __ZTSN10__cxxabiv120__function_type_infoE = Module['__ZTSN10__cxxabiv120__function_type_infoE'] = 222476;
-var __ZTSN10__cxxabiv129__pointer_to_member_type_infoE = Module['__ZTSN10__cxxabiv129__pointer_to_member_type_infoE'] = 222528;
-var __ZTVN10__cxxabiv116__shim_type_infoE = Module['__ZTVN10__cxxabiv116__shim_type_infoE'] = 222600;
-var __ZTVN10__cxxabiv123__fundamental_type_infoE = Module['__ZTVN10__cxxabiv123__fundamental_type_infoE'] = 222628;
-var __ZTIN10__cxxabiv123__fundamental_type_infoE = Module['__ZTIN10__cxxabiv123__fundamental_type_infoE'] = 222696;
-var __ZTSN10__cxxabiv123__fundamental_type_infoE = Module['__ZTSN10__cxxabiv123__fundamental_type_infoE'] = 222656;
-var __ZTSv = Module['__ZTSv'] = 222708;
-var __ZTSPv = Module['__ZTSPv'] = 222720;
-var __ZTIPv = Module['__ZTIPv'] = 222724;
-var __ZTVN10__cxxabiv119__pointer_type_infoE = Module['__ZTVN10__cxxabiv119__pointer_type_infoE'] = 224460;
-var __ZTSPKv = Module['__ZTSPKv'] = 222740;
-var __ZTIPKv = Module['__ZTIPKv'] = 222744;
-var __ZTSDn = Module['__ZTSDn'] = 222760;
-var __ZTSPDn = Module['__ZTSPDn'] = 222772;
-var __ZTIPDn = Module['__ZTIPDn'] = 222776;
-var __ZTSPKDn = Module['__ZTSPKDn'] = 222792;
-var __ZTIPKDn = Module['__ZTIPKDn'] = 222800;
-var __ZTSb = Module['__ZTSb'] = 222816;
-var __ZTIb = Module['__ZTIb'] = 222820;
-var __ZTSPb = Module['__ZTSPb'] = 222828;
-var __ZTIPb = Module['__ZTIPb'] = 222832;
-var __ZTSPKb = Module['__ZTSPKb'] = 222848;
-var __ZTIPKb = Module['__ZTIPKb'] = 222852;
-var __ZTSw = Module['__ZTSw'] = 222868;
-var __ZTIw = Module['__ZTIw'] = 222872;
-var __ZTSPw = Module['__ZTSPw'] = 222880;
-var __ZTIPw = Module['__ZTIPw'] = 222884;
-var __ZTSPKw = Module['__ZTSPKw'] = 222900;
-var __ZTIPKw = Module['__ZTIPKw'] = 222904;
-var __ZTSc = Module['__ZTSc'] = 222920;
-var __ZTIc = Module['__ZTIc'] = 222924;
-var __ZTSPc = Module['__ZTSPc'] = 222932;
-var __ZTIPc = Module['__ZTIPc'] = 222936;
-var __ZTSPKc = Module['__ZTSPKc'] = 222952;
-var __ZTIPKc = Module['__ZTIPKc'] = 222956;
-var __ZTSh = Module['__ZTSh'] = 222972;
-var __ZTIh = Module['__ZTIh'] = 222976;
-var __ZTSPh = Module['__ZTSPh'] = 222984;
-var __ZTIPh = Module['__ZTIPh'] = 222988;
-var __ZTSPKh = Module['__ZTSPKh'] = 223004;
-var __ZTIPKh = Module['__ZTIPKh'] = 223008;
-var __ZTSa = Module['__ZTSa'] = 223024;
-var __ZTIa = Module['__ZTIa'] = 223028;
-var __ZTSPa = Module['__ZTSPa'] = 223036;
-var __ZTIPa = Module['__ZTIPa'] = 223040;
-var __ZTSPKa = Module['__ZTSPKa'] = 223056;
-var __ZTIPKa = Module['__ZTIPKa'] = 223060;
-var __ZTSs = Module['__ZTSs'] = 223076;
-var __ZTIs = Module['__ZTIs'] = 223080;
-var __ZTSPs = Module['__ZTSPs'] = 223088;
-var __ZTIPs = Module['__ZTIPs'] = 223092;
-var __ZTSPKs = Module['__ZTSPKs'] = 223108;
-var __ZTIPKs = Module['__ZTIPKs'] = 223112;
-var __ZTSt = Module['__ZTSt'] = 223128;
-var __ZTIt = Module['__ZTIt'] = 223132;
-var __ZTSPt = Module['__ZTSPt'] = 223140;
-var __ZTIPt = Module['__ZTIPt'] = 223144;
-var __ZTSPKt = Module['__ZTSPKt'] = 223160;
-var __ZTIPKt = Module['__ZTIPKt'] = 223164;
-var __ZTSi = Module['__ZTSi'] = 223180;
-var __ZTIi = Module['__ZTIi'] = 223184;
-var __ZTSPi = Module['__ZTSPi'] = 223192;
-var __ZTIPi = Module['__ZTIPi'] = 223196;
-var __ZTSPKi = Module['__ZTSPKi'] = 223212;
-var __ZTIPKi = Module['__ZTIPKi'] = 223216;
-var __ZTSj = Module['__ZTSj'] = 223232;
-var __ZTIj = Module['__ZTIj'] = 223236;
-var __ZTSPj = Module['__ZTSPj'] = 223244;
-var __ZTIPj = Module['__ZTIPj'] = 223248;
-var __ZTSPKj = Module['__ZTSPKj'] = 223264;
-var __ZTIPKj = Module['__ZTIPKj'] = 223268;
-var __ZTSl = Module['__ZTSl'] = 223284;
-var __ZTIl = Module['__ZTIl'] = 223288;
-var __ZTSPl = Module['__ZTSPl'] = 223296;
-var __ZTIPl = Module['__ZTIPl'] = 223300;
-var __ZTSPKl = Module['__ZTSPKl'] = 223316;
-var __ZTIPKl = Module['__ZTIPKl'] = 223320;
-var __ZTSm = Module['__ZTSm'] = 223336;
-var __ZTIm = Module['__ZTIm'] = 223340;
-var __ZTSPm = Module['__ZTSPm'] = 223348;
-var __ZTIPm = Module['__ZTIPm'] = 223352;
-var __ZTSPKm = Module['__ZTSPKm'] = 223368;
-var __ZTIPKm = Module['__ZTIPKm'] = 223372;
-var __ZTSx = Module['__ZTSx'] = 223388;
-var __ZTIx = Module['__ZTIx'] = 223392;
-var __ZTSPx = Module['__ZTSPx'] = 223400;
-var __ZTIPx = Module['__ZTIPx'] = 223404;
-var __ZTSPKx = Module['__ZTSPKx'] = 223420;
-var __ZTIPKx = Module['__ZTIPKx'] = 223424;
-var __ZTSy = Module['__ZTSy'] = 223440;
-var __ZTIy = Module['__ZTIy'] = 223444;
-var __ZTSPy = Module['__ZTSPy'] = 223452;
-var __ZTIPy = Module['__ZTIPy'] = 223456;
-var __ZTSPKy = Module['__ZTSPKy'] = 223472;
-var __ZTIPKy = Module['__ZTIPKy'] = 223476;
-var __ZTSn = Module['__ZTSn'] = 223492;
-var __ZTIn = Module['__ZTIn'] = 223496;
-var __ZTSPn = Module['__ZTSPn'] = 223504;
-var __ZTIPn = Module['__ZTIPn'] = 223508;
-var __ZTSPKn = Module['__ZTSPKn'] = 223524;
-var __ZTIPKn = Module['__ZTIPKn'] = 223528;
-var __ZTSo = Module['__ZTSo'] = 223544;
-var __ZTIo = Module['__ZTIo'] = 223548;
-var __ZTSPo = Module['__ZTSPo'] = 223556;
-var __ZTIPo = Module['__ZTIPo'] = 223560;
-var __ZTSPKo = Module['__ZTSPKo'] = 223576;
-var __ZTIPKo = Module['__ZTIPKo'] = 223580;
-var __ZTSDh = Module['__ZTSDh'] = 223596;
-var __ZTIDh = Module['__ZTIDh'] = 223600;
-var __ZTSPDh = Module['__ZTSPDh'] = 223608;
-var __ZTIPDh = Module['__ZTIPDh'] = 223612;
-var __ZTSPKDh = Module['__ZTSPKDh'] = 223628;
-var __ZTIPKDh = Module['__ZTIPKDh'] = 223636;
-var __ZTSf = Module['__ZTSf'] = 223652;
-var __ZTIf = Module['__ZTIf'] = 223656;
-var __ZTSPf = Module['__ZTSPf'] = 223664;
-var __ZTIPf = Module['__ZTIPf'] = 223668;
-var __ZTSPKf = Module['__ZTSPKf'] = 223684;
-var __ZTIPKf = Module['__ZTIPKf'] = 223688;
-var __ZTSd = Module['__ZTSd'] = 223704;
-var __ZTId = Module['__ZTId'] = 223708;
-var __ZTSPd = Module['__ZTSPd'] = 223716;
-var __ZTIPd = Module['__ZTIPd'] = 223720;
-var __ZTSPKd = Module['__ZTSPKd'] = 223736;
-var __ZTIPKd = Module['__ZTIPKd'] = 223740;
-var __ZTSe = Module['__ZTSe'] = 223756;
-var __ZTIe = Module['__ZTIe'] = 223760;
-var __ZTSPe = Module['__ZTSPe'] = 223768;
-var __ZTIPe = Module['__ZTIPe'] = 223772;
-var __ZTSPKe = Module['__ZTSPKe'] = 223788;
-var __ZTIPKe = Module['__ZTIPKe'] = 223792;
-var __ZTSg = Module['__ZTSg'] = 223808;
-var __ZTIg = Module['__ZTIg'] = 223812;
-var __ZTSPg = Module['__ZTSPg'] = 223820;
-var __ZTIPg = Module['__ZTIPg'] = 223824;
-var __ZTSPKg = Module['__ZTSPKg'] = 223840;
-var __ZTIPKg = Module['__ZTIPKg'] = 223844;
-var __ZTSDu = Module['__ZTSDu'] = 223860;
-var __ZTIDu = Module['__ZTIDu'] = 223864;
-var __ZTSPDu = Module['__ZTSPDu'] = 223872;
-var __ZTIPDu = Module['__ZTIPDu'] = 223876;
-var __ZTSPKDu = Module['__ZTSPKDu'] = 223892;
-var __ZTIPKDu = Module['__ZTIPKDu'] = 223900;
-var __ZTSDs = Module['__ZTSDs'] = 223916;
-var __ZTIDs = Module['__ZTIDs'] = 223920;
-var __ZTSPDs = Module['__ZTSPDs'] = 223928;
-var __ZTIPDs = Module['__ZTIPDs'] = 223932;
-var __ZTSPKDs = Module['__ZTSPKDs'] = 223948;
-var __ZTIPKDs = Module['__ZTIPKDs'] = 223956;
-var __ZTSDi = Module['__ZTSDi'] = 223972;
-var __ZTIDi = Module['__ZTIDi'] = 223976;
-var __ZTSPDi = Module['__ZTSPDi'] = 223984;
-var __ZTIPDi = Module['__ZTIPDi'] = 223988;
-var __ZTSPKDi = Module['__ZTSPKDi'] = 224004;
-var __ZTIPKDi = Module['__ZTIPKDi'] = 224012;
-var __ZTVN10__cxxabiv117__array_type_infoE = Module['__ZTVN10__cxxabiv117__array_type_infoE'] = 224028;
-var __ZTIN10__cxxabiv117__array_type_infoE = Module['__ZTIN10__cxxabiv117__array_type_infoE'] = 224092;
-var __ZTSN10__cxxabiv117__array_type_infoE = Module['__ZTSN10__cxxabiv117__array_type_infoE'] = 224056;
-var __ZTVN10__cxxabiv120__function_type_infoE = Module['__ZTVN10__cxxabiv120__function_type_infoE'] = 224104;
-var __ZTVN10__cxxabiv116__enum_type_infoE = Module['__ZTVN10__cxxabiv116__enum_type_infoE'] = 224132;
-var __ZTIN10__cxxabiv116__enum_type_infoE = Module['__ZTIN10__cxxabiv116__enum_type_infoE'] = 224196;
-var __ZTSN10__cxxabiv116__enum_type_infoE = Module['__ZTSN10__cxxabiv116__enum_type_infoE'] = 224160;
-var __ZTIN10__cxxabiv120__si_class_type_infoE = Module['__ZTIN10__cxxabiv120__si_class_type_infoE'] = 224328;
-var __ZTSN10__cxxabiv120__si_class_type_infoE = Module['__ZTSN10__cxxabiv120__si_class_type_infoE'] = 224288;
-var __ZTIN10__cxxabiv121__vmi_class_type_infoE = Module['__ZTIN10__cxxabiv121__vmi_class_type_infoE'] = 224420;
-var __ZTSN10__cxxabiv121__vmi_class_type_infoE = Module['__ZTSN10__cxxabiv121__vmi_class_type_infoE'] = 224380;
-var __ZTVN10__cxxabiv117__pbase_type_infoE = Module['__ZTVN10__cxxabiv117__pbase_type_infoE'] = 224432;
-var __ZTVN10__cxxabiv129__pointer_to_member_type_infoE = Module['__ZTVN10__cxxabiv129__pointer_to_member_type_infoE'] = 224488;
-var _in6addr_any = Module['_in6addr_any'] = 229564;
-var _in6addr_loopback = Module['_in6addr_loopback'] = 229580;
-var ___data_end = Module['___data_end'] = 229596;
-for (var name in ['__progname','__progname_full','__libc','__hwcap','__sysinfo','program_invocation_short_name','program_invocation_name','__c_dot_utf8','__c_locale','__c_dot_utf8_locale','__pio2_hi','__pio2_lo','atanlo','atanhi','aT','__signgam','signgam','stderr','__optreset','optind','__optpos','optarg','optopt','opterr','optreset','__fsmu8','h_errno','_ns_flagdata','__seed48','__environ','__stdout_used','stdin','stdout','__stderr_used','__stdin_used','___environ','_environ','environ','__env_map','tzname','daylight','timezone','__THREW__','__threwValue','_ZNSt3__212__rs_default4__c_E','_ZTVSt12bad_any_cast','_ZTISt12bad_any_cast','_ZTSSt12bad_any_cast','_ZTVN10__cxxabiv120__si_class_type_infoE','_ZTISt8bad_cast','_ZTVNSt12experimental15fundamentals_v112bad_any_castE','_ZTINSt12experimental15fundamentals_v112bad_any_castE','_ZTSNSt12experimental15fundamentals_v112bad_any_castE','_ZNSt3__212placeholders2_1E','_ZNSt3__212placeholders2_2E','_ZNSt3__212placeholders2_3E','_ZNSt3__212placeholders2_4E','_ZNSt3__212placeholders2_5E','_ZNSt3__212placeholders2_6E','_ZNSt3__212placeholders2_7E','_ZNSt3__212placeholders2_8E','_ZNSt3__212placeholders2_9E','_ZNSt3__212placeholders3_10E','_ZNSt3__26chrono12system_clock9is_steadyE','_ZNSt3__26chrono12steady_clock9is_steadyE','_ZNSt3__223__libcpp_debug_functionE','_ZTVNSt3__28__c_nodeE','_ZTINSt3__28__c_nodeE','_ZTSNSt3__28__c_nodeE','_ZTVN10__cxxabiv117__class_type_infoE','_ZTVSt16nested_exception','_ZTISt16nested_exception','_ZTSSt16nested_exception','_ZTVNSt3__217bad_function_callE','_ZTINSt3__217bad_function_callE','_ZTSNSt3__217bad_function_callE','_ZTISt9exception','__dso_handle','_ZTVNSt3__212future_errorE','_ZTVNSt3__217__assoc_sub_stateE','_ZTVNSt3__214__shared_countE','_ZTVNSt3__223__future_error_categoryE','_ZTINSt3__223__future_error_categoryE','_ZTINSt3__212future_errorE','_ZTINSt3__217__assoc_sub_stateE','_ZTSNSt3__217__assoc_sub_stateE','_ZTINSt3__214__shared_countE','_ZTSNSt3__223__future_error_categoryE','_ZTINSt3__212__do_messageE','_ZTSNSt3__212future_errorE','_ZTISt11logic_error','_ZTVNSt3__28ios_baseE','_ZTVNSt3__215basic_streambufIcNS_11char_traitsIcEEEE','_ZTVNSt3__215basic_streambufIwNS_11char_traitsIwEEEE','_ZTTNSt3__213basic_istreamIcNS_11char_traitsIcEEEE','_ZNSt3__25ctypeIcE2idE','_ZTTNSt3__213basic_istreamIwNS_11char_traitsIwEEEE','_ZNSt3__25ctypeIwE2idE','_ZTTNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE','_ZNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZTTNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE','_ZNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZTTNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__28ios_base7failureE','_ZNSt3__28ios_base9__xindex_E','_ZNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZTINSt3__215basic_streambufIcNS_11char_traitsIcEEEE','_ZTINSt3__215basic_streambufIwNS_11char_traitsIwEEEE','_ZTVNSt3__213basic_istreamIcNS_11char_traitsIcEEEE','_ZTINSt3__213basic_istreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__213basic_istreamIwNS_11char_traitsIwEEEE','_ZTINSt3__213basic_istreamIwNS_11char_traitsIwEEEE','_ZTVNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE','_ZTINSt3__213basic_ostreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE','_ZTINSt3__213basic_ostreamIwNS_11char_traitsIwEEEE','_ZTVNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE','_ZTINSt3__214basic_iostreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE','_ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE8_NS_13basic_ostreamIcS2_EE','_ZTVNSt3__219__iostream_categoryE','_ZTINSt3__219__iostream_categoryE','_ZTINSt3__28ios_base7failureE','_ZNSt3__28ios_base9boolalphaE','_ZNSt3__28ios_base3decE','_ZNSt3__28ios_base5fixedE','_ZNSt3__28ios_base3hexE','_ZNSt3__28ios_base8internalE','_ZNSt3__28ios_base4leftE','_ZNSt3__28ios_base3octE','_ZNSt3__28ios_base5rightE','_ZNSt3__28ios_base10scientificE','_ZNSt3__28ios_base8showbaseE','_ZNSt3__28ios_base9showpointE','_ZNSt3__28ios_base7showposE','_ZNSt3__28ios_base6skipwsE','_ZNSt3__28ios_base7unitbufE','_ZNSt3__28ios_base9uppercaseE','_ZNSt3__28ios_base11adjustfieldE','_ZNSt3__28ios_base9basefieldE','_ZNSt3__28ios_base10floatfieldE','_ZNSt3__28ios_base6badbitE','_ZNSt3__28ios_base6eofbitE','_ZNSt3__28ios_base7failbitE','_ZNSt3__28ios_base7goodbitE','_ZNSt3__28ios_base3appE','_ZNSt3__28ios_base3ateE','_ZNSt3__28ios_base6binaryE','_ZNSt3__28ios_base2inE','_ZNSt3__28ios_base3outE','_ZNSt3__28ios_base5truncE','_ZTINSt3__28ios_baseE','_ZTSNSt3__28ios_baseE','_ZTVNSt3__29basic_iosIcNS_11char_traitsIcEEEE','_ZTINSt3__29basic_iosIcNS_11char_traitsIcEEEE','_ZTSNSt3__29basic_iosIcNS_11char_traitsIcEEEE','_ZTVNSt3__29basic_iosIwNS_11char_traitsIwEEEE','_ZTINSt3__29basic_iosIwNS_11char_traitsIwEEEE','_ZTSNSt3__29basic_iosIwNS_11char_traitsIwEEEE','_ZTSNSt3__215basic_streambufIcNS_11char_traitsIcEEEE','_ZTSNSt3__215basic_streambufIwNS_11char_traitsIwEEEE','_ZTSNSt3__213basic_istreamIcNS_11char_traitsIcEEEE','_ZTVN10__cxxabiv121__vmi_class_type_infoE','_ZTSNSt3__213basic_istreamIwNS_11char_traitsIwEEEE','_ZTSNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE','_ZTSNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE','_ZTSNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE','_ZTSNSt3__219__iostream_categoryE','_ZTSNSt3__28ios_base7failureE','_ZTINSt3__212system_errorE','_ZNSt3__219__start_std_streamsE','_ZNSt3__23cinE','_ZNSt3__24wcinE','_ZNSt3__24coutE','_ZNSt3__25wcoutE','_ZNSt3__24cerrE','_ZNSt3__24clogE','_ZNSt3__25wcerrE','_ZNSt3__25wclogE','_ZTVNSt3__210__stdinbufIcEE','_ZTVNSt3__210__stdinbufIwEE','_ZTVNSt3__211__stdoutbufIcEE','_ZTVNSt3__211__stdoutbufIwEE','_ZNSt3__27codecvtIcc11__mbstate_tE2idE','_ZNSt3__27codecvtIwc11__mbstate_tE2idE','_ZTINSt3__210__stdinbufIcEE','_ZTSNSt3__210__stdinbufIcEE','_ZTINSt3__210__stdinbufIwEE','_ZTSNSt3__210__stdinbufIwEE','_ZTINSt3__211__stdoutbufIcEE','_ZTSNSt3__211__stdoutbufIcEE','_ZTINSt3__211__stdoutbufIwEE','_ZTSNSt3__211__stdoutbufIwEE','_ZNSt3__28numpunctIcE2idE','_ZNSt3__214__num_get_base5__srcE','_ZNSt3__28numpunctIwE2idE','_ZNSt3__210moneypunctIcLb1EE2idE','_ZNSt3__210moneypunctIcLb0EE2idE','_ZNSt3__210moneypunctIwLb1EE2idE','_ZNSt3__210moneypunctIwLb0EE2idE','_ZTVNSt3__216__narrow_to_utf8ILm32EEE','_ZTVNSt3__217__widen_from_utf8ILm32EEE','_ZTVNSt3__26locale5__impE','_ZTVNSt3__26locale5facetE','_ZNSt3__27collateIcE2idE','_ZNSt3__27collateIwE2idE','_ZNSt3__27codecvtIDsc11__mbstate_tE2idE','_ZNSt3__27codecvtIDic11__mbstate_tE2idE','_ZNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE','_ZNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE','_ZNSt3__28messagesIcE2idE','_ZNSt3__28messagesIwE2idE','_ZTVNSt3__214codecvt_bynameIcc11__mbstate_tEE','_ZTVNSt3__214codecvt_bynameIwc11__mbstate_tEE','_ZTVNSt3__214codecvt_bynameIDsc11__mbstate_tEE','_ZTVNSt3__214codecvt_bynameIDic11__mbstate_tEE','_ZTVNSt3__217moneypunct_bynameIcLb0EEE','_ZTVNSt3__217moneypunct_bynameIcLb1EEE','_ZTVNSt3__217moneypunct_bynameIwLb0EEE','_ZTVNSt3__217moneypunct_bynameIwLb1EEE','_ZTVNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__215messages_bynameIcEE','_ZTVNSt3__215messages_bynameIwEE','_ZNSt3__26locale2id9__next_idE','_ZTVNSt3__214collate_bynameIcEE','_ZTVNSt3__214collate_bynameIwEE','_ZTVNSt3__25ctypeIcEE','_ZTVNSt3__212ctype_bynameIcEE','_ZTVNSt3__212ctype_bynameIwEE','_ZTVNSt3__27codecvtIwc11__mbstate_tEE','_ZTVNSt3__28numpunctIcEE','_ZTVNSt3__28numpunctIwEE','_ZTVNSt3__215numpunct_bynameIcEE','_ZTVNSt3__215numpunct_bynameIwEE','_ZTVNSt3__215__time_get_tempIcEE','_ZTVNSt3__215__time_get_tempIwEE','_ZTVNSt3__27collateIcEE','_ZTVNSt3__27collateIwEE','_ZTVNSt3__25ctypeIwEE','_ZTVNSt3__27codecvtIcc11__mbstate_tEE','_ZTVNSt3__27codecvtIDsc11__mbstate_tEE','_ZTVNSt3__27codecvtIDic11__mbstate_tEE','_ZTVNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__210moneypunctIcLb0EEE','_ZTVNSt3__210moneypunctIcLb1EEE','_ZTVNSt3__210moneypunctIwLb0EEE','_ZTVNSt3__210moneypunctIwLb1EEE','_ZTVNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__220__time_get_c_storageIcEE','_ZTVNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__220__time_get_c_storageIwEE','_ZTVNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTVNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTVNSt3__28messagesIcEE','_ZTVNSt3__28messagesIwEE','_ZNSt3__210moneypunctIcLb0EE4intlE','_ZNSt3__210moneypunctIcLb1EE4intlE','_ZNSt3__210moneypunctIwLb0EE4intlE','_ZNSt3__210moneypunctIwLb1EE4intlE','_ZNSt3__26locale4noneE','_ZNSt3__26locale7collateE','_ZNSt3__26locale5ctypeE','_ZNSt3__26locale8monetaryE','_ZNSt3__26locale7numericE','_ZNSt3__26locale4timeE','_ZNSt3__26locale8messagesE','_ZNSt3__26locale3allE','_ZTINSt3__26locale5__impE','_ZTINSt3__214collate_bynameIcEE','_ZTINSt3__214collate_bynameIwEE','_ZNSt3__210ctype_base5spaceE','_ZNSt3__210ctype_base5printE','_ZNSt3__210ctype_base5cntrlE','_ZNSt3__210ctype_base5upperE','_ZNSt3__210ctype_base5lowerE','_ZNSt3__210ctype_base5alphaE','_ZNSt3__210ctype_base5digitE','_ZNSt3__210ctype_base5punctE','_ZNSt3__210ctype_base6xdigitE','_ZNSt3__210ctype_base5blankE','_ZNSt3__210ctype_base5alnumE','_ZNSt3__210ctype_base5graphE','_ZTINSt3__25ctypeIcEE','_ZTINSt3__212ctype_bynameIcEE','_ZTINSt3__212ctype_bynameIwEE','_ZTINSt3__27codecvtIwc11__mbstate_tEE','_ZTINSt3__28numpunctIcEE','_ZTINSt3__28numpunctIwEE','_ZTINSt3__215numpunct_bynameIcEE','_ZTINSt3__215numpunct_bynameIwEE','_ZTINSt3__26locale5facetE','_ZTSNSt3__26locale5facetE','_ZTINSt3__25ctypeIwEE','_ZTSNSt3__25ctypeIwEE','_ZTSNSt3__210ctype_baseE','_ZTINSt3__210ctype_baseE','_ZTINSt3__27codecvtIcc11__mbstate_tEE','_ZTSNSt3__27codecvtIcc11__mbstate_tEE','_ZTSNSt3__212codecvt_baseE','_ZTINSt3__212codecvt_baseE','_ZTINSt3__27codecvtIDsc11__mbstate_tEE','_ZTSNSt3__27codecvtIDsc11__mbstate_tEE','_ZTINSt3__27codecvtIDic11__mbstate_tEE','_ZTSNSt3__27codecvtIDic11__mbstate_tEE','_ZTVNSt3__216__narrow_to_utf8ILm16EEE','_ZTINSt3__216__narrow_to_utf8ILm16EEE','_ZTSNSt3__216__narrow_to_utf8ILm16EEE','_ZTINSt3__216__narrow_to_utf8ILm32EEE','_ZTSNSt3__216__narrow_to_utf8ILm32EEE','_ZTVNSt3__217__widen_from_utf8ILm16EEE','_ZTINSt3__217__widen_from_utf8ILm16EEE','_ZTSNSt3__217__widen_from_utf8ILm16EEE','_ZTINSt3__217__widen_from_utf8ILm32EEE','_ZTSNSt3__217__widen_from_utf8ILm32EEE','_ZTVNSt3__214__codecvt_utf8IwEE','_ZTINSt3__214__codecvt_utf8IwEE','_ZTSNSt3__214__codecvt_utf8IwEE','_ZTSNSt3__27codecvtIwc11__mbstate_tEE','_ZTVNSt3__214__codecvt_utf8IDsEE','_ZTINSt3__214__codecvt_utf8IDsEE','_ZTSNSt3__214__codecvt_utf8IDsEE','_ZTVNSt3__214__codecvt_utf8IDiEE','_ZTINSt3__214__codecvt_utf8IDiEE','_ZTSNSt3__214__codecvt_utf8IDiEE','_ZTVNSt3__215__codecvt_utf16IwLb0EEE','_ZTINSt3__215__codecvt_utf16IwLb0EEE','_ZTSNSt3__215__codecvt_utf16IwLb0EEE','_ZTVNSt3__215__codecvt_utf16IwLb1EEE','_ZTINSt3__215__codecvt_utf16IwLb1EEE','_ZTSNSt3__215__codecvt_utf16IwLb1EEE','_ZTVNSt3__215__codecvt_utf16IDsLb0EEE','_ZTINSt3__215__codecvt_utf16IDsLb0EEE','_ZTSNSt3__215__codecvt_utf16IDsLb0EEE','_ZTVNSt3__215__codecvt_utf16IDsLb1EEE','_ZTINSt3__215__codecvt_utf16IDsLb1EEE','_ZTSNSt3__215__codecvt_utf16IDsLb1EEE','_ZTVNSt3__215__codecvt_utf16IDiLb0EEE','_ZTINSt3__215__codecvt_utf16IDiLb0EEE','_ZTSNSt3__215__codecvt_utf16IDiLb0EEE','_ZTVNSt3__215__codecvt_utf16IDiLb1EEE','_ZTINSt3__215__codecvt_utf16IDiLb1EEE','_ZTSNSt3__215__codecvt_utf16IDiLb1EEE','_ZTVNSt3__220__codecvt_utf8_utf16IwEE','_ZTINSt3__220__codecvt_utf8_utf16IwEE','_ZTSNSt3__220__codecvt_utf8_utf16IwEE','_ZTVNSt3__220__codecvt_utf8_utf16IDiEE','_ZTINSt3__220__codecvt_utf8_utf16IDiEE','_ZTSNSt3__220__codecvt_utf8_utf16IDiEE','_ZTVNSt3__220__codecvt_utf8_utf16IDsEE','_ZTINSt3__220__codecvt_utf8_utf16IDsEE','_ZTSNSt3__220__codecvt_utf8_utf16IDsEE','_ZTSNSt3__26locale5__impE','_ZTSNSt3__214collate_bynameIcEE','_ZTSNSt3__27collateIcEE','_ZTINSt3__27collateIcEE','_ZTSNSt3__214collate_bynameIwEE','_ZTSNSt3__27collateIwEE','_ZTINSt3__27collateIwEE','_ZTSNSt3__25ctypeIcEE','_ZTSNSt3__212ctype_bynameIcEE','_ZTSNSt3__212ctype_bynameIwEE','_ZTSNSt3__28numpunctIcEE','_ZTSNSt3__28numpunctIwEE','_ZTSNSt3__215numpunct_bynameIcEE','_ZTSNSt3__215numpunct_bynameIwEE','_ZTINSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29__num_getIcEE','_ZTSNSt3__214__num_get_baseE','_ZTINSt3__214__num_get_baseE','_ZTINSt3__29__num_getIcEE','_ZTINSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__29__num_getIwEE','_ZTINSt3__29__num_getIwEE','_ZTINSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29__num_putIcEE','_ZTSNSt3__214__num_put_baseE','_ZTINSt3__214__num_put_baseE','_ZTINSt3__29__num_putIcEE','_ZTINSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__29__num_putIwEE','_ZTINSt3__29__num_putIwEE','_ZTINSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29time_baseE','_ZTINSt3__29time_baseE','_ZTSNSt3__220__time_get_c_storageIcEE','_ZTINSt3__220__time_get_c_storageIcEE','_ZTINSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__220__time_get_c_storageIwEE','_ZTINSt3__220__time_get_c_storageIwEE','_ZTINSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__218__time_get_storageIcEE','_ZTSNSt3__210__time_getE','_ZTINSt3__210__time_getE','_ZTINSt3__218__time_get_storageIcEE','_ZTINSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__218__time_get_storageIwEE','_ZTINSt3__218__time_get_storageIwEE','_ZTINSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__210__time_putE','_ZTINSt3__210__time_putE','_ZTINSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTINSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTINSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTINSt3__210moneypunctIcLb0EEE','_ZTSNSt3__210moneypunctIcLb0EEE','_ZTSNSt3__210money_baseE','_ZTINSt3__210money_baseE','_ZTINSt3__210moneypunctIcLb1EEE','_ZTSNSt3__210moneypunctIcLb1EEE','_ZTINSt3__210moneypunctIwLb0EEE','_ZTSNSt3__210moneypunctIwLb0EEE','_ZTINSt3__210moneypunctIwLb1EEE','_ZTSNSt3__210moneypunctIwLb1EEE','_ZTINSt3__217moneypunct_bynameIcLb0EEE','_ZTSNSt3__217moneypunct_bynameIcLb0EEE','_ZTINSt3__217moneypunct_bynameIcLb1EEE','_ZTSNSt3__217moneypunct_bynameIcLb1EEE','_ZTINSt3__217moneypunct_bynameIwLb0EEE','_ZTSNSt3__217moneypunct_bynameIwLb0EEE','_ZTINSt3__217moneypunct_bynameIwLb1EEE','_ZTSNSt3__217moneypunct_bynameIwLb1EEE','_ZTINSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__211__money_getIcEE','_ZTINSt3__211__money_getIcEE','_ZTINSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__211__money_getIwEE','_ZTINSt3__211__money_getIwEE','_ZTINSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE','_ZTSNSt3__211__money_putIcEE','_ZTINSt3__211__money_putIcEE','_ZTINSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE','_ZTSNSt3__211__money_putIwEE','_ZTINSt3__211__money_putIwEE','_ZTINSt3__28messagesIcEE','_ZTSNSt3__28messagesIcEE','_ZTSNSt3__213messages_baseE','_ZTINSt3__213messages_baseE','_ZTINSt3__28messagesIwEE','_ZTSNSt3__28messagesIwEE','_ZTINSt3__215messages_bynameIcEE','_ZTSNSt3__215messages_bynameIcEE','_ZTINSt3__215messages_bynameIwEE','_ZTSNSt3__215messages_bynameIwEE','_ZTINSt3__214codecvt_bynameIcc11__mbstate_tEE','_ZTSNSt3__214codecvt_bynameIcc11__mbstate_tEE','_ZTINSt3__214codecvt_bynameIwc11__mbstate_tEE','_ZTSNSt3__214codecvt_bynameIwc11__mbstate_tEE','_ZTINSt3__214codecvt_bynameIDsc11__mbstate_tEE','_ZTSNSt3__214codecvt_bynameIDsc11__mbstate_tEE','_ZTINSt3__214codecvt_bynameIDic11__mbstate_tEE','_ZTSNSt3__214codecvt_bynameIDic11__mbstate_tEE','_ZTINSt3__215__time_get_tempIcEE','_ZTSNSt3__215__time_get_tempIcEE','_ZTINSt3__215__time_get_tempIwEE','_ZTSNSt3__215__time_get_tempIwEE','_ZNSt3__213allocator_argE','_ZTSNSt3__214__shared_countE','_ZTVNSt3__219__shared_weak_countE','_ZTINSt3__219__shared_weak_countE','_ZTSNSt3__219__shared_weak_countE','_ZTVNSt3__212bad_weak_ptrE','_ZTINSt3__212bad_weak_ptrE','_ZTSNSt3__212bad_weak_ptrE','_ZNSt3__210defer_lockE','_ZNSt3__211try_to_lockE','_ZNSt3__210adopt_lockE','_ZSt7nothrow','_ZTVSt19bad_optional_access','_ZTISt19bad_optional_access','_ZTSSt19bad_optional_access','_ZTVNSt12experimental19bad_optional_accessE','_ZTINSt12experimental19bad_optional_accessE','_ZTSNSt12experimental19bad_optional_accessE','_ZTVNSt3__211regex_errorE','_ZTINSt3__211regex_errorE','_ZTSNSt3__211regex_errorE','_ZTISt13runtime_error','_ZTVSt11logic_error','_ZTVSt9exception','_ZTVSt13runtime_error','_ZNSt3__212basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4nposE','_ZNSt3__212basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE4nposE','_ZTVNSt3__212strstreambufE','_ZTTNSt3__210istrstreamE','_ZTTNSt3__210ostrstreamE','_ZTTNSt3__29strstreamE','_ZTINSt3__212strstreambufE','_ZTVNSt3__210istrstreamE','_ZTINSt3__210istrstreamE','_ZTCNSt3__210istrstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__210ostrstreamE','_ZTINSt3__210ostrstreamE','_ZTCNSt3__210ostrstreamE0_NS_13basic_ostreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__29strstreamE','_ZTINSt3__29strstreamE','_ZTCNSt3__29strstreamE0_NS_14basic_iostreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__29strstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__29strstreamE8_NS_13basic_ostreamIcNS_11char_traitsIcEEEE','_ZTSNSt3__212strstreambufE','_ZTSNSt3__210istrstreamE','_ZTSNSt3__210ostrstreamE','_ZTSNSt3__29strstreamE','_ZTVNSt3__212system_errorE','_ZTVNSt3__224__generic_error_categoryE','_ZTINSt3__224__generic_error_categoryE','_ZTVNSt3__223__system_error_categoryE','_ZTINSt3__223__system_error_categoryE','_ZTVNSt3__214error_categoryE','_ZTINSt3__214error_categoryE','_ZTSNSt3__214error_categoryE','_ZTVNSt3__212__do_messageE','_ZTSNSt3__212__do_messageE','_ZTSNSt3__224__generic_error_categoryE','_ZTSNSt3__223__system_error_categoryE','_ZTSNSt3__212system_errorE','_ZNSt3__219piecewise_constructE','_ZTVSt18bad_variant_access','_ZTISt18bad_variant_access','_ZTSSt18bad_variant_access','_ZTVNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE','_ZTINSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE','_ZTVNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE','_ZTINSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE','_ZTSNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE','_ZTSNSt12experimental15fundamentals_v13pmr15memory_resourceE','_ZTINSt12experimental15fundamentals_v13pmr15memory_resourceE','_ZTSNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE','_ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE','_ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE','_ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE','_ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE','_ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE','_ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE','_ZTVNSt3__24__fs10filesystem16filesystem_errorE','_ZTVNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE','_ZTTNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE','_ZTTNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE','_ZTVNSt3__213basic_filebufIcNS_11char_traitsIcEEEE','_ZNSt3__24__fs10filesystem16_FilesystemClock9is_steadyE','_ZTINSt3__24__fs10filesystem16filesystem_errorE','_ZNSt3__24__fs10filesystem4path19preferred_separatorE','_ZTSNSt3__24__fs10filesystem16filesystem_errorE','_ZTINSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE','_ZTSNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE','_ZTINSt3__213basic_filebufIcNS_11char_traitsIcEEEE','_ZTSNSt3__213basic_filebufIcNS_11char_traitsIcEEEE','_ZTINSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE','_ZTCNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE0_NS_13basic_ostreamIcS2_EE','_ZTSNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE','__cxa_unexpected_handler','__cxa_terminate_handler','__cxa_new_handler','_ZTVSt9bad_alloc','_ZTVSt20bad_array_new_length','_ZTISt9bad_alloc','_ZTISt20bad_array_new_length','_ZTSSt9exception','_ZTVSt13bad_exception','_ZTISt13bad_exception','_ZTSSt13bad_exception','_ZTSSt9bad_alloc','_ZTSSt20bad_array_new_length','_ZTVSt12domain_error','_ZTISt12domain_error','_ZTSSt12domain_error','_ZTSSt11logic_error','_ZTVSt16invalid_argument','_ZTISt16invalid_argument','_ZTSSt16invalid_argument','_ZTVSt12length_error','_ZTISt12length_error','_ZTSSt12length_error','_ZTVSt12out_of_range','_ZTISt12out_of_range','_ZTSSt12out_of_range','_ZTVSt11range_error','_ZTISt11range_error','_ZTSSt11range_error','_ZTSSt13runtime_error','_ZTVSt14overflow_error','_ZTISt14overflow_error','_ZTSSt14overflow_error','_ZTVSt15underflow_error','_ZTISt15underflow_error','_ZTSSt15underflow_error','_ZTVSt8bad_cast','_ZTVSt10bad_typeid','_ZTISt10bad_typeid','_ZTVSt9type_info','_ZTISt9type_info','_ZTSSt9type_info','_ZTSSt8bad_cast','_ZTSSt10bad_typeid','_ZTIN10__cxxabiv117__class_type_infoE','_ZTIN10__cxxabiv116__shim_type_infoE','_ZTIN10__cxxabiv117__pbase_type_infoE','_ZTIDn','_ZTIN10__cxxabiv119__pointer_type_infoE','_ZTIv','_ZTIN10__cxxabiv120__function_type_infoE','_ZTIN10__cxxabiv129__pointer_to_member_type_infoE','_ZTSN10__cxxabiv116__shim_type_infoE','_ZTSN10__cxxabiv117__class_type_infoE','_ZTSN10__cxxabiv117__pbase_type_infoE','_ZTSN10__cxxabiv119__pointer_type_infoE','_ZTSN10__cxxabiv120__function_type_infoE','_ZTSN10__cxxabiv129__pointer_to_member_type_infoE','_ZTVN10__cxxabiv116__shim_type_infoE','_ZTVN10__cxxabiv123__fundamental_type_infoE','_ZTIN10__cxxabiv123__fundamental_type_infoE','_ZTSN10__cxxabiv123__fundamental_type_infoE','_ZTSv','_ZTSPv','_ZTIPv','_ZTVN10__cxxabiv119__pointer_type_infoE','_ZTSPKv','_ZTIPKv','_ZTSDn','_ZTSPDn','_ZTIPDn','_ZTSPKDn','_ZTIPKDn','_ZTSb','_ZTIb','_ZTSPb','_ZTIPb','_ZTSPKb','_ZTIPKb','_ZTSw','_ZTIw','_ZTSPw','_ZTIPw','_ZTSPKw','_ZTIPKw','_ZTSc','_ZTIc','_ZTSPc','_ZTIPc','_ZTSPKc','_ZTIPKc','_ZTSh','_ZTIh','_ZTSPh','_ZTIPh','_ZTSPKh','_ZTIPKh','_ZTSa','_ZTIa','_ZTSPa','_ZTIPa','_ZTSPKa','_ZTIPKa','_ZTSs','_ZTIs','_ZTSPs','_ZTIPs','_ZTSPKs','_ZTIPKs','_ZTSt','_ZTIt','_ZTSPt','_ZTIPt','_ZTSPKt','_ZTIPKt','_ZTSi','_ZTIi','_ZTSPi','_ZTIPi','_ZTSPKi','_ZTIPKi','_ZTSj','_ZTIj','_ZTSPj','_ZTIPj','_ZTSPKj','_ZTIPKj','_ZTSl','_ZTIl','_ZTSPl','_ZTIPl','_ZTSPKl','_ZTIPKl','_ZTSm','_ZTIm','_ZTSPm','_ZTIPm','_ZTSPKm','_ZTIPKm','_ZTSx','_ZTIx','_ZTSPx','_ZTIPx','_ZTSPKx','_ZTIPKx','_ZTSy','_ZTIy','_ZTSPy','_ZTIPy','_ZTSPKy','_ZTIPKy','_ZTSn','_ZTIn','_ZTSPn','_ZTIPn','_ZTSPKn','_ZTIPKn','_ZTSo','_ZTIo','_ZTSPo','_ZTIPo','_ZTSPKo','_ZTIPKo','_ZTSDh','_ZTIDh','_ZTSPDh','_ZTIPDh','_ZTSPKDh','_ZTIPKDh','_ZTSf','_ZTIf','_ZTSPf','_ZTIPf','_ZTSPKf','_ZTIPKf','_ZTSd','_ZTId','_ZTSPd','_ZTIPd','_ZTSPKd','_ZTIPKd','_ZTSe','_ZTIe','_ZTSPe','_ZTIPe','_ZTSPKe','_ZTIPKe','_ZTSg','_ZTIg','_ZTSPg','_ZTIPg','_ZTSPKg','_ZTIPKg','_ZTSDu','_ZTIDu','_ZTSPDu','_ZTIPDu','_ZTSPKDu','_ZTIPKDu','_ZTSDs','_ZTIDs','_ZTSPDs','_ZTIPDs','_ZTSPKDs','_ZTIPKDs','_ZTSDi','_ZTIDi','_ZTSPDi','_ZTIPDi','_ZTSPKDi','_ZTIPKDi','_ZTVN10__cxxabiv117__array_type_infoE','_ZTIN10__cxxabiv117__array_type_infoE','_ZTSN10__cxxabiv117__array_type_infoE','_ZTVN10__cxxabiv120__function_type_infoE','_ZTVN10__cxxabiv116__enum_type_infoE','_ZTIN10__cxxabiv116__enum_type_infoE','_ZTSN10__cxxabiv116__enum_type_infoE','_ZTIN10__cxxabiv120__si_class_type_infoE','_ZTSN10__cxxabiv120__si_class_type_infoE','_ZTIN10__cxxabiv121__vmi_class_type_infoE','_ZTSN10__cxxabiv121__vmi_class_type_infoE','_ZTVN10__cxxabiv117__pbase_type_infoE','_ZTVN10__cxxabiv129__pointer_to_member_type_infoE','in6addr_any','in6addr_loopback','__data_end']) {
-  (function(name) {
-    Module['g$' + name] = function() { return Module[name]; };
-  })(name);
-}
-
+var __ZTVNSt3__212future_errorE = Module['__ZTVNSt3__212future_errorE'] = 185232;
+var __ZTVNSt3__217__assoc_sub_stateE = Module['__ZTVNSt3__217__assoc_sub_stateE'] = 185252;
+var __ZTVNSt3__214__shared_countE = Module['__ZTVNSt3__214__shared_countE'] = 202144;
+var __ZTVNSt3__223__future_error_categoryE = Module['__ZTVNSt3__223__future_error_categoryE'] = 185192;
+var __ZTINSt3__223__future_error_categoryE = Module['__ZTINSt3__223__future_error_categoryE'] = 185352;
+var __ZTINSt3__212future_errorE = Module['__ZTINSt3__212future_errorE'] = 185388;
+var __ZTINSt3__217__assoc_sub_stateE = Module['__ZTINSt3__217__assoc_sub_stateE'] = 185304;
+var __ZTSNSt3__217__assoc_sub_stateE = Module['__ZTSNSt3__217__assoc_sub_stateE'] = 185276;
+var __ZTINSt3__214__shared_countE = Module['__ZTINSt3__214__shared_countE'] = 202192;
+var __ZTSNSt3__223__future_error_categoryE = Module['__ZTSNSt3__223__future_error_categoryE'] = 185316;
+var __ZTINSt3__212__do_messageE = Module['__ZTINSt3__212__do_messageE'] = 207228;
+var __ZTSNSt3__212future_errorE = Module['__ZTSNSt3__212future_errorE'] = 185364;
+var __ZTISt11logic_error = Module['__ZTISt11logic_error'] = 221768;
+var __ZTVNSt3__28ios_baseE = Module['__ZTVNSt3__28ios_baseE'] = 186508;
+var __ZTVNSt3__215basic_streambufIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__215basic_streambufIcNS_11char_traitsIcEEEE'] = 185864;
+var __ZTVNSt3__215basic_streambufIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__215basic_streambufIwNS_11char_traitsIwEEEE'] = 185928;
+var __ZTTNSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 186032;
+var __ZNSt3__25ctypeIcE2idE = Module['__ZNSt3__25ctypeIcE2idE'] = 189640;
+var __ZTTNSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTTNSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186080;
+var __ZNSt3__25ctypeIwE2idE = Module['__ZNSt3__25ctypeIwE2idE'] = 189632;
+var __ZTTNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 186128;
+var __ZNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 188924;
+var __ZTTNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTTNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 186176;
+var __ZNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 188940;
+var __ZTTNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 186244;
+var __ZTVNSt3__28ios_base7failureE = Module['__ZTVNSt3__28ios_base7failureE'] = 186364;
+var __ZNSt3__28ios_base9__xindex_E = Module['__ZNSt3__28ios_base9__xindex_E'] = 186496;
+var __ZNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 188872;
+var __ZNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 188916;
+var __ZTINSt3__215basic_streambufIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__215basic_streambufIcNS_11char_traitsIcEEEE'] = 186764;
+var __ZTINSt3__215basic_streambufIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__215basic_streambufIwNS_11char_traitsIwEEEE'] = 186824;
+var __ZTVNSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 185992;
+var __ZTINSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 186880;
+var __ZTVNSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186040;
+var __ZTINSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186952;
+var __ZTVNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 186088;
+var __ZTINSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 187024;
+var __ZTVNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 186136;
+var __ZTINSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 187096;
+var __ZTVNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 186184;
+var __ZTINSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 187248;
+var __ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE = Module['__ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE'] = 187120;
+var __ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE8_NS_13basic_ostreamIcS2_EE = Module['__ZTCNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE8_NS_13basic_ostreamIcS2_EE'] = 187160;
+var __ZTVNSt3__219__iostream_categoryE = Module['__ZTVNSt3__219__iostream_categoryE'] = 186324;
+var __ZTINSt3__219__iostream_categoryE = Module['__ZTINSt3__219__iostream_categoryE'] = 187312;
+var __ZTINSt3__28ios_base7failureE = Module['__ZTINSt3__28ios_base7failureE'] = 187352;
+var __ZNSt3__28ios_base9boolalphaE = Module['__ZNSt3__28ios_base9boolalphaE'] = 186384;
+var __ZNSt3__28ios_base3decE = Module['__ZNSt3__28ios_base3decE'] = 186388;
+var __ZNSt3__28ios_base5fixedE = Module['__ZNSt3__28ios_base5fixedE'] = 186392;
+var __ZNSt3__28ios_base3hexE = Module['__ZNSt3__28ios_base3hexE'] = 186396;
+var __ZNSt3__28ios_base8internalE = Module['__ZNSt3__28ios_base8internalE'] = 186400;
+var __ZNSt3__28ios_base4leftE = Module['__ZNSt3__28ios_base4leftE'] = 186404;
+var __ZNSt3__28ios_base3octE = Module['__ZNSt3__28ios_base3octE'] = 186408;
+var __ZNSt3__28ios_base5rightE = Module['__ZNSt3__28ios_base5rightE'] = 186412;
+var __ZNSt3__28ios_base10scientificE = Module['__ZNSt3__28ios_base10scientificE'] = 186416;
+var __ZNSt3__28ios_base8showbaseE = Module['__ZNSt3__28ios_base8showbaseE'] = 186420;
+var __ZNSt3__28ios_base9showpointE = Module['__ZNSt3__28ios_base9showpointE'] = 186424;
+var __ZNSt3__28ios_base7showposE = Module['__ZNSt3__28ios_base7showposE'] = 186428;
+var __ZNSt3__28ios_base6skipwsE = Module['__ZNSt3__28ios_base6skipwsE'] = 186432;
+var __ZNSt3__28ios_base7unitbufE = Module['__ZNSt3__28ios_base7unitbufE'] = 186436;
+var __ZNSt3__28ios_base9uppercaseE = Module['__ZNSt3__28ios_base9uppercaseE'] = 186440;
+var __ZNSt3__28ios_base11adjustfieldE = Module['__ZNSt3__28ios_base11adjustfieldE'] = 186444;
+var __ZNSt3__28ios_base9basefieldE = Module['__ZNSt3__28ios_base9basefieldE'] = 186448;
+var __ZNSt3__28ios_base10floatfieldE = Module['__ZNSt3__28ios_base10floatfieldE'] = 186452;
+var __ZNSt3__28ios_base6badbitE = Module['__ZNSt3__28ios_base6badbitE'] = 186456;
+var __ZNSt3__28ios_base6eofbitE = Module['__ZNSt3__28ios_base6eofbitE'] = 186460;
+var __ZNSt3__28ios_base7failbitE = Module['__ZNSt3__28ios_base7failbitE'] = 186464;
+var __ZNSt3__28ios_base7goodbitE = Module['__ZNSt3__28ios_base7goodbitE'] = 186468;
+var __ZNSt3__28ios_base3appE = Module['__ZNSt3__28ios_base3appE'] = 186472;
+var __ZNSt3__28ios_base3ateE = Module['__ZNSt3__28ios_base3ateE'] = 186476;
+var __ZNSt3__28ios_base6binaryE = Module['__ZNSt3__28ios_base6binaryE'] = 186480;
+var __ZNSt3__28ios_base2inE = Module['__ZNSt3__28ios_base2inE'] = 186484;
+var __ZNSt3__28ios_base3outE = Module['__ZNSt3__28ios_base3outE'] = 186488;
+var __ZNSt3__28ios_base5truncE = Module['__ZNSt3__28ios_base5truncE'] = 186492;
+var __ZTINSt3__28ios_baseE = Module['__ZTINSt3__28ios_baseE'] = 186560;
+var __ZTSNSt3__28ios_baseE = Module['__ZTSNSt3__28ios_baseE'] = 186541;
+var __ZTVNSt3__29basic_iosIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__29basic_iosIcNS_11char_traitsIcEEEE'] = 186568;
+var __ZTINSt3__29basic_iosIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__29basic_iosIcNS_11char_traitsIcEEEE'] = 186628;
+var __ZTSNSt3__29basic_iosIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__29basic_iosIcNS_11char_traitsIcEEEE'] = 186584;
+var __ZTVNSt3__29basic_iosIwNS_11char_traitsIwEEEE = Module['__ZTVNSt3__29basic_iosIwNS_11char_traitsIwEEEE'] = 186640;
+var __ZTINSt3__29basic_iosIwNS_11char_traitsIwEEEE = Module['__ZTINSt3__29basic_iosIwNS_11char_traitsIwEEEE'] = 186700;
+var __ZTSNSt3__29basic_iosIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__29basic_iosIwNS_11char_traitsIwEEEE'] = 186656;
+var __ZTSNSt3__215basic_streambufIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__215basic_streambufIcNS_11char_traitsIcEEEE'] = 186712;
+var __ZTSNSt3__215basic_streambufIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__215basic_streambufIwNS_11char_traitsIwEEEE'] = 186772;
+var __ZTSNSt3__213basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__213basic_istreamIcNS_11char_traitsIcEEEE'] = 186832;
+var __ZTVN10__cxxabiv121__vmi_class_type_infoE = Module['__ZTVN10__cxxabiv121__vmi_class_type_infoE'] = 224356;
+var __ZTSNSt3__213basic_istreamIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__213basic_istreamIwNS_11char_traitsIwEEEE'] = 186904;
+var __ZTSNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__213basic_ostreamIcNS_11char_traitsIcEEEE'] = 186976;
+var __ZTSNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE = Module['__ZTSNSt3__213basic_ostreamIwNS_11char_traitsIwEEEE'] = 187048;
+var __ZTSNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__214basic_iostreamIcNS_11char_traitsIcEEEE'] = 187200;
+var __ZTSNSt3__219__iostream_categoryE = Module['__ZTSNSt3__219__iostream_categoryE'] = 187280;
+var __ZTSNSt3__28ios_base7failureE = Module['__ZTSNSt3__28ios_base7failureE'] = 187324;
+var __ZTINSt3__212system_errorE = Module['__ZTINSt3__212system_errorE'] = 207360;
+var __ZNSt3__219__start_std_streamsE = Module['__ZNSt3__219__start_std_streamsE'] = 188044;
+var __ZNSt3__23cinE = Module['__ZNSt3__23cinE'] = 187364;
+var __ZNSt3__24wcinE = Module['__ZNSt3__24wcinE'] = 187452;
+var __ZNSt3__24coutE = Module['__ZNSt3__24coutE'] = 187540;
+var __ZNSt3__25wcoutE = Module['__ZNSt3__25wcoutE'] = 187624;
+var __ZNSt3__24cerrE = Module['__ZNSt3__24cerrE'] = 187708;
+var __ZNSt3__24clogE = Module['__ZNSt3__24clogE'] = 187876;
+var __ZNSt3__25wcerrE = Module['__ZNSt3__25wcerrE'] = 187792;
+var __ZNSt3__25wclogE = Module['__ZNSt3__25wclogE'] = 187960;
+var __ZTVNSt3__210__stdinbufIcEE = Module['__ZTVNSt3__210__stdinbufIcEE'] = 188408;
+var __ZTVNSt3__210__stdinbufIwEE = Module['__ZTVNSt3__210__stdinbufIwEE'] = 188548;
+var __ZTVNSt3__211__stdoutbufIcEE = Module['__ZTVNSt3__211__stdoutbufIcEE'] = 188648;
+var __ZTVNSt3__211__stdoutbufIwEE = Module['__ZTVNSt3__211__stdoutbufIwEE'] = 188752;
+var __ZNSt3__27codecvtIcc11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIcc11__mbstate_tE2idE'] = 189944;
+var __ZNSt3__27codecvtIwc11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIwc11__mbstate_tE2idE'] = 189952;
+var __ZTINSt3__210__stdinbufIcEE = Module['__ZTINSt3__210__stdinbufIcEE'] = 188496;
+var __ZTSNSt3__210__stdinbufIcEE = Module['__ZTSNSt3__210__stdinbufIcEE'] = 188472;
+var __ZTINSt3__210__stdinbufIwEE = Module['__ZTINSt3__210__stdinbufIwEE'] = 188636;
+var __ZTSNSt3__210__stdinbufIwEE = Module['__ZTSNSt3__210__stdinbufIwEE'] = 188612;
+var __ZTINSt3__211__stdoutbufIcEE = Module['__ZTINSt3__211__stdoutbufIcEE'] = 188740;
+var __ZTSNSt3__211__stdoutbufIcEE = Module['__ZTSNSt3__211__stdoutbufIcEE'] = 188712;
+var __ZTINSt3__211__stdoutbufIwEE = Module['__ZTINSt3__211__stdoutbufIwEE'] = 188844;
+var __ZTSNSt3__211__stdoutbufIwEE = Module['__ZTSNSt3__211__stdoutbufIwEE'] = 188816;
+var __ZNSt3__28numpunctIcE2idE = Module['__ZNSt3__28numpunctIcE2idE'] = 190108;
+var __ZNSt3__214__num_get_base5__srcE = Module['__ZNSt3__214__num_get_base5__srcE'] = 188880;
+var __ZNSt3__28numpunctIwE2idE = Module['__ZNSt3__28numpunctIwE2idE'] = 190116;
+var __ZNSt3__210moneypunctIcLb1EE2idE = Module['__ZNSt3__210moneypunctIcLb1EE2idE'] = 189196;
+var __ZNSt3__210moneypunctIcLb0EE2idE = Module['__ZNSt3__210moneypunctIcLb0EE2idE'] = 189184;
+var __ZNSt3__210moneypunctIwLb1EE2idE = Module['__ZNSt3__210moneypunctIwLb1EE2idE'] = 189220;
+var __ZNSt3__210moneypunctIwLb0EE2idE = Module['__ZNSt3__210moneypunctIwLb0EE2idE'] = 189208;
+var __ZTVNSt3__216__narrow_to_utf8ILm32EEE = Module['__ZTVNSt3__216__narrow_to_utf8ILm32EEE'] = 191748;
+var __ZTVNSt3__217__widen_from_utf8ILm32EEE = Module['__ZTVNSt3__217__widen_from_utf8ILm32EEE'] = 191940;
+var __ZTVNSt3__26locale5__impE = Module['__ZTVNSt3__26locale5__impE'] = 189348;
+var __ZTVNSt3__26locale5facetE = Module['__ZTVNSt3__26locale5facetE'] = 191068;
+var __ZNSt3__27collateIcE2idE = Module['__ZNSt3__27collateIcE2idE'] = 188856;
+var __ZNSt3__27collateIwE2idE = Module['__ZNSt3__27collateIwE2idE'] = 188864;
+var __ZNSt3__27codecvtIDsc11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIDsc11__mbstate_tE2idE'] = 190092;
+var __ZNSt3__27codecvtIDic11__mbstate_tE2idE = Module['__ZNSt3__27codecvtIDic11__mbstate_tE2idE'] = 190100;
+var __ZNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 189232;
+var __ZNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 189244;
+var __ZNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 189264;
+var __ZNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 189280;
+var __ZNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 188960;
+var __ZNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 188984;
+var __ZNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE = Module['__ZNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEE2idE'] = 189168;
+var __ZNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE = Module['__ZNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEE2idE'] = 189176;
+var __ZNSt3__28messagesIcE2idE = Module['__ZNSt3__28messagesIcE2idE'] = 189288;
+var __ZNSt3__28messagesIwE2idE = Module['__ZNSt3__28messagesIwE2idE'] = 189296;
+var __ZTVNSt3__214codecvt_bynameIcc11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIcc11__mbstate_tEE'] = 198172;
+var __ZTVNSt3__214codecvt_bynameIwc11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIwc11__mbstate_tEE'] = 198276;
+var __ZTVNSt3__214codecvt_bynameIDsc11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIDsc11__mbstate_tEE'] = 198380;
+var __ZTVNSt3__214codecvt_bynameIDic11__mbstate_tEE = Module['__ZTVNSt3__214codecvt_bynameIDic11__mbstate_tEE'] = 198484;
+var __ZTVNSt3__217moneypunct_bynameIcLb0EEE = Module['__ZTVNSt3__217moneypunct_bynameIcLb0EEE'] = 196740;
+var __ZTVNSt3__217moneypunct_bynameIcLb1EEE = Module['__ZTVNSt3__217moneypunct_bynameIcLb1EEE'] = 196844;
+var __ZTVNSt3__217moneypunct_bynameIwLb0EEE = Module['__ZTVNSt3__217moneypunct_bynameIwLb0EEE'] = 196948;
+var __ZTVNSt3__217moneypunct_bynameIwLb1EEE = Module['__ZTVNSt3__217moneypunct_bynameIwLb1EEE'] = 197052;
+var __ZTVNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195164;
+var __ZTVNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195460;
+var __ZTVNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 196012;
+var __ZTVNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 196128;
+var __ZTVNSt3__215messages_bynameIcEE = Module['__ZTVNSt3__215messages_bynameIcEE'] = 198020;
+var __ZTVNSt3__215messages_bynameIwEE = Module['__ZTVNSt3__215messages_bynameIwEE'] = 198096;
+var __ZNSt3__26locale2id9__next_idE = Module['__ZNSt3__26locale2id9__next_idE'] = 189396;
+var __ZTVNSt3__214collate_bynameIcEE = Module['__ZTVNSt3__214collate_bynameIcEE'] = 189400;
+var __ZTVNSt3__214collate_bynameIwEE = Module['__ZTVNSt3__214collate_bynameIwEE'] = 189496;
+var __ZTVNSt3__25ctypeIcEE = Module['__ZTVNSt3__25ctypeIcEE'] = 189648;
+var __ZTVNSt3__212ctype_bynameIcEE = Module['__ZTVNSt3__212ctype_bynameIcEE'] = 189700;
+var __ZTVNSt3__212ctype_bynameIwEE = Module['__ZTVNSt3__212ctype_bynameIwEE'] = 189812;
+var __ZTVNSt3__27codecvtIwc11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIwc11__mbstate_tEE'] = 189960;
+var __ZTVNSt3__28numpunctIcEE = Module['__ZTVNSt3__28numpunctIcEE'] = 190124;
+var __ZTVNSt3__28numpunctIwEE = Module['__ZTVNSt3__28numpunctIwEE'] = 190164;
+var __ZTVNSt3__215numpunct_bynameIcEE = Module['__ZTVNSt3__215numpunct_bynameIcEE'] = 190264;
+var __ZTVNSt3__215numpunct_bynameIwEE = Module['__ZTVNSt3__215numpunct_bynameIwEE'] = 190368;
+var __ZTVNSt3__215__time_get_tempIcEE = Module['__ZTVNSt3__215__time_get_tempIcEE'] = 201392;
+var __ZTVNSt3__215__time_get_tempIwEE = Module['__ZTVNSt3__215__time_get_tempIwEE'] = 201488;
+var __ZTVNSt3__27collateIcEE = Module['__ZTVNSt3__27collateIcEE'] = 193712;
+var __ZTVNSt3__27collateIwEE = Module['__ZTVNSt3__27collateIwEE'] = 193744;
+var __ZTVNSt3__25ctypeIwEE = Module['__ZTVNSt3__25ctypeIwEE'] = 191124;
+var __ZTVNSt3__27codecvtIcc11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIcc11__mbstate_tEE'] = 191272;
+var __ZTVNSt3__27codecvtIDsc11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIDsc11__mbstate_tEE'] = 191420;
+var __ZTVNSt3__27codecvtIDic11__mbstate_tEE = Module['__ZTVNSt3__27codecvtIDic11__mbstate_tEE'] = 191536;
+var __ZTVNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 193776;
+var __ZTVNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194020;
+var __ZTVNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194232;
+var __ZTVNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194464;
+var __ZTVNSt3__210moneypunctIcLb0EEE = Module['__ZTVNSt3__210moneypunctIcLb0EEE'] = 196244;
+var __ZTVNSt3__210moneypunctIcLb1EEE = Module['__ZTVNSt3__210moneypunctIcLb1EEE'] = 196392;
+var __ZTVNSt3__210moneypunctIwLb0EEE = Module['__ZTVNSt3__210moneypunctIwLb0EEE'] = 196508;
+var __ZTVNSt3__210moneypunctIwLb1EEE = Module['__ZTVNSt3__210moneypunctIwLb1EEE'] = 196624;
+var __ZTVNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197156;
+var __ZTVNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197320;
+var __ZTVNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197484;
+var __ZTVNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197648;
+var __ZTVNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194664;
+var __ZTVNSt3__220__time_get_c_storageIcEE = Module['__ZTVNSt3__220__time_get_c_storageIcEE'] = 201056;
+var __ZTVNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194928;
+var __ZTVNSt3__220__time_get_c_storageIwEE = Module['__ZTVNSt3__220__time_get_c_storageIwEE'] = 201112;
+var __ZTVNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTVNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195728;
+var __ZTVNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTVNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195884;
+var __ZTVNSt3__28messagesIcEE = Module['__ZTVNSt3__28messagesIcEE'] = 197812;
+var __ZTVNSt3__28messagesIwEE = Module['__ZTVNSt3__28messagesIwEE'] = 197932;
+var __ZNSt3__210moneypunctIcLb0EE4intlE = Module['__ZNSt3__210moneypunctIcLb0EE4intlE'] = 189192;
+var __ZNSt3__210moneypunctIcLb1EE4intlE = Module['__ZNSt3__210moneypunctIcLb1EE4intlE'] = 189204;
+var __ZNSt3__210moneypunctIwLb0EE4intlE = Module['__ZNSt3__210moneypunctIwLb0EE4intlE'] = 189216;
+var __ZNSt3__210moneypunctIwLb1EE4intlE = Module['__ZNSt3__210moneypunctIwLb1EE4intlE'] = 189228;
+var __ZNSt3__26locale4noneE = Module['__ZNSt3__26locale4noneE'] = 189316;
+var __ZNSt3__26locale7collateE = Module['__ZNSt3__26locale7collateE'] = 189320;
+var __ZNSt3__26locale5ctypeE = Module['__ZNSt3__26locale5ctypeE'] = 189324;
+var __ZNSt3__26locale8monetaryE = Module['__ZNSt3__26locale8monetaryE'] = 189328;
+var __ZNSt3__26locale7numericE = Module['__ZNSt3__26locale7numericE'] = 189332;
+var __ZNSt3__26locale4timeE = Module['__ZNSt3__26locale4timeE'] = 189336;
+var __ZNSt3__26locale8messagesE = Module['__ZNSt3__26locale8messagesE'] = 189340;
+var __ZNSt3__26locale3allE = Module['__ZNSt3__26locale3allE'] = 189344;
+var __ZTINSt3__26locale5__impE = Module['__ZTINSt3__26locale5__impE'] = 193264;
+var __ZTINSt3__214collate_bynameIcEE = Module['__ZTINSt3__214collate_bynameIcEE'] = 193336;
+var __ZTINSt3__214collate_bynameIwEE = Module['__ZTINSt3__214collate_bynameIwEE'] = 193408;
+var __ZNSt3__210ctype_base5spaceE = Module['__ZNSt3__210ctype_base5spaceE'] = 189606;
+var __ZNSt3__210ctype_base5printE = Module['__ZNSt3__210ctype_base5printE'] = 189608;
+var __ZNSt3__210ctype_base5cntrlE = Module['__ZNSt3__210ctype_base5cntrlE'] = 189610;
+var __ZNSt3__210ctype_base5upperE = Module['__ZNSt3__210ctype_base5upperE'] = 189612;
+var __ZNSt3__210ctype_base5lowerE = Module['__ZNSt3__210ctype_base5lowerE'] = 189614;
+var __ZNSt3__210ctype_base5alphaE = Module['__ZNSt3__210ctype_base5alphaE'] = 189616;
+var __ZNSt3__210ctype_base5digitE = Module['__ZNSt3__210ctype_base5digitE'] = 189618;
+var __ZNSt3__210ctype_base5punctE = Module['__ZNSt3__210ctype_base5punctE'] = 189620;
+var __ZNSt3__210ctype_base6xdigitE = Module['__ZNSt3__210ctype_base6xdigitE'] = 189622;
+var __ZNSt3__210ctype_base5blankE = Module['__ZNSt3__210ctype_base5blankE'] = 189624;
+var __ZNSt3__210ctype_base5alnumE = Module['__ZNSt3__210ctype_base5alnumE'] = 189626;
+var __ZNSt3__210ctype_base5graphE = Module['__ZNSt3__210ctype_base5graphE'] = 189628;
+var __ZTINSt3__25ctypeIcEE = Module['__ZTINSt3__25ctypeIcEE'] = 193440;
+var __ZTINSt3__212ctype_bynameIcEE = Module['__ZTINSt3__212ctype_bynameIcEE'] = 193500;
+var __ZTINSt3__212ctype_bynameIwEE = Module['__ZTINSt3__212ctype_bynameIwEE'] = 193540;
+var __ZTINSt3__27codecvtIwc11__mbstate_tEE = Module['__ZTINSt3__27codecvtIwc11__mbstate_tEE'] = 192148;
+var __ZTINSt3__28numpunctIcEE = Module['__ZTINSt3__28numpunctIcEE'] = 193576;
+var __ZTINSt3__28numpunctIwEE = Module['__ZTINSt3__28numpunctIwEE'] = 193612;
+var __ZTINSt3__215numpunct_bynameIcEE = Module['__ZTINSt3__215numpunct_bynameIcEE'] = 193656;
+var __ZTINSt3__215numpunct_bynameIwEE = Module['__ZTINSt3__215numpunct_bynameIwEE'] = 193700;
+var __ZTINSt3__26locale5facetE = Module['__ZTINSt3__26locale5facetE'] = 191112;
+var __ZTSNSt3__26locale5facetE = Module['__ZTSNSt3__26locale5facetE'] = 191088;
+var __ZTINSt3__25ctypeIwEE = Module['__ZTINSt3__25ctypeIwEE'] = 191240;
+var __ZTSNSt3__25ctypeIwEE = Module['__ZTSNSt3__25ctypeIwEE'] = 191192;
+var __ZTSNSt3__210ctype_baseE = Module['__ZTSNSt3__210ctype_baseE'] = 191210;
+var __ZTINSt3__210ctype_baseE = Module['__ZTINSt3__210ctype_baseE'] = 191232;
+var __ZTINSt3__27codecvtIcc11__mbstate_tEE = Module['__ZTINSt3__27codecvtIcc11__mbstate_tEE'] = 191388;
+var __ZTSNSt3__27codecvtIcc11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIcc11__mbstate_tEE'] = 191320;
+var __ZTSNSt3__212codecvt_baseE = Module['__ZTSNSt3__212codecvt_baseE'] = 191354;
+var __ZTINSt3__212codecvt_baseE = Module['__ZTINSt3__212codecvt_baseE'] = 191380;
+var __ZTINSt3__27codecvtIDsc11__mbstate_tEE = Module['__ZTINSt3__27codecvtIDsc11__mbstate_tEE'] = 191504;
+var __ZTSNSt3__27codecvtIDsc11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIDsc11__mbstate_tEE'] = 191468;
+var __ZTINSt3__27codecvtIDic11__mbstate_tEE = Module['__ZTINSt3__27codecvtIDic11__mbstate_tEE'] = 191620;
+var __ZTSNSt3__27codecvtIDic11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIDic11__mbstate_tEE'] = 191584;
+var __ZTVNSt3__216__narrow_to_utf8ILm16EEE = Module['__ZTVNSt3__216__narrow_to_utf8ILm16EEE'] = 191652;
+var __ZTINSt3__216__narrow_to_utf8ILm16EEE = Module['__ZTINSt3__216__narrow_to_utf8ILm16EEE'] = 191736;
+var __ZTSNSt3__216__narrow_to_utf8ILm16EEE = Module['__ZTSNSt3__216__narrow_to_utf8ILm16EEE'] = 191700;
+var __ZTINSt3__216__narrow_to_utf8ILm32EEE = Module['__ZTINSt3__216__narrow_to_utf8ILm32EEE'] = 191832;
+var __ZTSNSt3__216__narrow_to_utf8ILm32EEE = Module['__ZTSNSt3__216__narrow_to_utf8ILm32EEE'] = 191796;
+var __ZTVNSt3__217__widen_from_utf8ILm16EEE = Module['__ZTVNSt3__217__widen_from_utf8ILm16EEE'] = 191844;
+var __ZTINSt3__217__widen_from_utf8ILm16EEE = Module['__ZTINSt3__217__widen_from_utf8ILm16EEE'] = 191928;
+var __ZTSNSt3__217__widen_from_utf8ILm16EEE = Module['__ZTSNSt3__217__widen_from_utf8ILm16EEE'] = 191892;
+var __ZTINSt3__217__widen_from_utf8ILm32EEE = Module['__ZTINSt3__217__widen_from_utf8ILm32EEE'] = 192024;
+var __ZTSNSt3__217__widen_from_utf8ILm32EEE = Module['__ZTSNSt3__217__widen_from_utf8ILm32EEE'] = 191988;
+var __ZTVNSt3__214__codecvt_utf8IwEE = Module['__ZTVNSt3__214__codecvt_utf8IwEE'] = 192036;
+var __ZTINSt3__214__codecvt_utf8IwEE = Module['__ZTINSt3__214__codecvt_utf8IwEE'] = 192180;
+var __ZTSNSt3__214__codecvt_utf8IwEE = Module['__ZTSNSt3__214__codecvt_utf8IwEE'] = 192084;
+var __ZTSNSt3__27codecvtIwc11__mbstate_tEE = Module['__ZTSNSt3__27codecvtIwc11__mbstate_tEE'] = 192112;
+var __ZTVNSt3__214__codecvt_utf8IDsEE = Module['__ZTVNSt3__214__codecvt_utf8IDsEE'] = 192192;
+var __ZTINSt3__214__codecvt_utf8IDsEE = Module['__ZTINSt3__214__codecvt_utf8IDsEE'] = 192272;
+var __ZTSNSt3__214__codecvt_utf8IDsEE = Module['__ZTSNSt3__214__codecvt_utf8IDsEE'] = 192240;
+var __ZTVNSt3__214__codecvt_utf8IDiEE = Module['__ZTVNSt3__214__codecvt_utf8IDiEE'] = 192284;
+var __ZTINSt3__214__codecvt_utf8IDiEE = Module['__ZTINSt3__214__codecvt_utf8IDiEE'] = 192364;
+var __ZTSNSt3__214__codecvt_utf8IDiEE = Module['__ZTSNSt3__214__codecvt_utf8IDiEE'] = 192332;
+var __ZTVNSt3__215__codecvt_utf16IwLb0EEE = Module['__ZTVNSt3__215__codecvt_utf16IwLb0EEE'] = 192376;
+var __ZTINSt3__215__codecvt_utf16IwLb0EEE = Module['__ZTINSt3__215__codecvt_utf16IwLb0EEE'] = 192460;
+var __ZTSNSt3__215__codecvt_utf16IwLb0EEE = Module['__ZTSNSt3__215__codecvt_utf16IwLb0EEE'] = 192424;
+var __ZTVNSt3__215__codecvt_utf16IwLb1EEE = Module['__ZTVNSt3__215__codecvt_utf16IwLb1EEE'] = 192472;
+var __ZTINSt3__215__codecvt_utf16IwLb1EEE = Module['__ZTINSt3__215__codecvt_utf16IwLb1EEE'] = 192556;
+var __ZTSNSt3__215__codecvt_utf16IwLb1EEE = Module['__ZTSNSt3__215__codecvt_utf16IwLb1EEE'] = 192520;
+var __ZTVNSt3__215__codecvt_utf16IDsLb0EEE = Module['__ZTVNSt3__215__codecvt_utf16IDsLb0EEE'] = 192568;
+var __ZTINSt3__215__codecvt_utf16IDsLb0EEE = Module['__ZTINSt3__215__codecvt_utf16IDsLb0EEE'] = 192652;
+var __ZTSNSt3__215__codecvt_utf16IDsLb0EEE = Module['__ZTSNSt3__215__codecvt_utf16IDsLb0EEE'] = 192616;
+var __ZTVNSt3__215__codecvt_utf16IDsLb1EEE = Module['__ZTVNSt3__215__codecvt_utf16IDsLb1EEE'] = 192664;
+var __ZTINSt3__215__codecvt_utf16IDsLb1EEE = Module['__ZTINSt3__215__codecvt_utf16IDsLb1EEE'] = 192748;
+var __ZTSNSt3__215__codecvt_utf16IDsLb1EEE = Module['__ZTSNSt3__215__codecvt_utf16IDsLb1EEE'] = 192712;
+var __ZTVNSt3__215__codecvt_utf16IDiLb0EEE = Module['__ZTVNSt3__215__codecvt_utf16IDiLb0EEE'] = 192760;
+var __ZTINSt3__215__codecvt_utf16IDiLb0EEE = Module['__ZTINSt3__215__codecvt_utf16IDiLb0EEE'] = 192844;
+var __ZTSNSt3__215__codecvt_utf16IDiLb0EEE = Module['__ZTSNSt3__215__codecvt_utf16IDiLb0EEE'] = 192808;
+var __ZTVNSt3__215__codecvt_utf16IDiLb1EEE = Module['__ZTVNSt3__215__codecvt_utf16IDiLb1EEE'] = 192856;
+var __ZTINSt3__215__codecvt_utf16IDiLb1EEE = Module['__ZTINSt3__215__codecvt_utf16IDiLb1EEE'] = 192940;
+var __ZTSNSt3__215__codecvt_utf16IDiLb1EEE = Module['__ZTSNSt3__215__codecvt_utf16IDiLb1EEE'] = 192904;
+var __ZTVNSt3__220__codecvt_utf8_utf16IwEE = Module['__ZTVNSt3__220__codecvt_utf8_utf16IwEE'] = 192952;
+var __ZTINSt3__220__codecvt_utf8_utf16IwEE = Module['__ZTINSt3__220__codecvt_utf8_utf16IwEE'] = 193036;
+var __ZTSNSt3__220__codecvt_utf8_utf16IwEE = Module['__ZTSNSt3__220__codecvt_utf8_utf16IwEE'] = 193000;
+var __ZTVNSt3__220__codecvt_utf8_utf16IDiEE = Module['__ZTVNSt3__220__codecvt_utf8_utf16IDiEE'] = 193048;
+var __ZTINSt3__220__codecvt_utf8_utf16IDiEE = Module['__ZTINSt3__220__codecvt_utf8_utf16IDiEE'] = 193132;
+var __ZTSNSt3__220__codecvt_utf8_utf16IDiEE = Module['__ZTSNSt3__220__codecvt_utf8_utf16IDiEE'] = 193096;
+var __ZTVNSt3__220__codecvt_utf8_utf16IDsEE = Module['__ZTVNSt3__220__codecvt_utf8_utf16IDsEE'] = 193144;
+var __ZTINSt3__220__codecvt_utf8_utf16IDsEE = Module['__ZTINSt3__220__codecvt_utf8_utf16IDsEE'] = 193228;
+var __ZTSNSt3__220__codecvt_utf8_utf16IDsEE = Module['__ZTSNSt3__220__codecvt_utf8_utf16IDsEE'] = 193192;
+var __ZTSNSt3__26locale5__impE = Module['__ZTSNSt3__26locale5__impE'] = 193240;
+var __ZTSNSt3__214collate_bynameIcEE = Module['__ZTSNSt3__214collate_bynameIcEE'] = 193276;
+var __ZTSNSt3__27collateIcEE = Module['__ZTSNSt3__27collateIcEE'] = 193304;
+var __ZTINSt3__27collateIcEE = Module['__ZTINSt3__27collateIcEE'] = 193324;
+var __ZTSNSt3__214collate_bynameIwEE = Module['__ZTSNSt3__214collate_bynameIwEE'] = 193348;
+var __ZTSNSt3__27collateIwEE = Module['__ZTSNSt3__27collateIwEE'] = 193376;
+var __ZTINSt3__27collateIwEE = Module['__ZTINSt3__27collateIwEE'] = 193396;
+var __ZTSNSt3__25ctypeIcEE = Module['__ZTSNSt3__25ctypeIcEE'] = 193420;
+var __ZTSNSt3__212ctype_bynameIcEE = Module['__ZTSNSt3__212ctype_bynameIcEE'] = 193472;
+var __ZTSNSt3__212ctype_bynameIwEE = Module['__ZTSNSt3__212ctype_bynameIwEE'] = 193512;
+var __ZTSNSt3__28numpunctIcEE = Module['__ZTSNSt3__28numpunctIcEE'] = 193552;
+var __ZTSNSt3__28numpunctIwEE = Module['__ZTSNSt3__28numpunctIwEE'] = 193588;
+var __ZTSNSt3__215numpunct_bynameIcEE = Module['__ZTSNSt3__215numpunct_bynameIcEE'] = 193624;
+var __ZTSNSt3__215numpunct_bynameIwEE = Module['__ZTSNSt3__215numpunct_bynameIwEE'] = 193668;
+var __ZTINSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 193988;
+var __ZTSNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__27num_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 193840;
+var __ZTSNSt3__29__num_getIcEE = Module['__ZTSNSt3__29__num_getIcEE'] = 193908;
+var __ZTSNSt3__214__num_get_baseE = Module['__ZTSNSt3__214__num_get_baseE'] = 193930;
+var __ZTINSt3__214__num_get_baseE = Module['__ZTINSt3__214__num_get_baseE'] = 193956;
+var __ZTINSt3__29__num_getIcEE = Module['__ZTINSt3__29__num_getIcEE'] = 193964;
+var __ZTINSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194200;
+var __ZTSNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__27num_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194084;
+var __ZTSNSt3__29__num_getIwEE = Module['__ZTSNSt3__29__num_getIwEE'] = 194152;
+var __ZTINSt3__29__num_getIwEE = Module['__ZTINSt3__29__num_getIwEE'] = 194176;
+var __ZTINSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194432;
+var __ZTSNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__27num_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194284;
+var __ZTSNSt3__29__num_putIcEE = Module['__ZTSNSt3__29__num_putIcEE'] = 194352;
+var __ZTSNSt3__214__num_put_baseE = Module['__ZTSNSt3__214__num_put_baseE'] = 194374;
+var __ZTINSt3__214__num_put_baseE = Module['__ZTINSt3__214__num_put_baseE'] = 194400;
+var __ZTINSt3__29__num_putIcEE = Module['__ZTINSt3__29__num_putIcEE'] = 194408;
+var __ZTINSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194632;
+var __ZTSNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__27num_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 194516;
+var __ZTSNSt3__29__num_putIwEE = Module['__ZTSNSt3__29__num_putIwEE'] = 194584;
+var __ZTINSt3__29__num_putIwEE = Module['__ZTINSt3__29__num_putIwEE'] = 194608;
+var __ZTINSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194888;
+var __ZTSNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__28time_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 194748;
+var __ZTSNSt3__29time_baseE = Module['__ZTSNSt3__29time_baseE'] = 194817;
+var __ZTINSt3__29time_baseE = Module['__ZTINSt3__29time_baseE'] = 194836;
+var __ZTSNSt3__220__time_get_c_storageIcEE = Module['__ZTSNSt3__220__time_get_c_storageIcEE'] = 194844;
+var __ZTINSt3__220__time_get_c_storageIcEE = Module['__ZTINSt3__220__time_get_c_storageIcEE'] = 194880;
+var __ZTINSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195124;
+var __ZTSNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__28time_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195012;
+var __ZTSNSt3__220__time_get_c_storageIwEE = Module['__ZTSNSt3__220__time_get_c_storageIwEE'] = 195081;
+var __ZTINSt3__220__time_get_c_storageIwEE = Module['__ZTINSt3__220__time_get_c_storageIwEE'] = 195116;
+var __ZTINSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195428;
+var __ZTSNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__215time_get_bynameIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195276;
+var __ZTSNSt3__218__time_get_storageIcEE = Module['__ZTSNSt3__218__time_get_storageIcEE'] = 195353;
+var __ZTSNSt3__210__time_getE = Module['__ZTSNSt3__210__time_getE'] = 195385;
+var __ZTINSt3__210__time_getE = Module['__ZTINSt3__210__time_getE'] = 195408;
+var __ZTINSt3__218__time_get_storageIcEE = Module['__ZTINSt3__218__time_get_storageIcEE'] = 195416;
+var __ZTINSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195696;
+var __ZTSNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__215time_get_bynameIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195572;
+var __ZTSNSt3__218__time_get_storageIwEE = Module['__ZTSNSt3__218__time_get_storageIwEE'] = 195649;
+var __ZTINSt3__218__time_get_storageIwEE = Module['__ZTINSt3__218__time_get_storageIwEE'] = 195684;
+var __ZTINSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195852;
+var __ZTSNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__28time_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 195752;
+var __ZTSNSt3__210__time_putE = Module['__ZTSNSt3__210__time_putE'] = 195821;
+var __ZTINSt3__210__time_putE = Module['__ZTINSt3__210__time_putE'] = 195844;
+var __ZTINSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195980;
+var __ZTSNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__28time_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 195908;
+var __ZTINSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 196116;
+var __ZTSNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__215time_put_bynameIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 196036;
+var __ZTINSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 196232;
+var __ZTSNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__215time_put_bynameIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 196152;
+var __ZTINSt3__210moneypunctIcLb0EEE = Module['__ZTINSt3__210moneypunctIcLb0EEE'] = 196360;
+var __ZTSNSt3__210moneypunctIcLb0EEE = Module['__ZTSNSt3__210moneypunctIcLb0EEE'] = 196300;
+var __ZTSNSt3__210money_baseE = Module['__ZTSNSt3__210money_baseE'] = 196328;
+var __ZTINSt3__210money_baseE = Module['__ZTINSt3__210money_baseE'] = 196352;
+var __ZTINSt3__210moneypunctIcLb1EEE = Module['__ZTINSt3__210moneypunctIcLb1EEE'] = 196476;
+var __ZTSNSt3__210moneypunctIcLb1EEE = Module['__ZTSNSt3__210moneypunctIcLb1EEE'] = 196448;
+var __ZTINSt3__210moneypunctIwLb0EEE = Module['__ZTINSt3__210moneypunctIwLb0EEE'] = 196592;
+var __ZTSNSt3__210moneypunctIwLb0EEE = Module['__ZTSNSt3__210moneypunctIwLb0EEE'] = 196564;
+var __ZTINSt3__210moneypunctIwLb1EEE = Module['__ZTINSt3__210moneypunctIwLb1EEE'] = 196708;
+var __ZTSNSt3__210moneypunctIwLb1EEE = Module['__ZTSNSt3__210moneypunctIwLb1EEE'] = 196680;
+var __ZTINSt3__217moneypunct_bynameIcLb0EEE = Module['__ZTINSt3__217moneypunct_bynameIcLb0EEE'] = 196832;
+var __ZTSNSt3__217moneypunct_bynameIcLb0EEE = Module['__ZTSNSt3__217moneypunct_bynameIcLb0EEE'] = 196796;
+var __ZTINSt3__217moneypunct_bynameIcLb1EEE = Module['__ZTINSt3__217moneypunct_bynameIcLb1EEE'] = 196936;
+var __ZTSNSt3__217moneypunct_bynameIcLb1EEE = Module['__ZTSNSt3__217moneypunct_bynameIcLb1EEE'] = 196900;
+var __ZTINSt3__217moneypunct_bynameIwLb0EEE = Module['__ZTINSt3__217moneypunct_bynameIwLb0EEE'] = 197040;
+var __ZTSNSt3__217moneypunct_bynameIwLb0EEE = Module['__ZTSNSt3__217moneypunct_bynameIwLb0EEE'] = 197004;
+var __ZTINSt3__217moneypunct_bynameIwLb1EEE = Module['__ZTINSt3__217moneypunct_bynameIwLb1EEE'] = 197144;
+var __ZTSNSt3__217moneypunct_bynameIwLb1EEE = Module['__ZTSNSt3__217moneypunct_bynameIwLb1EEE'] = 197108;
+var __ZTINSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197288;
+var __ZTSNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__29money_getIcNS_19istreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197184;
+var __ZTSNSt3__211__money_getIcEE = Module['__ZTSNSt3__211__money_getIcEE'] = 197254;
+var __ZTINSt3__211__money_getIcEE = Module['__ZTINSt3__211__money_getIcEE'] = 197280;
+var __ZTINSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197452;
+var __ZTSNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__29money_getIwNS_19istreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197348;
+var __ZTSNSt3__211__money_getIwEE = Module['__ZTSNSt3__211__money_getIwEE'] = 197418;
+var __ZTINSt3__211__money_getIwEE = Module['__ZTINSt3__211__money_getIwEE'] = 197444;
+var __ZTINSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTINSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197616;
+var __ZTSNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE = Module['__ZTSNSt3__29money_putIcNS_19ostreambuf_iteratorIcNS_11char_traitsIcEEEEEE'] = 197512;
+var __ZTSNSt3__211__money_putIcEE = Module['__ZTSNSt3__211__money_putIcEE'] = 197582;
+var __ZTINSt3__211__money_putIcEE = Module['__ZTINSt3__211__money_putIcEE'] = 197608;
+var __ZTINSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTINSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197780;
+var __ZTSNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE = Module['__ZTSNSt3__29money_putIwNS_19ostreambuf_iteratorIwNS_11char_traitsIwEEEEEE'] = 197676;
+var __ZTSNSt3__211__money_putIwEE = Module['__ZTSNSt3__211__money_putIwEE'] = 197746;
+var __ZTINSt3__211__money_putIwEE = Module['__ZTINSt3__211__money_putIwEE'] = 197772;
+var __ZTINSt3__28messagesIcEE = Module['__ZTINSt3__28messagesIcEE'] = 197900;
+var __ZTSNSt3__28messagesIcEE = Module['__ZTSNSt3__28messagesIcEE'] = 197844;
+var __ZTSNSt3__213messages_baseE = Module['__ZTSNSt3__213messages_baseE'] = 197865;
+var __ZTINSt3__213messages_baseE = Module['__ZTINSt3__213messages_baseE'] = 197892;
+var __ZTINSt3__28messagesIwEE = Module['__ZTINSt3__28messagesIwEE'] = 197988;
+var __ZTSNSt3__28messagesIwEE = Module['__ZTSNSt3__28messagesIwEE'] = 197964;
+var __ZTINSt3__215messages_bynameIcEE = Module['__ZTINSt3__215messages_bynameIcEE'] = 198084;
+var __ZTSNSt3__215messages_bynameIcEE = Module['__ZTSNSt3__215messages_bynameIcEE'] = 198052;
+var __ZTINSt3__215messages_bynameIwEE = Module['__ZTINSt3__215messages_bynameIwEE'] = 198160;
+var __ZTSNSt3__215messages_bynameIwEE = Module['__ZTSNSt3__215messages_bynameIwEE'] = 198128;
+var __ZTINSt3__214codecvt_bynameIcc11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIcc11__mbstate_tEE'] = 198264;
+var __ZTSNSt3__214codecvt_bynameIcc11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIcc11__mbstate_tEE'] = 198220;
+var __ZTINSt3__214codecvt_bynameIwc11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIwc11__mbstate_tEE'] = 198368;
+var __ZTSNSt3__214codecvt_bynameIwc11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIwc11__mbstate_tEE'] = 198324;
+var __ZTINSt3__214codecvt_bynameIDsc11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIDsc11__mbstate_tEE'] = 198472;
+var __ZTSNSt3__214codecvt_bynameIDsc11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIDsc11__mbstate_tEE'] = 198428;
+var __ZTINSt3__214codecvt_bynameIDic11__mbstate_tEE = Module['__ZTINSt3__214codecvt_bynameIDic11__mbstate_tEE'] = 198576;
+var __ZTSNSt3__214codecvt_bynameIDic11__mbstate_tEE = Module['__ZTSNSt3__214codecvt_bynameIDic11__mbstate_tEE'] = 198532;
+var __ZTINSt3__215__time_get_tempIcEE = Module['__ZTINSt3__215__time_get_tempIcEE'] = 201476;
+var __ZTSNSt3__215__time_get_tempIcEE = Module['__ZTSNSt3__215__time_get_tempIcEE'] = 201444;
+var __ZTINSt3__215__time_get_tempIwEE = Module['__ZTINSt3__215__time_get_tempIwEE'] = 201588;
+var __ZTSNSt3__215__time_get_tempIwEE = Module['__ZTSNSt3__215__time_get_tempIwEE'] = 201556;
+var __ZNSt3__213allocator_argE = Module['__ZNSt3__213allocator_argE'] = 201600;
+var __ZTSNSt3__214__shared_countE = Module['__ZTSNSt3__214__shared_countE'] = 202164;
+var __ZTVNSt3__219__shared_weak_countE = Module['__ZTVNSt3__219__shared_weak_countE'] = 202200;
+var __ZTINSt3__219__shared_weak_countE = Module['__ZTINSt3__219__shared_weak_countE'] = 202260;
+var __ZTSNSt3__219__shared_weak_countE = Module['__ZTSNSt3__219__shared_weak_countE'] = 202228;
+var __ZTVNSt3__212bad_weak_ptrE = Module['__ZTVNSt3__212bad_weak_ptrE'] = 202284;
+var __ZTINSt3__212bad_weak_ptrE = Module['__ZTINSt3__212bad_weak_ptrE'] = 202328;
+var __ZTSNSt3__212bad_weak_ptrE = Module['__ZTSNSt3__212bad_weak_ptrE'] = 202304;
+var __ZNSt3__210defer_lockE = Module['__ZNSt3__210defer_lockE'] = 202340;
+var __ZNSt3__211try_to_lockE = Module['__ZNSt3__211try_to_lockE'] = 202341;
+var __ZNSt3__210adopt_lockE = Module['__ZNSt3__210adopt_lockE'] = 202342;
+var __ZSt7nothrow = Module['__ZSt7nothrow'] = 202576;
+var __ZTVSt19bad_optional_access = Module['__ZTVSt19bad_optional_access'] = 202600;
+var __ZTISt19bad_optional_access = Module['__ZTISt19bad_optional_access'] = 202644;
+var __ZTSSt19bad_optional_access = Module['__ZTSSt19bad_optional_access'] = 202620;
+var __ZTVNSt12experimental19bad_optional_accessE = Module['__ZTVNSt12experimental19bad_optional_accessE'] = 202656;
+var __ZTINSt12experimental19bad_optional_accessE = Module['__ZTINSt12experimental19bad_optional_accessE'] = 202716;
+var __ZTSNSt12experimental19bad_optional_accessE = Module['__ZTSNSt12experimental19bad_optional_accessE'] = 202676;
+var __ZTVNSt3__211regex_errorE = Module['__ZTVNSt3__211regex_errorE'] = 202804;
+var __ZTINSt3__211regex_errorE = Module['__ZTINSt3__211regex_errorE'] = 203872;
+var __ZTSNSt3__211regex_errorE = Module['__ZTSNSt3__211regex_errorE'] = 203848;
+var __ZTISt13runtime_error = Module['__ZTISt13runtime_error'] = 222008;
+var __ZTVSt11logic_error = Module['__ZTVSt11logic_error'] = 221672;
+var __ZTVSt9exception = Module['__ZTVSt9exception'] = 221508;
+var __ZTVSt13runtime_error = Module['__ZTVSt13runtime_error'] = 221692;
+var __ZNSt3__212basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4nposE = Module['__ZNSt3__212basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEE4nposE'] = 205828;
+var __ZNSt3__212basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE4nposE = Module['__ZNSt3__212basic_stringIwNS_11char_traitsIwEENS_9allocatorIwEEE4nposE'] = 205832;
+var __ZTVNSt3__212strstreambufE = Module['__ZTVNSt3__212strstreambufE'] = 206256;
+var __ZTTNSt3__210istrstreamE = Module['__ZTTNSt3__210istrstreamE'] = 206360;
+var __ZTTNSt3__210ostrstreamE = Module['__ZTTNSt3__210ostrstreamE'] = 206416;
+var __ZTTNSt3__29strstreamE = Module['__ZTTNSt3__29strstreamE'] = 206492;
+var __ZTINSt3__212strstreambufE = Module['__ZTINSt3__212strstreambufE'] = 206556;
+var __ZTVNSt3__210istrstreamE = Module['__ZTVNSt3__210istrstreamE'] = 206320;
+var __ZTINSt3__210istrstreamE = Module['__ZTINSt3__210istrstreamE'] = 206632;
+var __ZTCNSt3__210istrstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__210istrstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE'] = 206568;
+var __ZTVNSt3__210ostrstreamE = Module['__ZTVNSt3__210ostrstreamE'] = 206376;
+var __ZTINSt3__210ostrstreamE = Module['__ZTINSt3__210ostrstreamE'] = 206708;
+var __ZTCNSt3__210ostrstreamE0_NS_13basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__210ostrstreamE0_NS_13basic_ostreamIcNS_11char_traitsIcEEEE'] = 206644;
+var __ZTVNSt3__29strstreamE = Module['__ZTVNSt3__29strstreamE'] = 206432;
+var __ZTINSt3__29strstreamE = Module['__ZTINSt3__29strstreamE'] = 206880;
+var __ZTCNSt3__29strstreamE0_NS_14basic_iostreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__29strstreamE0_NS_14basic_iostreamIcNS_11char_traitsIcEEEE'] = 206720;
+var __ZTCNSt3__29strstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__29strstreamE0_NS_13basic_istreamIcNS_11char_traitsIcEEEE'] = 206780;
+var __ZTCNSt3__29strstreamE8_NS_13basic_ostreamIcNS_11char_traitsIcEEEE = Module['__ZTCNSt3__29strstreamE8_NS_13basic_ostreamIcNS_11char_traitsIcEEEE'] = 206820;
+var __ZTSNSt3__212strstreambufE = Module['__ZTSNSt3__212strstreambufE'] = 206532;
+var __ZTSNSt3__210istrstreamE = Module['__ZTSNSt3__210istrstreamE'] = 206608;
+var __ZTSNSt3__210ostrstreamE = Module['__ZTSNSt3__210ostrstreamE'] = 206684;
+var __ZTSNSt3__29strstreamE = Module['__ZTSNSt3__29strstreamE'] = 206860;
+var __ZTVNSt3__212system_errorE = Module['__ZTVNSt3__212system_errorE'] = 207072;
+var __ZTVNSt3__224__generic_error_categoryE = Module['__ZTVNSt3__224__generic_error_categoryE'] = 206940;
+var __ZTINSt3__224__generic_error_categoryE = Module['__ZTINSt3__224__generic_error_categoryE'] = 207276;
+var __ZTVNSt3__223__system_error_categoryE = Module['__ZTVNSt3__223__system_error_categoryE'] = 207028;
+var __ZTINSt3__223__system_error_categoryE = Module['__ZTINSt3__223__system_error_categoryE'] = 207324;
+var __ZTVNSt3__214error_categoryE = Module['__ZTVNSt3__214error_categoryE'] = 207096;
+var __ZTINSt3__214error_categoryE = Module['__ZTINSt3__214error_categoryE'] = 207160;
+var __ZTSNSt3__214error_categoryE = Module['__ZTSNSt3__214error_categoryE'] = 207132;
+var __ZTVNSt3__212__do_messageE = Module['__ZTVNSt3__212__do_messageE'] = 207168;
+var __ZTSNSt3__212__do_messageE = Module['__ZTSNSt3__212__do_messageE'] = 207204;
+var __ZTSNSt3__224__generic_error_categoryE = Module['__ZTSNSt3__224__generic_error_categoryE'] = 207240;
+var __ZTSNSt3__223__system_error_categoryE = Module['__ZTSNSt3__223__system_error_categoryE'] = 207288;
+var __ZTSNSt3__212system_errorE = Module['__ZTSNSt3__212system_errorE'] = 207336;
+var __ZNSt3__219piecewise_constructE = Module['__ZNSt3__219piecewise_constructE'] = 207482;
+var __ZTVSt18bad_variant_access = Module['__ZTVSt18bad_variant_access'] = 207504;
+var __ZTISt18bad_variant_access = Module['__ZTISt18bad_variant_access'] = 207548;
+var __ZTSSt18bad_variant_access = Module['__ZTSSt18bad_variant_access'] = 207524;
+var __ZTVNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE = Module['__ZTVNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE'] = 207568;
+var __ZTINSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE = Module['__ZTINSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE'] = 207772;
+var __ZTVNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE = Module['__ZTVNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE'] = 207596;
+var __ZTINSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE = Module['__ZTINSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE'] = 207852;
+var __ZTSNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE = Module['__ZTSNSt12experimental15fundamentals_v13pmr32__new_delete_memory_resource_impE'] = 207632;
+var __ZTSNSt12experimental15fundamentals_v13pmr15memory_resourceE = Module['__ZTSNSt12experimental15fundamentals_v13pmr15memory_resourceE'] = 207706;
+var __ZTINSt12experimental15fundamentals_v13pmr15memory_resourceE = Module['__ZTINSt12experimental15fundamentals_v13pmr15memory_resourceE'] = 207764;
+var __ZTSNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE = Module['__ZTSNSt12experimental15fundamentals_v13pmr26__null_memory_resource_impE'] = 207784;
+var __ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE = Module['__ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE'] = 208136;
+var __ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE = Module['__ZTVNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE'] = 208272;
+var __ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE = Module['__ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE'] = 208252;
+var __ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE = Module['__ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem12__dir_streamENS_9allocatorIS3_EEEE'] = 208164;
+var __ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE = Module['__ZTINSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE'] = 208420;
+var __ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE = Module['__ZTSNSt3__220__shared_ptr_emplaceINS_4__fs10filesystem28recursive_directory_iterator12__shared_impENS_9allocatorIS4_EEEE'] = 208300;
+var __ZTVNSt3__24__fs10filesystem16filesystem_errorE = Module['__ZTVNSt3__24__fs10filesystem16filesystem_errorE'] = 208472;
+var __ZTVNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209240;
+var __ZTTNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209280;
+var __ZTVNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209556;
+var __ZTTNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTTNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209596;
+var __ZTVNSt3__213basic_filebufIcNS_11char_traitsIcEEEE = Module['__ZTVNSt3__213basic_filebufIcNS_11char_traitsIcEEEE'] = 209396;
+var __ZNSt3__24__fs10filesystem16_FilesystemClock9is_steadyE = Module['__ZNSt3__24__fs10filesystem16_FilesystemClock9is_steadyE'] = 208432;
+var __ZTINSt3__24__fs10filesystem16filesystem_errorE = Module['__ZTINSt3__24__fs10filesystem16filesystem_errorE'] = 209004;
+var __ZNSt3__24__fs10filesystem4path19preferred_separatorE = Module['__ZNSt3__24__fs10filesystem4path19preferred_separatorE'] = 208956;
+var __ZTSNSt3__24__fs10filesystem16filesystem_errorE = Module['__ZTSNSt3__24__fs10filesystem16filesystem_errorE'] = 208960;
+var __ZTINSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209384;
+var __ZTCNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE = Module['__ZTCNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE0_NS_13basic_istreamIcS2_EE'] = 209296;
+var __ZTSNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__214basic_ifstreamIcNS_11char_traitsIcEEEE'] = 209336;
+var __ZTINSt3__213basic_filebufIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__213basic_filebufIcNS_11char_traitsIcEEEE'] = 209508;
+var __ZTSNSt3__213basic_filebufIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__213basic_filebufIcNS_11char_traitsIcEEEE'] = 209460;
+var __ZTINSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTINSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209700;
+var __ZTCNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE0_NS_13basic_ostreamIcS2_EE = Module['__ZTCNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE0_NS_13basic_ostreamIcS2_EE'] = 209612;
+var __ZTSNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE = Module['__ZTSNSt3__214basic_ofstreamIcNS_11char_traitsIcEEEE'] = 209652;
+var ___cxa_unexpected_handler = Module['___cxa_unexpected_handler'] = 209740;
+var ___cxa_terminate_handler = Module['___cxa_terminate_handler'] = 209736;
+var ___cxa_new_handler = Module['___cxa_new_handler'] = 220804;
+var __ZTVSt9bad_alloc = Module['__ZTVSt9bad_alloc'] = 221428;
+var __ZTVSt20bad_array_new_length = Module['__ZTVSt20bad_array_new_length'] = 221464;
+var __ZTISt9bad_alloc = Module['__ZTISt9bad_alloc'] = 221620;
+var __ZTISt20bad_array_new_length = Module['__ZTISt20bad_array_new_length'] = 221660;
+var __ZTSSt9exception = Module['__ZTSSt9exception'] = 221528;
+var __ZTVSt13bad_exception = Module['__ZTVSt13bad_exception'] = 221552;
+var __ZTISt13bad_exception = Module['__ZTISt13bad_exception'] = 221592;
+var __ZTSSt13bad_exception = Module['__ZTSSt13bad_exception'] = 221572;
+var __ZTSSt9bad_alloc = Module['__ZTSSt9bad_alloc'] = 221604;
+var __ZTSSt20bad_array_new_length = Module['__ZTSSt20bad_array_new_length'] = 221632;
+var __ZTVSt12domain_error = Module['__ZTVSt12domain_error'] = 221712;
+var __ZTISt12domain_error = Module['__ZTISt12domain_error'] = 221780;
+var __ZTSSt12domain_error = Module['__ZTSSt12domain_error'] = 221732;
+var __ZTSSt11logic_error = Module['__ZTSSt11logic_error'] = 221749;
+var __ZTVSt16invalid_argument = Module['__ZTVSt16invalid_argument'] = 221792;
+var __ZTISt16invalid_argument = Module['__ZTISt16invalid_argument'] = 221836;
+var __ZTSSt16invalid_argument = Module['__ZTSSt16invalid_argument'] = 221812;
+var __ZTVSt12length_error = Module['__ZTVSt12length_error'] = 221848;
+var __ZTISt12length_error = Module['__ZTISt12length_error'] = 221888;
+var __ZTSSt12length_error = Module['__ZTSSt12length_error'] = 221868;
+var __ZTVSt12out_of_range = Module['__ZTVSt12out_of_range'] = 221900;
+var __ZTISt12out_of_range = Module['__ZTISt12out_of_range'] = 221940;
+var __ZTSSt12out_of_range = Module['__ZTSSt12out_of_range'] = 221920;
+var __ZTVSt11range_error = Module['__ZTVSt11range_error'] = 221952;
+var __ZTISt11range_error = Module['__ZTISt11range_error'] = 222020;
+var __ZTSSt11range_error = Module['__ZTSSt11range_error'] = 221972;
+var __ZTSSt13runtime_error = Module['__ZTSSt13runtime_error'] = 221988;
+var __ZTVSt14overflow_error = Module['__ZTVSt14overflow_error'] = 222032;
+var __ZTISt14overflow_error = Module['__ZTISt14overflow_error'] = 222072;
+var __ZTSSt14overflow_error = Module['__ZTSSt14overflow_error'] = 222052;
+var __ZTVSt15underflow_error = Module['__ZTVSt15underflow_error'] = 222084;
+var __ZTISt15underflow_error = Module['__ZTISt15underflow_error'] = 222124;
+var __ZTSSt15underflow_error = Module['__ZTSSt15underflow_error'] = 222104;
+var __ZTVSt8bad_cast = Module['__ZTVSt8bad_cast'] = 222136;
+var __ZTVSt10bad_typeid = Module['__ZTVSt10bad_typeid'] = 222172;
+var __ZTISt10bad_typeid = Module['__ZTISt10bad_typeid'] = 222288;
+var __ZTVSt9type_info = Module['__ZTVSt9type_info'] = 222208;
+var __ZTISt9type_info = Module['__ZTISt9type_info'] = 222240;
+var __ZTSSt9type_info = Module['__ZTSSt9type_info'] = 222224;
+var __ZTSSt8bad_cast = Module['__ZTSSt8bad_cast'] = 222248;
+var __ZTSSt10bad_typeid = Module['__ZTSSt10bad_typeid'] = 222272;
+var __ZTIN10__cxxabiv117__class_type_infoE = Module['__ZTIN10__cxxabiv117__class_type_infoE'] = 222384;
+var __ZTIN10__cxxabiv116__shim_type_infoE = Module['__ZTIN10__cxxabiv116__shim_type_infoE'] = 222336;
+var __ZTIN10__cxxabiv117__pbase_type_infoE = Module['__ZTIN10__cxxabiv117__pbase_type_infoE'] = 222432;
+var __ZTIDn = Module['__ZTIDn'] = 222780;
+var __ZTIN10__cxxabiv119__pointer_type_infoE = Module['__ZTIN10__cxxabiv119__pointer_type_infoE'] = 222480;
+var __ZTIv = Module['__ZTIv'] = 222728;
+var __ZTIN10__cxxabiv120__function_type_infoE = Module['__ZTIN10__cxxabiv120__function_type_infoE'] = 222532;
+var __ZTIN10__cxxabiv129__pointer_to_member_type_infoE = Module['__ZTIN10__cxxabiv129__pointer_to_member_type_infoE'] = 222592;
+var __ZTSN10__cxxabiv116__shim_type_infoE = Module['__ZTSN10__cxxabiv116__shim_type_infoE'] = 222300;
+var __ZTSN10__cxxabiv117__class_type_infoE = Module['__ZTSN10__cxxabiv117__class_type_infoE'] = 222348;
+var __ZTSN10__cxxabiv117__pbase_type_infoE = Module['__ZTSN10__cxxabiv117__pbase_type_infoE'] = 222396;
+var __ZTSN10__cxxabiv119__pointer_type_infoE = Module['__ZTSN10__cxxabiv119__pointer_type_infoE'] = 222444;
+var __ZTSN10__cxxabiv120__function_type_infoE = Module['__ZTSN10__cxxabiv120__function_type_infoE'] = 222492;
+var __ZTSN10__cxxabiv129__pointer_to_member_type_infoE = Module['__ZTSN10__cxxabiv129__pointer_to_member_type_infoE'] = 222544;
+var __ZTVN10__cxxabiv116__shim_type_infoE = Module['__ZTVN10__cxxabiv116__shim_type_infoE'] = 222616;
+var __ZTVN10__cxxabiv123__fundamental_type_infoE = Module['__ZTVN10__cxxabiv123__fundamental_type_infoE'] = 222644;
+var __ZTIN10__cxxabiv123__fundamental_type_infoE = Module['__ZTIN10__cxxabiv123__fundamental_type_infoE'] = 222712;
+var __ZTSN10__cxxabiv123__fundamental_type_infoE = Module['__ZTSN10__cxxabiv123__fundamental_type_infoE'] = 222672;
+var __ZTSv = Module['__ZTSv'] = 222724;
+var __ZTSPv = Module['__ZTSPv'] = 222736;
+var __ZTIPv = Module['__ZTIPv'] = 222740;
+var __ZTVN10__cxxabiv119__pointer_type_infoE = Module['__ZTVN10__cxxabiv119__pointer_type_infoE'] = 224476;
+var __ZTSPKv = Module['__ZTSPKv'] = 222756;
+var __ZTIPKv = Module['__ZTIPKv'] = 222760;
+var __ZTSDn = Module['__ZTSDn'] = 222776;
+var __ZTSPDn = Module['__ZTSPDn'] = 222788;
+var __ZTIPDn = Module['__ZTIPDn'] = 222792;
+var __ZTSPKDn = Module['__ZTSPKDn'] = 222808;
+var __ZTIPKDn = Module['__ZTIPKDn'] = 222816;
+var __ZTSb = Module['__ZTSb'] = 222832;
+var __ZTIb = Module['__ZTIb'] = 222836;
+var __ZTSPb = Module['__ZTSPb'] = 222844;
+var __ZTIPb = Module['__ZTIPb'] = 222848;
+var __ZTSPKb = Module['__ZTSPKb'] = 222864;
+var __ZTIPKb = Module['__ZTIPKb'] = 222868;
+var __ZTSw = Module['__ZTSw'] = 222884;
+var __ZTIw = Module['__ZTIw'] = 222888;
+var __ZTSPw = Module['__ZTSPw'] = 222896;
+var __ZTIPw = Module['__ZTIPw'] = 222900;
+var __ZTSPKw = Module['__ZTSPKw'] = 222916;
+var __ZTIPKw = Module['__ZTIPKw'] = 222920;
+var __ZTSc = Module['__ZTSc'] = 222936;
+var __ZTIc = Module['__ZTIc'] = 222940;
+var __ZTSPc = Module['__ZTSPc'] = 222948;
+var __ZTIPc = Module['__ZTIPc'] = 222952;
+var __ZTSPKc = Module['__ZTSPKc'] = 222968;
+var __ZTIPKc = Module['__ZTIPKc'] = 222972;
+var __ZTSh = Module['__ZTSh'] = 222988;
+var __ZTIh = Module['__ZTIh'] = 222992;
+var __ZTSPh = Module['__ZTSPh'] = 223000;
+var __ZTIPh = Module['__ZTIPh'] = 223004;
+var __ZTSPKh = Module['__ZTSPKh'] = 223020;
+var __ZTIPKh = Module['__ZTIPKh'] = 223024;
+var __ZTSa = Module['__ZTSa'] = 223040;
+var __ZTIa = Module['__ZTIa'] = 223044;
+var __ZTSPa = Module['__ZTSPa'] = 223052;
+var __ZTIPa = Module['__ZTIPa'] = 223056;
+var __ZTSPKa = Module['__ZTSPKa'] = 223072;
+var __ZTIPKa = Module['__ZTIPKa'] = 223076;
+var __ZTSs = Module['__ZTSs'] = 223092;
+var __ZTIs = Module['__ZTIs'] = 223096;
+var __ZTSPs = Module['__ZTSPs'] = 223104;
+var __ZTIPs = Module['__ZTIPs'] = 223108;
+var __ZTSPKs = Module['__ZTSPKs'] = 223124;
+var __ZTIPKs = Module['__ZTIPKs'] = 223128;
+var __ZTSt = Module['__ZTSt'] = 223144;
+var __ZTIt = Module['__ZTIt'] = 223148;
+var __ZTSPt = Module['__ZTSPt'] = 223156;
+var __ZTIPt = Module['__ZTIPt'] = 223160;
+var __ZTSPKt = Module['__ZTSPKt'] = 223176;
+var __ZTIPKt = Module['__ZTIPKt'] = 223180;
+var __ZTSi = Module['__ZTSi'] = 223196;
+var __ZTIi = Module['__ZTIi'] = 223200;
+var __ZTSPi = Module['__ZTSPi'] = 223208;
+var __ZTIPi = Module['__ZTIPi'] = 223212;
+var __ZTSPKi = Module['__ZTSPKi'] = 223228;
+var __ZTIPKi = Module['__ZTIPKi'] = 223232;
+var __ZTSj = Module['__ZTSj'] = 223248;
+var __ZTIj = Module['__ZTIj'] = 223252;
+var __ZTSPj = Module['__ZTSPj'] = 223260;
+var __ZTIPj = Module['__ZTIPj'] = 223264;
+var __ZTSPKj = Module['__ZTSPKj'] = 223280;
+var __ZTIPKj = Module['__ZTIPKj'] = 223284;
+var __ZTSl = Module['__ZTSl'] = 223300;
+var __ZTIl = Module['__ZTIl'] = 223304;
+var __ZTSPl = Module['__ZTSPl'] = 223312;
+var __ZTIPl = Module['__ZTIPl'] = 223316;
+var __ZTSPKl = Module['__ZTSPKl'] = 223332;
+var __ZTIPKl = Module['__ZTIPKl'] = 223336;
+var __ZTSm = Module['__ZTSm'] = 223352;
+var __ZTIm = Module['__ZTIm'] = 223356;
+var __ZTSPm = Module['__ZTSPm'] = 223364;
+var __ZTIPm = Module['__ZTIPm'] = 223368;
+var __ZTSPKm = Module['__ZTSPKm'] = 223384;
+var __ZTIPKm = Module['__ZTIPKm'] = 223388;
+var __ZTSx = Module['__ZTSx'] = 223404;
+var __ZTIx = Module['__ZTIx'] = 223408;
+var __ZTSPx = Module['__ZTSPx'] = 223416;
+var __ZTIPx = Module['__ZTIPx'] = 223420;
+var __ZTSPKx = Module['__ZTSPKx'] = 223436;
+var __ZTIPKx = Module['__ZTIPKx'] = 223440;
+var __ZTSy = Module['__ZTSy'] = 223456;
+var __ZTIy = Module['__ZTIy'] = 223460;
+var __ZTSPy = Module['__ZTSPy'] = 223468;
+var __ZTIPy = Module['__ZTIPy'] = 223472;
+var __ZTSPKy = Module['__ZTSPKy'] = 223488;
+var __ZTIPKy = Module['__ZTIPKy'] = 223492;
+var __ZTSn = Module['__ZTSn'] = 223508;
+var __ZTIn = Module['__ZTIn'] = 223512;
+var __ZTSPn = Module['__ZTSPn'] = 223520;
+var __ZTIPn = Module['__ZTIPn'] = 223524;
+var __ZTSPKn = Module['__ZTSPKn'] = 223540;
+var __ZTIPKn = Module['__ZTIPKn'] = 223544;
+var __ZTSo = Module['__ZTSo'] = 223560;
+var __ZTIo = Module['__ZTIo'] = 223564;
+var __ZTSPo = Module['__ZTSPo'] = 223572;
+var __ZTIPo = Module['__ZTIPo'] = 223576;
+var __ZTSPKo = Module['__ZTSPKo'] = 223592;
+var __ZTIPKo = Module['__ZTIPKo'] = 223596;
+var __ZTSDh = Module['__ZTSDh'] = 223612;
+var __ZTIDh = Module['__ZTIDh'] = 223616;
+var __ZTSPDh = Module['__ZTSPDh'] = 223624;
+var __ZTIPDh = Module['__ZTIPDh'] = 223628;
+var __ZTSPKDh = Module['__ZTSPKDh'] = 223644;
+var __ZTIPKDh = Module['__ZTIPKDh'] = 223652;
+var __ZTSf = Module['__ZTSf'] = 223668;
+var __ZTIf = Module['__ZTIf'] = 223672;
+var __ZTSPf = Module['__ZTSPf'] = 223680;
+var __ZTIPf = Module['__ZTIPf'] = 223684;
+var __ZTSPKf = Module['__ZTSPKf'] = 223700;
+var __ZTIPKf = Module['__ZTIPKf'] = 223704;
+var __ZTSd = Module['__ZTSd'] = 223720;
+var __ZTId = Module['__ZTId'] = 223724;
+var __ZTSPd = Module['__ZTSPd'] = 223732;
+var __ZTIPd = Module['__ZTIPd'] = 223736;
+var __ZTSPKd = Module['__ZTSPKd'] = 223752;
+var __ZTIPKd = Module['__ZTIPKd'] = 223756;
+var __ZTSe = Module['__ZTSe'] = 223772;
+var __ZTIe = Module['__ZTIe'] = 223776;
+var __ZTSPe = Module['__ZTSPe'] = 223784;
+var __ZTIPe = Module['__ZTIPe'] = 223788;
+var __ZTSPKe = Module['__ZTSPKe'] = 223804;
+var __ZTIPKe = Module['__ZTIPKe'] = 223808;
+var __ZTSg = Module['__ZTSg'] = 223824;
+var __ZTIg = Module['__ZTIg'] = 223828;
+var __ZTSPg = Module['__ZTSPg'] = 223836;
+var __ZTIPg = Module['__ZTIPg'] = 223840;
+var __ZTSPKg = Module['__ZTSPKg'] = 223856;
+var __ZTIPKg = Module['__ZTIPKg'] = 223860;
+var __ZTSDu = Module['__ZTSDu'] = 223876;
+var __ZTIDu = Module['__ZTIDu'] = 223880;
+var __ZTSPDu = Module['__ZTSPDu'] = 223888;
+var __ZTIPDu = Module['__ZTIPDu'] = 223892;
+var __ZTSPKDu = Module['__ZTSPKDu'] = 223908;
+var __ZTIPKDu = Module['__ZTIPKDu'] = 223916;
+var __ZTSDs = Module['__ZTSDs'] = 223932;
+var __ZTIDs = Module['__ZTIDs'] = 223936;
+var __ZTSPDs = Module['__ZTSPDs'] = 223944;
+var __ZTIPDs = Module['__ZTIPDs'] = 223948;
+var __ZTSPKDs = Module['__ZTSPKDs'] = 223964;
+var __ZTIPKDs = Module['__ZTIPKDs'] = 223972;
+var __ZTSDi = Module['__ZTSDi'] = 223988;
+var __ZTIDi = Module['__ZTIDi'] = 223992;
+var __ZTSPDi = Module['__ZTSPDi'] = 224000;
+var __ZTIPDi = Module['__ZTIPDi'] = 224004;
+var __ZTSPKDi = Module['__ZTSPKDi'] = 224020;
+var __ZTIPKDi = Module['__ZTIPKDi'] = 224028;
+var __ZTVN10__cxxabiv117__array_type_infoE = Module['__ZTVN10__cxxabiv117__array_type_infoE'] = 224044;
+var __ZTIN10__cxxabiv117__array_type_infoE = Module['__ZTIN10__cxxabiv117__array_type_infoE'] = 224108;
+var __ZTSN10__cxxabiv117__array_type_infoE = Module['__ZTSN10__cxxabiv117__array_type_infoE'] = 224072;
+var __ZTVN10__cxxabiv120__function_type_infoE = Module['__ZTVN10__cxxabiv120__function_type_infoE'] = 224120;
+var __ZTVN10__cxxabiv116__enum_type_infoE = Module['__ZTVN10__cxxabiv116__enum_type_infoE'] = 224148;
+var __ZTIN10__cxxabiv116__enum_type_infoE = Module['__ZTIN10__cxxabiv116__enum_type_infoE'] = 224212;
+var __ZTSN10__cxxabiv116__enum_type_infoE = Module['__ZTSN10__cxxabiv116__enum_type_infoE'] = 224176;
+var __ZTIN10__cxxabiv120__si_class_type_infoE = Module['__ZTIN10__cxxabiv120__si_class_type_infoE'] = 224344;
+var __ZTSN10__cxxabiv120__si_class_type_infoE = Module['__ZTSN10__cxxabiv120__si_class_type_infoE'] = 224304;
+var __ZTIN10__cxxabiv121__vmi_class_type_infoE = Module['__ZTIN10__cxxabiv121__vmi_class_type_infoE'] = 224436;
+var __ZTSN10__cxxabiv121__vmi_class_type_infoE = Module['__ZTSN10__cxxabiv121__vmi_class_type_infoE'] = 224396;
+var __ZTVN10__cxxabiv117__pbase_type_infoE = Module['__ZTVN10__cxxabiv117__pbase_type_infoE'] = 224448;
+var __ZTVN10__cxxabiv129__pointer_to_member_type_infoE = Module['__ZTVN10__cxxabiv129__pointer_to_member_type_infoE'] = 224504;
+var _in6addr_any = Module['_in6addr_any'] = 229580;
+var _in6addr_loopback = Module['_in6addr_loopback'] = 229596;
 
 
 
@@ -48676,6 +49333,7 @@ if (!Object.getOwnPropertyDescriptor(Module, "setTempRet0")) Module["setTempRet0
 if (!Object.getOwnPropertyDescriptor(Module, "callMain")) Module["callMain"] = function() { abort("'callMain' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "abort")) Module["abort"] = function() { abort("'abort' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "stringToNewUTF8")) Module["stringToNewUTF8"] = function() { abort("'stringToNewUTF8' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "setFileTime")) Module["setFileTime"] = function() { abort("'setFileTime' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "abortOnCannotGrowMemory")) Module["abortOnCannotGrowMemory"] = function() { abort("'abortOnCannotGrowMemory' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "emscripten_realloc_buffer")) Module["emscripten_realloc_buffer"] = function() { abort("'emscripten_realloc_buffer' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "ENV")) Module["ENV"] = function() { abort("'ENV' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -48734,17 +49392,22 @@ if (!Object.getOwnPropertyDescriptor(Module, "readI53FromI64")) Module["readI53F
 if (!Object.getOwnPropertyDescriptor(Module, "readI53FromU64")) Module["readI53FromU64"] = function() { abort("'readI53FromU64' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "convertI32PairToI53")) Module["convertI32PairToI53"] = function() { abort("'convertI32PairToI53' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "convertU32PairToI53")) Module["convertU32PairToI53"] = function() { abort("'convertU32PairToI53' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "asmjsMangle")) Module["asmjsMangle"] = function() { abort("'asmjsMangle' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "resolveGlobalSymbol")) Module["resolveGlobalSymbol"] = function() { abort("'resolveGlobalSymbol' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "GOT")) Module["GOT"] = function() { abort("'GOT' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "GOTHandler")) Module["GOTHandler"] = function() { abort("'GOTHandler' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "updateGOT")) Module["updateGOT"] = function() { abort("'updateGOT' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "relocateExports")) Module["relocateExports"] = function() { abort("'relocateExports' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "reportUndefinedSymbols")) Module["reportUndefinedSymbols"] = function() { abort("'reportUndefinedSymbols' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "DLFCN")) Module["DLFCN"] = function() { abort("'DLFCN' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "LDSO")) Module["LDSO"] = function() { abort("'LDSO' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "createInvokeFunction")) Module["createInvokeFunction"] = function() { abort("'createInvokeFunction' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "getMemory")) Module["getMemory"] = function() { abort("'getMemory' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "fetchBinary")) Module["fetchBinary"] = function() { abort("'fetchBinary' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "asmjsMangle")) Module["asmjsMangle"] = function() { abort("'asmjsMangle' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "resolveGlobalSymbol")) Module["resolveGlobalSymbol"] = function() { abort("'resolveGlobalSymbol' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
-if (!Object.getOwnPropertyDescriptor(Module, "loadSideModule")) Module["loadSideModule"] = function() { abort("'loadSideModule' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "loadWebAssemblyModule")) Module["loadWebAssemblyModule"] = function() { abort("'loadWebAssemblyModule' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "loadDynamicLibrary")) Module["loadDynamicLibrary"] = function() { abort("'loadDynamicLibrary' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "preloadDylibs")) Module["preloadDylibs"] = function() { abort("'preloadDylibs' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
+if (!Object.getOwnPropertyDescriptor(Module, "uncaughtExceptionCount")) Module["uncaughtExceptionCount"] = function() { abort("'uncaughtExceptionCount' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionLast")) Module["exceptionLast"] = function() { abort("'exceptionLast' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "exceptionCaught")) Module["exceptionCaught"] = function() { abort("'exceptionCaught' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
 if (!Object.getOwnPropertyDescriptor(Module, "ExceptionInfoAttrs")) Module["ExceptionInfoAttrs"] = function() { abort("'ExceptionInfoAttrs' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)") };
@@ -48849,9 +49512,9 @@ function callMain(args) {
 
     var ret = entryFunction(argc, argv);
 
-    // In PROXY_TO_PTHREAD builds, we should never exit the runtime below, as execution is asynchronously handed
-    // off to a pthread.
-    // if we're not running an evented main loop, it's time to exit
+    // In PROXY_TO_PTHREAD builds, we should never exit the runtime below, as
+    // execution is asynchronously handed off to a pthread.
+      // if we're not running an evented main loop, it's time to exit
       exit(ret, /* implicit = */ true);
   }
   catch(e) {
@@ -48885,6 +49548,11 @@ function run(args) {
     return;
   }
 
+  // This is normally called automatically during __wasm_call_ctors but need to
+  // get these values before even running any of the ctors so we call it redundantly
+  // here.
+  // TODO(sbc): Move writeStackCookie to native to to avoid this.
+  _emscripten_stack_set_limits(5472496, 229616);
   writeStackCookie();
 
   preRun();
@@ -48939,8 +49607,8 @@ function checkUnflushedContent() {
   // How we flush the streams depends on whether we are in SYSCALLS_REQUIRE_FILESYSTEM=0
   // mode (which has its own special function for this; otherwise, all
   // the code is inside libc)
-  var print = out;
-  var printErr = err;
+  var oldOut = out;
+  var oldErr = err;
   var has = false;
   out = err = function(x) {
     has = true;
@@ -48960,8 +49628,8 @@ function checkUnflushedContent() {
       }
     });
   } catch(e) {}
-  out = print;
-  err = printErr;
+  out = oldOut;
+  err = oldErr;
   if (has) {
     warnOnce('stdio streams had content in them that was not flushed. you should set EXIT_RUNTIME to 1 (see the FAQ), or make sure to emit a newline when you printf etc.');
   }
@@ -49011,7 +49679,7 @@ var shouldRunNow = true;
 
 if (Module['noInitialRun']) shouldRunNow = false;
 
-  noExitRuntime = true;
+noExitRuntime = true;
 
 run();
 
