@@ -4,7 +4,7 @@
 
 One of the tools used in the book is version _1.38.45_ of the _Emscripten toolkit_. Because the toolkit is constantly being improved, some of the items shown in the book need to be adjusted if you wish to use some of the more recent versions of the toolkit. 
 
-The code in the following folder has been updated to work with _Emscripten 2.0.8_: [updated-code](https://github.com/cggallant/WebAssembly-in-Action/tree/master/updated-code)
+The code in the following folder has been updated to work with _Emscripten 2.0.11_: [updated-code](https://github.com/cggallant/WebAssembly-in-Action/tree/master/updated-code)
 
 <p>&nbsp;</p>
   

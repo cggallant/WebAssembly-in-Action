@@ -23,7 +23,7 @@ Rebuild the _cards.wasm_ file by going to the _wat2wasm online tool_ (https://we
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.8_.
+To compile the code in the _updated-code_ folder requires _Emscripten 2.0.11_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 
