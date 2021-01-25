@@ -51,6 +51,7 @@
   
   - In the _source_ folder, in the _cards.wast_ file, the two instances of _i32.const 1024_ for the _SecondCardSelectedCallback_ string have been replaced with: _i32.const 5120_
 
+  - At some point between Emscripten 2.0.8 and 2.0.11, the memory for main.wasm is no longer included in the importObject parameter of the instantiateWasm method. In the _game.js_ file, the _moduleMemory_ value now needs to be obtained from the module's exports in the _then_ method of the _instantiateStreaming_ function.
 
 ### The _D.10.2_ folder
   
@@ -59,6 +60,8 @@
   - At the top of the _$PlayLevel_ function, the _i32.const 1067_ line of code before the _call $Log_ line of code needs to be changed from _1067_ to _5163_.
   - At the top of the _$SecondCardSelectedCallback_ function, the _i32.const 1024_ line of code before the _call $Log_ line of code needs to be changed from _1024_ to _5120_.
   - The _wat2wasm_ online tool now expects the string separator in the data node to be _\\00_. Adjust the data node to now be: _(data (i32.const 5120) "SecondCardSelectedCallback\\00InitializeCards\\00PlayLevel")_ 
+
+  - At some point between Emscripten 2.0.8 and 2.0.11, the memory for main.wasm is no longer included in the importObject parameter of the instantiateWasm method. In the _game.js_ file, the _moduleMemory_ value now needs to be obtained from the module's exports in the _then_ method of the _instantiateStreaming_ function.
 
 
 ### The _D.11.2_ folder

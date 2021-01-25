@@ -1,10 +1,12 @@
 In the _frontend_ folder, the _game.js_ file needs to be modified.
 
-The _env_ object, of the _sideImportObject_ object, needs to be adjusted because the exported functions from the _main.wasm_ file no longer contain the underscore character. The following four lines of code need to be changed:
-- _\_malloc: mainInstance.exports.\_malloc,_ to _\_malloc: mainInstance.exports.malloc,_
-- _\_free: mainInstance.exports.\_free_, to _\_free: mainInstance.exports.free,_
-- _\_SeedRandomNumberGenerator: mainInstance.exports.\_SeedRandomNumberGenerator,_ to _\_SeedRandomNumberGenerator: mainInstance.exports.SeedRandomNumberGenerator,_
-- _\_GetRandomNumber: mainInstance.exports.\_GetRandomNumber,_ to _\_GetRandomNumber: mainInstance.exports.GetRandomNumber,_
+  The _env_ object, of the _sideImportObject_ object, needs to be adjusted because the exported functions from the _main.wasm_ file no longer contain the underscore character. The following four lines of code need to be changed:
+  - _\_malloc: mainInstance.exports.\_malloc,_ to _\_malloc: mainInstance.exports.malloc,_
+  - _\_free: mainInstance.exports.\_free_, to _\_free: mainInstance.exports.free,_
+  - _\_SeedRandomNumberGenerator: mainInstance.exports.\_SeedRandomNumberGenerator,_ to _\_SeedRandomNumberGenerator: mainInstance.exports.SeedRandomNumberGenerator,_
+  - _\_GetRandomNumber: mainInstance.exports.\_GetRandomNumber,_ to _\_GetRandomNumber: mainInstance.exports.GetRandomNumber,_
+
+  At some point between Emscripten 2.0.8 and 2.0.11, the memory for main.wasm is no longer included in the importObject parameter of the instantiateWasm method. The _moduleMemory_ value now needs to be obtained from the module's exports in the _then_ method of the _instantiateStreaming_ function.
 
 
 In the _source_ folder, the _cards.wast_ file needs to be modified.

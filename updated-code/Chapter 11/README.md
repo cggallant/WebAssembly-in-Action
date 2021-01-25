@@ -1,15 +1,17 @@
 In the _frontend_ folder, the _game.js_ file needs to be modified.
 
-The _env_ object, of the _sideImportObject_ object, needs to be adjusted because the exported functions from the _main.wasm_ file no longer contain the underscore character. The following four lines of code need to be changed:
-- _\_malloc: mainInstance.exports.\_malloc,_ to _\_malloc: mainInstance.exports.malloc,_
-- _\_free: mainInstance.exports.\_free_, to _\_free: mainInstance.exports.free,_
-- _\_SeedRandomNumberGenerator: mainInstance.exports.\_SeedRandomNumberGenerator,_ to _\_SeedRandomNumberGenerator: mainInstance.exports.SeedRandomNumberGenerator,_
-- _\_GetRandomNumber: mainInstance.exports.\_GetRandomNumber,_ to _\_GetRandomNumber: mainInstance.exports.GetRandomNumber,_
+  The _env_ object, of the _sideImportObject_ object, needs to be adjusted because the exported functions from the _main.wasm_ file no longer contain the underscore character. The following four lines of code need to be changed:
+  - _\_malloc: mainInstance.exports.\_malloc,_ to _\_malloc: mainInstance.exports.malloc,_
+  - _\_free: mainInstance.exports.\_free_, to _\_free: mainInstance.exports.free,_
+  - _\_SeedRandomNumberGenerator: mainInstance.exports.\_SeedRandomNumberGenerator,_ to _\_SeedRandomNumberGenerator: mainInstance.exports.SeedRandomNumberGenerator,_
+  - _\_GetRandomNumber: mainInstance.exports.\_GetRandomNumber,_ to _\_GetRandomNumber: mainInstance.exports.GetRandomNumber,_
+
+  At some point between Emscripten 2.0.8 and 2.0.11, the memory for main.wasm is no longer included in the importObject parameter of the instantiateWasm method. The _moduleMemory_ value now needs to be obtained from the module's exports in the _then_ method of the _instantiateStreaming_ function.
 
 
 In the _source_ folder, the _cards.wast_ file needs to be modified.
 
-I had you place the string _"SecondCardSelectedCallback"_ starting at byte _1024_ in the module's memory thinking that if the main.wasm module decided to put anything into memory, 1024 bytes should be enough room to not interfere with it. It turns out that the main module has decided to start its memory at the 1024 byte as well.
+I had you place the string _"SecondCardSelectedCallback"_ starting at byte _1024_ in the module's memory thinking that if the main.wasm module decided to put anything into memory, 1024 bytes should be enough room to not interfere with it. It turns out that the main module has decided to start its memory at byte 1024 as well.
 
 In the _cards.wast_ file, locate the _$CardSelected_ function and scroll to the end. Just before the _call $Pause_ line of code is an _i32.const 1024_ line of code. Change this value to 5,120. The line of code should now be: _i32.const 5120_
 
