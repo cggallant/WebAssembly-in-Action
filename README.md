@@ -53,6 +53,19 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
   This article walks you through creating the Dovico Time Entry Status app using Blazor WebAssembly.
 
 
+- "[Hosting Uno Platform WebAssembly apps on Azure Static Web Apps](https://platform.uno/blog/hosting-uno-platform-webassembly-apps-on-azure-static-web-apps/)"
+
+  This week there was an [announcement](https://azure.microsoft.com/en-us/blog/develop-production-scale-modern-web-apps-quickly-with-azure-static-web-apps/) that the Azure Static Web Apps service came out of preview.
+
+  As the name implies, Azure Static Web Apps give you a way to host static web apps and it comes with many features including global distribution of your content and free SSL certificates to name a couple.
+
+  Static web apps are applications where all the work happens in the browser and the app is decoupled from server-side code. Because an Uno Platform WebAssembly application is all client-side, it's a static web app and can take advantage of the Azure Static Web Apps service.
+
+  I was honored with the opportunity to create an article that expands on some documentation that the Uno Platform already had on Azure Static Web Apps. In the article, I walk you through creating a GitHub repository, creating an Azure Static Web App, and then linking the two together. Then you create an Uno Platform WebAssembly application, check it into your repository, and see the Azure Static Web App automatically detect the change and deploy your new code.
+
+ <img src="https://1.bp.blogspot.com/-PYI1wstl3Yg/YKGpIDh8BcI/AAAAAAAALoI/QIAAhOXeNtU_e0QF_l1GzNRe3U7xvYCUQCLcBGAsYHQ/s400/Uno_Azure_hero_v1.jpg" width="350" align="center" />
+
+
 <p>&nbsp;</p>
 <p>&nbsp;</p>
 
