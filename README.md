@@ -63,7 +63,7 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
   I was honored with the opportunity to create an article that expands on some documentation that the Uno Platform already had on Azure Static Web Apps. In the article, I walk you through creating a GitHub repository, creating an Azure Static Web App, and then linking the two together. Then you create an Uno Platform WebAssembly application, check it into your repository, and see the Azure Static Web App automatically detect the change and deploy your new code.
 
-  <img src="https://1.bp.blogspot.com/-PYI1wstl3Yg/YKGpIDh8BcI/AAAAAAAALoI/QIAAhOXeNtU_e0QF_l1GzNRe3U7xvYCUQCLcBGAsYHQ/s400/Uno_Azure_hero_v1.jpg" width="350" align="center" />
+  <img src="https://1.bp.blogspot.com/-GHXr6BPRJFs/YKGzn1mwKgI/AAAAAAAALoY/XGM-2qnArIUdk54EkIw795ImZOMKQSEWgCLcBGAsYHQ/s320/1.%2BOverall%2Bbut%2Bno%2Bannotations.png" width="350" align="center" />
 
 
 <p>&nbsp;</p>
