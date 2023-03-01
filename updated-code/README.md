@@ -7,6 +7,23 @@ Each chapter's _README.md_ file lists the changes made to that chapter's code.
 <p>&nbsp;</p>
 <p>&nbsp;</p>
 
+
+# Python's local web server
+
+Appendix A of the book gave instructions on how to run Python's local web server. While that works, back in June of 2020, I wrote the following article that detailed how to extend Python's web server so that things like response headers could be included: "[Extending Python's Simple HTTP Server](https://cggallant.blogspot.com/2020/07/extending-pythons-simple-http-server.html)"
+
+  I've included that article's script *(wasm-server.py)* at the root of the updated-code folder. If you have Python installed you can navigate to that folder in your terminal and run it with the following command: **python wasm-server.py**
+
+  Rather than installing Python directly, you can also pull the Python docker image instead: **docker pull python**
+
+  Then, run the following command to start up the web server and map a local port, 5000 in this example, to port 8080 in the container:
+    **docker run -it --rm -p 5000:8080 -v "D:\WebAssembly-in-Action\updated-code:/usr/src/myapp" -w /usr/src/myapp python:latest python wasm-server.py**
+
+  Once that's running, you just need to specify the path from the updated-code folder to the file I want to run. For example *(%20 where there are spaces)*: 
+    **http://localhost:5000/Chapter%203/3.4%20html_template/html_template.html**
+
+
+
 # Supporting this book
 
 Don't yet have your own copy of the book? You can buy it from many book sellers including:
