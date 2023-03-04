@@ -1,0 +1,1 @@
+docker run --rm -v ${pwd}:/src emscripten/emsdk emcc em_js.c -o em_js.html

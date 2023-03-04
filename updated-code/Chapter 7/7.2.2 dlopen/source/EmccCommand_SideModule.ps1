@@ -1,0 +1,1 @@
+docker run --rm -v ${pwd}:/src emscripten/emsdk emcc calculate_primes.cpp -s SIDE_MODULE=2 -O1 -o calculate_primes.wasm

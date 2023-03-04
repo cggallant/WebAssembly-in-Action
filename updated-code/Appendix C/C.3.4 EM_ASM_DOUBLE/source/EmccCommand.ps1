@@ -1,0 +1,1 @@
+docker run --rm -v ${pwd}:/src emscripten/emsdk emcc em_asm_double.c -o em_asm_double.html

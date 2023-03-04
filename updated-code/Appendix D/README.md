@@ -24,7 +24,8 @@
 
 ### The _D.5.1_ folder
   
-  No changes were needed for this folder.
+- The Emscripten command line has been adjusted:
+  - Emscripten 3.1.32 was throwing a compile error because of the missing *Add* function in *main_dynamicLibraries.cpp*. The *-s ERROR_ON_UNDEFINED_SYMBOLS=0* flag was added to the command line of the *EmccCommand_main_dynamicLibraries* files.
 
 
 ### The _D.7.2_ folder
@@ -66,12 +67,16 @@
 
 ### The _D.11.2_ folder
   
-  No changes were needed for this folder.
+  Updated the npm installations of Mocha and Chai...
+  - Updated Mocha to version _10.2.0_
+  - Updated Chai to version _4.3.7_
+
+  If you're using the wasm-server.py file that I've included at the root of this solution, and if the COOP/COEP headers are enabled in the file, the CDN files for Mocha and Chai in tests.html will be blocked. I added the **crossorigin** property to the *Link* and *Script* tags in *tests.html* to allow them to be downloaded.
 
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.11_.
+To compile the code in the _updated-code_ folder requires _Emscripten 3.1.32_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 

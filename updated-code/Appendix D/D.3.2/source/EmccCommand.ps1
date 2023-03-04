@@ -1,0 +1,1 @@
+docker run --rm -v ${pwd}:/src emscripten/emsdk emcc test.cpp --js-library mergeinto.js -o test.html

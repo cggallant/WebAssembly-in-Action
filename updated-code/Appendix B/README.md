@@ -1,6 +1,7 @@
 ### The _B.1 ccall_ folder
   
-  No changes were needed for this folder.
+- The Emscripten command line has been adjusted:
+  - Emscripten 3.1.32 was giving a warning that the command line argument *EXTRA_EXPORTED_RUNTIME_METHODS* has been deprecated and to use EXPORTED_RUNTIME_METHODS instead. That adjustment has been made.
 
 ### The _B.2 cwrap_ folder
   
@@ -13,7 +14,7 @@
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.11_.
+To compile the code in the _updated-code_ folder requires _Emscripten 3.1.32_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 

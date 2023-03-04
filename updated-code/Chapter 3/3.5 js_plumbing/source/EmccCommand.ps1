@@ -1,0 +1,1 @@
+docker run --rm -v ${pwd}:/src emscripten/emsdk emcc calculate_primes.c -o js_plumbing.js

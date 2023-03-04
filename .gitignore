@@ -1,3 +1,4 @@
 # Ignore Visual Studio Code generated files 
-
 .vscode/
+
+node_modules/

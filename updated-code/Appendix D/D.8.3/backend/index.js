@@ -1,5 +1,5 @@
 const clientData = {
-  isProduct: true,
+  isProduct: false,
   name: "Women's Mid Rise Skinny Jeans",
   categoryId: "100",
   productId: "301",

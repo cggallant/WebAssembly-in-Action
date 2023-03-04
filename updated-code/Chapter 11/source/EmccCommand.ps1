@@ -1,0 +1,1 @@
+docker run --rm -v ${pwd}:/src emscripten/emsdk emcc main.cpp -s "EXPORTED_FUNCTIONS=['_malloc','_free']" -o main.js

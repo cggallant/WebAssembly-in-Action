@@ -7,9 +7,9 @@ from http.server import SimpleHTTPRequestHandler
 class WasmHandler(SimpleHTTPRequestHandler):
     def end_headers(self):        
         # Include additional response headers to allow for use of the 
-        # SharedArrayBuffer in Firefox.
-        #self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        #self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+        # SharedArrayBuffer.
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         SimpleHTTPRequestHandler.end_headers(self)
 
 

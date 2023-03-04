@@ -5,7 +5,8 @@ No changes were needed for this folder.
 
 ### The _7.2.3 dynamicLibraries_ folder
 
-No changes were needed for this folder.
+- The Emscripten command line has been adjusted:
+  - Emscripten 3.1.32 was throwing a compile error because of the missing *FindPrimes* function in *main.cpp*. The *-s ERROR_ON_UNDEFINED_SYMBOLS=0* flag was added to the command line so that it's a warning instead of an error.
 
 
 ### The _7.2.4 ManualLinking_ folder
@@ -25,7 +26,7 @@ A few changes were needed in the _frontend_ folder's _main.js_ file:
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.11_.
+To compile the code in the _updated-code_ folder requires _Emscripten 3.1.32_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 

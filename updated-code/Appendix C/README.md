@@ -8,12 +8,14 @@
 
 ### The _C.2.3 EM\_JS_ folder
   
-  No changes were needed for this folder.
+- The Emscripten command line has been adjusted:
+  - Emscripten 3.1.32 was giving a warning that the command line argument *EXTRA_EXPORTED_RUNTIME_METHODS* has been deprecated and to use EXPORTED_RUNTIME_METHODS instead. That adjustment has been made.
 
 ### The _C.2.4 EM\_JS_ folder
   
 - The Emscripten command line has been adjusted:
   - As of Emscripten 2.0.4, _malloc_ and _free_ are no longer exported by default. They now need to be included via the _EXPORTED\_FUNCTIONS command line array if needed.
+  - Emscripten 3.1.32 was giving a warning that the command line argument *EXTRA_EXPORTED_RUNTIME_METHODS* has been deprecated and to use EXPORTED_RUNTIME_METHODS instead. That adjustment has been made.
 
 ### The _C.3.1 EM\_ASM_ folder
   
@@ -25,7 +27,8 @@
 
 ### The _C.3.3 EM\_ASM\__ folder
   
-  No changes were needed for this folder.
+- The Emscripten command line has been adjusted:
+  - Emscripten 3.1.32 was giving a warning that the command line argument *EXTRA_EXPORTED_RUNTIME_METHODS* has been deprecated and to use EXPORTED_RUNTIME_METHODS instead. That adjustment has been made.
 
 ### The _C.3.4 EM\_ASM\_DOUBLE_ folder
   
@@ -35,10 +38,11 @@
   
 - The Emscripten command line has been adjusted:
   - As of Emscripten 2.0.4, _malloc_ and _free_ are no longer exported by default. They now need to be included via the _EXPORTED\_FUNCTIONS command line array if needed.
+  - Emscripten 3.1.32 was giving a warning that the command line argument *EXTRA_EXPORTED_RUNTIME_METHODS* has been deprecated and to use EXPORTED_RUNTIME_METHODS instead. That adjustment has been made.
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 2.0.11_.
+To compile the code in the _updated-code_ folder requires _Emscripten 3.1.32_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 

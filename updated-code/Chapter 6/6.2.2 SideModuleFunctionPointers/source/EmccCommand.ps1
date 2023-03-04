@@ -1,0 +1,1 @@
+docker run --rm -v ${pwd}:/src emscripten/emsdk emcc validate.cpp -O1 --no-entry -Wl",--export-table,--growable-table" -o validate.wasm

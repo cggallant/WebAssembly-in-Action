@@ -1,0 +1,1 @@
+docker run --rm -v ${pwd}:/src emscripten/emsdk emcc validate.cpp -O1 --no-entry -o validate.wasm
