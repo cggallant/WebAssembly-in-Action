@@ -22,7 +22,7 @@ Rather than installing Python directly, you can also pull the Python docker imag
 Then, run the following command to start up the web server and map a local port, 5000 in this example, to port 8080 in the container:
   **docker run -it --rm -p 5000:8080 -v "D:\WebAssembly-in-Action:/usr/src/myapp" -w /usr/src/myapp python:latest python wasm-server.py**
 
-  If you use PowerShell, the **D:\WebAssembly-in-Action** portion of the path can be replaced with $\lbracepwd\rbrace. $\lbracepwd\rbrace is a PowerShell object holding the full path of the current directory.
+  If you use PowerShell, the **D:\WebAssembly-in-Action** portion of the path can be replaced with $\lbrace pwd \rbrace. $\lbrace pwd \rbrace is a PowerShell object holding the full path of the current directory.
 
 Once that's running, you just need to specify the relative path to the file you want to run. For example *(%20 where there are spaces)*: **http://localhost:5000/updated-code/Chapter%203/3.4%20html_template/html_template.html**
 
@@ -33,7 +33,7 @@ In the book, Emscripten was installed on your OS. As an alternative, you can pul
 
 Then, the commands in the EmccCommand files could be prefixed with the following: **docker run --rm -v "D:\WebAssembly-in-Action:/src" emscripten/emsdk:3.1.32**
 
-  If you're using PowerShell, you can replace the **D:\WebAssembly-in-Action** portion of the path with $\lbracepwd\rbrace. For example, building the module for Chapter 3, section '3.4 html_template': 
+  If you're using PowerShell, you can replace the **D:\WebAssembly-in-Action** portion of the path with $\lbrace pwd \rbrace . For example, building the module for Chapter 3, section '3.4 html_template': 
     **docker run --rm -v ${pwd}:/src emscripten/emsdk:3.1.32 emcc calculate_primes.c -o html_template.html**
     
 
