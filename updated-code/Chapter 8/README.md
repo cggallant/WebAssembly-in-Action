@@ -3,7 +3,7 @@ When the _MODULARIZE_ flag is used when compiling the WebAssembly module, creati
 - The _orderModule = new Module_ line of code has been replaced with a _Module_ object call having a _then_ method. The module instance received by the _then_ method is placed in the _orderModule_ global variable.
 
 As of Emscripten 3.1.31, when linking a side module to a main module via *dynamicLibraries*, the side module's exported functions are not exposed to the JavaScript code from Emscripten's Module object. As a result, the logic for this chapter's code was adjusted so that the *validate_product* and *validate_order* modules are now main modules and *validate_core* is now a side module. Each main module was given a name *(ModuleProduct and ModuleOrder respectively)*.
-- In the *_*index.html* file (*frontend* folder), the *validate_core.js* script at the end of the file has been replaced by two script tags. One for *valdiate_order.js* and one for *validate_product.js*.
+- In the *index.html* file (*frontend* folder), the *validate_core.js* script at the end of the file has been replaced by two script tags. One for *valdiate_order.js* and one for *validate_product.js*.
 - In the *index.js* file (*frontend* folder), the *switchForm* function was adjusted to use the new module object names and to specify *validate_core.wasm* for both the productModule and orderModule.
 
 The Emscripten command lines have been adjusted for each of the files:
