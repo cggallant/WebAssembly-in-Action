@@ -2,8 +2,6 @@
 
 <img src="https://images.manning.com/180/240/resize/book/7/97eac5c-498e-4454-bdb2-677ec3406f29/Gallant-WA-HI.png" align="left" /> The code in this folder has been upgraded to work with version _3.1.32_ of the _Emscripten toolkit_.
 
-  **Except for Chapter 8's code**... There is an issue preventing Chapter 8's code from being upgraded higher than 3.1.30. I'll be looking into that issue and will try to have a fix for it soon.
-
 Each chapter's _README.md_ file lists the changes made to that chapter's code.
 
 <p>&nbsp;</p>

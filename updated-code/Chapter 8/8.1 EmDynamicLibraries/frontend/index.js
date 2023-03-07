@@ -45,8 +45,7 @@ function switchForm(showEditProduct) {
   if (showEditProduct) {
     // Only create the Emscripten Module object for the Edit Product form the once...
     if (productModule === null) {
-      // This approach worked in Emscripten 2.0.11. A module gets returned but it only has the core's information.
-      Module({ dynamicLibraries: ['validate_product.wasm'] }).then((module) => {
+      ModuleProduct({ dynamicLibraries: ['validate_core.wasm'] }).then((module) => {
         productModule = module;
       });
     }
@@ -57,7 +56,7 @@ function switchForm(showEditProduct) {
   } else {
     // Only create the Emscripten Module object for the Order form the once...
     if (orderModule === null) {
-      Module({ dynamicLibraries: ['validate_order.wasm'] }).then((module) => {
+      ModuleOrder({ dynamicLibraries: ['validate_core.wasm'] }).then((module) => {
         orderModule = module;
       });
     }

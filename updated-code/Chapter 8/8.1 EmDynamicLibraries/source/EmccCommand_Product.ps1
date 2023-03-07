@@ -1,1 +1,1 @@
-docker run --rm -v ${pwd}:/src emscripten/emsdk:3.1.30 emcc validate_product.cpp -s SIDE_MODULE=2 -O1 -o validate_product.wasm
+docker run --rm -v ${pwd}:/src emscripten/emsdk:3.1.32 emcc validate_product.cpp --js-library mergeinto.js -s MAIN_MODULE=2 -s MODULARIZE=1 -s EXPORT_NAME="ModuleProduct" -s "EXPORTED_FUNCTIONS=['_malloc','_free','_atoi']" -s "EXPORTED_RUNTIME_METHODS=['ccall','UTF8ToString']" -s ERROR_ON_UNDEFINED_SYMBOLS=0 -o validate_product.js
