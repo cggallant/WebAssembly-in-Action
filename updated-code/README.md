@@ -1,6 +1,6 @@
 # The updated companion code for the book "[WebAssembly in Action](https://www.manning.com/books/webassembly-in-action)"
 
-<img src="https://images.manning.com/180/240/resize/book/7/97eac5c-498e-4454-bdb2-677ec3406f29/Gallant-WA-HI.png" align="left" /> The code in this folder has been upgraded to work with version _3.1.32_ of the _Emscripten toolkit_.
+<img src="https://images.manning.com/180/240/resize/book/7/97eac5c-498e-4454-bdb2-677ec3406f29/Gallant-WA-HI.png" align="left" /> The code in this folder has been upgraded to work with version _3.1.33_ of the _Emscripten toolkit_.
 
   **Except for Chapter 8's code**... There is an issue preventing Chapter 8's code from being upgraded higher than 3.1.30. I'll be looking into that issue and will try to have a fix for it soon.
 
@@ -31,10 +31,10 @@ Once that's running, you just need to specify the relative path to the file you 
 
 In the book, Emscripten was installed on your OS. As an alternative, you can pull the version that you need as a Docker image from Docker hub (https://hub.docker.com/r/emscripten/emsdk/tags)
 
-Then, the commands in the EmccCommand files could be prefixed with the following: **docker run --rm -v "D:\WebAssembly-in-Action:/src" emscripten/emsdk:3.1.32**
+Then, the commands in the EmccCommand files could be prefixed with the following: **docker run --rm -v "D:\WebAssembly-in-Action:/src" emscripten/emsdk:3.1.33**
 
   If you're using PowerShell, you can replace the **D:\WebAssembly-in-Action** portion of the path with _${pwd}_. For example, building the module for Chapter 3, section '3.4 html_template': 
-    **docker run --rm -v ${pwd}:/src emscripten/emsdk:3.1.32 emcc calculate_primes.c -o html_template.html**
+    **docker run --rm -v ${pwd}:/src emscripten/emsdk:3.1.33 emcc calculate_primes.c -o html_template.html**
     
 
 # Supporting this book

@@ -4,7 +4,7 @@
 
 One of the tools used in the book is version _1.38.45_ of the _Emscripten toolkit_. Because the toolkit is constantly being improved, some of the items shown in the book need to be adjusted if you wish to use some of the more recent versions of the toolkit. 
 
-The code in the following folder has been updated to work with _Emscripten 3.1.32_: [updated-code](https://github.com/cggallant/WebAssembly-in-Action/tree/master/updated-code)
+The code in the following folder has been updated to work with _Emscripten 3.1.33_: [updated-code](https://github.com/cggallant/WebAssembly-in-Action/tree/master/updated-code)
 
 <p>&nbsp;</p>
 
@@ -28,10 +28,10 @@ Once that's running, you just need to specify the relative path to the file you 
 
 In the book, Emscripten was installed on your OS. As an alternative, you can pull the version that you need as a Docker image from Docker hub (https://hub.docker.com/r/emscripten/emsdk/tags)
 
-Then, the commands in the EmccCommand files could be prefixed with the following: **docker run --rm -v "D:\WebAssembly-in-Action:/src" emscripten/emsdk:3.1.32**
+Then, the commands in the EmccCommand files could be prefixed with the following: **docker run --rm -v "D:\WebAssembly-in-Action:/src" emscripten/emsdk:3.1.33**
 
   If you're using PowerShell, you can replace the **D:\WebAssembly-in-Action** portion of the path with _${pwd}_. For example, building the module for Chapter 3, section '3.4 html_template': 
-    **docker run --rm -v ${pwd}:/src emscripten/emsdk:3.1.32 emcc calculate_primes.c -o html_template.html**
+    **docker run --rm -v ${pwd}:/src emscripten/emsdk:3.1.33 emcc calculate_primes.c -o html_template.html**
 
   
 # Bonus content

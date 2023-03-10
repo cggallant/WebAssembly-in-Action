@@ -26,7 +26,7 @@ A few changes were needed in the _frontend_ folder's _main.js_ file:
 
 ---
 
-To compile the code in the _updated-code_ folder requires _Emscripten 3.1.32_.
+To compile the code in the _updated-code_ folder requires _Emscripten 3.1.33_.
 
 The instructions for installing Emscripten can be found in _Appendix A_ of the book.
 
