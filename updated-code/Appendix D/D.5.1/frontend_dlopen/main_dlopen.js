@@ -61,24 +61,17 @@ var read_,
     readBinary,
     setWindowTitle;
 
-// Normally we don't log exceptions but instead let them bubble out the top
-// level where the embedding environment (e.g. the browser) can handle
-// them.
-// However under v8 and node we sometimes exit the process direcly in which case
-// its up to use us to log the exception before exiting.
-// If we fix https://github.com/emscripten-core/emscripten/issues/15080
-// this may no longer be needed under node.
-function logExceptionOnExit(e) {
-  if (e instanceof ExitStatus) return;
-  let toLog = e;
-  if (e && typeof e == 'object' && e.stack) {
-    toLog = [e, e.stack];
-  }
-  err('exiting due to exception: ' + toLog);
-}
-
 if (ENVIRONMENT_IS_NODE) {
   if (typeof process == 'undefined' || !process.release || process.release.name !== 'node') throw new Error('not compiled for this environment (did you build to HTML and try to run it not on the web, or set ENVIRONMENT to something - like node - and run it someplace else - like on the web?)');
+
+  var nodeVersion = process.versions.node;
+  var numericVersion = nodeVersion.split('.').slice(0, 3);
+  numericVersion = (numericVersion[0] * 10000) + (numericVersion[1] * 100) + numericVersion[2] * 1;
+  var minVersion = 101900;
+  if (numericVersion < 101900) {
+    throw new Error('This emscripten-generated code requires node v10.19.19.0 (detected v' + nodeVersion + ')');
+  }
+
   // `require()` is no-op in an ESM module, use `createRequire()` to construct
   // the require()` function.  This is only necessary for multi-environment
   // builds, `-sENVIRONMENT=node` emits a static import declaration instead.
@@ -133,7 +126,7 @@ readAsync = (filename, onload, onerror) => {
 
   process.on('uncaughtException', function(ex) {
     // suppress ExitStatus exceptions from showing an error
-    if (!(ex instanceof ExitStatus)) {
+    if (ex !== 'unwind' && !(ex instanceof ExitStatus) && !(ex.context instanceof ExitStatus)) {
       throw ex;
     }
   });
@@ -149,12 +142,8 @@ readAsync = (filename, onload, onerror) => {
   }
 
   quit_ = (status, toThrow) => {
-    if (keepRuntimeAlive()) {
-      process.exitCode = status;
-      throw toThrow;
-    }
-    logExceptionOnExit(toThrow);
-    process.exit(status);
+    process.exitCode = status;
+    throw toThrow;
   };
 
   Module['inspect'] = function () { return '[Emscripten Module object]'; };
@@ -196,8 +185,26 @@ if (ENVIRONMENT_IS_SHELL) {
 
   if (typeof quit == 'function') {
     quit_ = (status, toThrow) => {
-      logExceptionOnExit(toThrow);
-      quit(status);
+      // Unlike node which has process.exitCode, d8 has no such mechanism. So we
+      // have no way to set the exit code and then let the program exit with
+      // that code when it naturally stops running (say, when all setTimeouts
+      // have completed). For that reason, we must call `quit` - the only way to
+      // set the exit code - but quit also halts immediately.  To increase
+      // consistency with node (and the web) we schedule the actual quit call
+      // using a setTimeout to give the current stack and any exception handlers
+      // a chance to run.  This enables features such as addOnPostRun (which
+      // expected to be able to run code after main returns).
+      setTimeout(() => {
+        if (!(toThrow instanceof ExitStatus)) {
+          let toLog = toThrow;
+          if (toThrow && typeof toThrow == 'object' && toThrow.stack) {
+            toLog = [toThrow, toThrow.stack];
+          }
+          err('exiting due to exception: ' + toLog);
+        }
+        quit(status);
+      });
+      throw toThrow;
     };
   }
 
@@ -694,8 +701,10 @@ var __RELOC_FUNCS__ = [];
 
 var runtimeInitialized = false;
 
+var runtimeKeepaliveCounter = 0;
+
 function keepRuntimeAlive() {
-  return noExitRuntime;
+  return noExitRuntime || runtimeKeepaliveCounter > 0;
 }
 
 function preRun() {
@@ -1395,11 +1404,6 @@ var ASM_CONSTS = {
     }
   }
 
-  function asmjsMangle(x) {
-      var unmangledSymbols = ['stackAlloc','stackSave','stackRestore','getTempRet0','setTempRet0'];
-      return x.indexOf('dynCall_') == 0 || unmangledSymbols.includes(x) ? x : '_' + x;
-    }
-  
   function isSymbolDefined(symName) {
       // Ignore 'stub' symbols that are auto-generated as part of the original
       // `wasmImports` used to instantate the main module.
@@ -6966,6 +6970,43 @@ var ASM_CONSTS = {
       }
       quit_(1, e);
     }
+  
+  
+  function _proc_exit(code) {
+      EXITSTATUS = code;
+      if (!keepRuntimeAlive()) {
+        if (Module['onExit']) Module['onExit'](code);
+        ABORT = true;
+      }
+      quit_(code, new ExitStatus(code));
+    }
+  _proc_exit.sig = 'vi';
+  /** @param {boolean|number=} implicit */
+  function exitJS(status, implicit) {
+      EXITSTATUS = status;
+  
+      checkUnflushedContent();
+  
+      // if exit() was called explicitly, warn the user if the runtime isn't actually being shut down
+      if (keepRuntimeAlive() && !implicit) {
+        var msg = 'program exited (with status: ' + status + '), but keepRuntimeAlive() is set (counter=' + runtimeKeepaliveCounter + ') due to an async operation, so halting execution but not exiting the runtime or preventing further async execution (you can use emscripten_force_exit, if you want to force a true shutdown)';
+        err(msg);
+      }
+  
+      _proc_exit(status);
+    }
+  var _exit = exitJS;
+  _exit.sig = 'vi';
+  
+  function maybeExit() {
+      if (!keepRuntimeAlive()) {
+        try {
+          _exit(EXITSTATUS);
+        } catch (e) {
+          handleException(e);
+        }
+      }
+    }
   function callUserCallback(func) {
       if (ABORT) {
         err('user callback triggered after runtime exited or application aborted.  Ignoring.');
@@ -6973,6 +7014,7 @@ var ASM_CONSTS = {
       }
       try {
         func();
+        maybeExit();
       } catch (e) {
         handleException(e);
       }
@@ -14142,32 +14184,6 @@ var ASM_CONSTS = {
     }
   _environ_sizes_get.sig = 'ipp';
 
-  
-  function _proc_exit(code) {
-      EXITSTATUS = code;
-      if (!keepRuntimeAlive()) {
-        if (Module['onExit']) Module['onExit'](code);
-        ABORT = true;
-      }
-      quit_(code, new ExitStatus(code));
-    }
-  _proc_exit.sig = 'vi';
-  /** @param {boolean|number=} implicit */
-  function exitJS(status, implicit) {
-      EXITSTATUS = status;
-  
-      checkUnflushedContent();
-  
-      // if exit() was called explicitly, warn the user if the runtime isn't actually being shut down
-      if (keepRuntimeAlive() && !implicit) {
-        var msg = 'program exited (with status: ' + status + '), but EXIT_RUNTIME is not set, so halting execution but not exiting the runtime or preventing further async execution (build with EXIT_RUNTIME=1, if you want a true shutdown)';
-        err(msg);
-      }
-  
-      _proc_exit(status);
-    }
-  var _exit = exitJS;
-  _exit.sig = 'vi';
 
   function _fd_close(fd) {
   try {
@@ -15375,6 +15391,7 @@ var ASM_CONSTS = {
   var Protocols = {list:[],map:{}};
 
   
+  
   function _setprotoent(stayopen) {
       // void setprotoent(int stayopen);
   
@@ -16546,6 +16563,7 @@ var ASM_CONSTS = {
   function _emscripten_force_exit(status) {
       warnOnce('emscripten_force_exit cannot actually shut down the runtime, as the build does not have EXIT_RUNTIME set');
       noExitRuntime = false;
+      runtimeKeepaliveCounter = 0;
       _exit(status);
     }
   _emscripten_force_exit.sig = 'vi';
@@ -16568,10 +16586,13 @@ var ASM_CONSTS = {
 
 
   function runtimeKeepalivePush() {
+      runtimeKeepaliveCounter += 1;
     }
   runtimeKeepalivePush.sig = 'v';
 
   function runtimeKeepalivePop() {
+      assert(runtimeKeepaliveCounter > 0);
+      runtimeKeepaliveCounter -= 1;
     }
   runtimeKeepalivePop.sig = 'v';
 
@@ -16586,9 +16607,15 @@ var ASM_CONSTS = {
     }
 
 
-  function maybeExit() {}
 
 
+  function asmjsMangle(x) {
+      var unmangledSymbols = ['stackAlloc','stackSave','stackRestore','getTempRet0','setTempRet0'];
+      if (x == '__main_argc_argv') {
+        x = 'main';
+      }
+      return x.indexOf('dynCall_') == 0 || unmangledSymbols.includes(x) ? x : '_' + x;
+    }
 
 
 
@@ -18815,6 +18842,7 @@ var ASM_CONSTS = {
   
   
   
+  
   function registerBatteryEventCallback(target, userData, useCapture, callbackfunc, eventTypeId, eventTypeString, targetThread) {
       if (!JSEvents.batteryEvent) JSEvents.batteryEvent = _malloc( 32 );
   
@@ -18836,6 +18864,7 @@ var ASM_CONSTS = {
     }
 
   
+  
   function _emscripten_set_batterychargingchange_callback_on_thread(userData, callbackfunc, targetThread) {
       if (!battery()) return -1; 
       registerBatteryEventCallback(battery(), userData, true, callbackfunc, 29, "chargingchange", targetThread);
@@ -18843,6 +18872,7 @@ var ASM_CONSTS = {
     }
   _emscripten_set_batterychargingchange_callback_on_thread.sig = 'iii';
 
+  
   
   function _emscripten_set_batterylevelchange_callback_on_thread(userData, callbackfunc, targetThread) {
       if (!battery()) return -1; 
@@ -19410,6 +19440,7 @@ var ASM_CONSTS = {
   _emscripten_run_preload_plugins.sig = 'iiii';
 
   
+  
   function _emscripten_run_preload_plugins_data(data, size, suffix, arg, onload, onerror) {
       
   
@@ -19692,6 +19723,7 @@ var ASM_CONSTS = {
     }
   _emscripten_get_worker_queue_size.sig = 'i';
 
+  
   
   function _emscripten_get_preloaded_image_data(path, w, h) {
       if ((path | 0) === path) path = UTF8ToString(path);
@@ -23470,6 +23502,9 @@ var ASM_CONSTS = {
   _SDL_Linked_Version.sig = 'i';
 
   
+  
+  
+  
   /** @param{number=} initFlags */
   function _SDL_Init(initFlags) {
       SDL.startTime = Date.now();
@@ -23873,16 +23908,20 @@ var ASM_CONSTS = {
 
   function _SDL_SetError() {}
 
+  
   function _SDL_malloc(size) {
       return _malloc(size);
     }
   _SDL_malloc.sig = 'ii';
 
+  
   function _SDL_free(ptr) {
       _free(ptr);
     }
   _SDL_free.sig = 'vi';
 
+  
+  
   function _SDL_CreateRGBSurface(flags, width, height, depth, rmask, gmask, bmask, amask) {
       return SDL.makeSurface(width, height, flags, false, 'CreateRGBSurface', rmask, gmask, bmask, amask);
     }
@@ -24078,6 +24117,7 @@ var ASM_CONSTS = {
     }
   _SDL_PollEvent.sig = 'ii';
 
+  
   function _SDL_PushEvent(ptr) {
       var copy = _malloc(28);
       _memcpy(copy, ptr, 28);
@@ -24124,6 +24164,7 @@ var ASM_CONSTS = {
     }
   _SDL_PumpEvents.sig = 'v';
 
+  
   function _emscripten_SDL_SetEventHandler(handler, userdata) {
       SDL.eventHandler = handler;
       SDL.eventHandlerContext = userdata;
@@ -24251,6 +24292,7 @@ var ASM_CONSTS = {
       }
     }
   _SDL_FreeRW.sig = 'vi';
+  
   
   
   function _IMG_Load_RW(rwopsID, freeSrc) {
@@ -24413,6 +24455,7 @@ var ASM_CONSTS = {
       out('IMG_Quit called (and ignored)');
     }
 
+  
   
   
   
@@ -26910,7 +26953,7 @@ var ASM_CONSTS = {
   var GLFW = {WindowFromId:function(id) {
         if (id <= 0 || !GLFW.windows) return null;
         return GLFW.windows[id - 1];
-      },joystickFunc:null,errorFunc:null,monitorFunc:null,active:null,windows:null,monitors:null,monitorString:null,versionString:null,initialTime:null,extensions:null,hints:null,defaultHints:{131073:0,131074:0,131075:1,131076:1,131077:1,135169:8,135170:8,135171:8,135172:8,135173:24,135174:8,135175:0,135176:0,135177:0,135178:0,135179:0,135180:0,135181:0,135182:0,135183:0,139265:196609,139266:1,139267:0,139268:0,139269:0,139270:0,139271:0,139272:0},DOMToGLFWKeyCode:function(keycode) {
+      },joystickFunc:null,errorFunc:null,monitorFunc:null,active:null,scale:null,windows:null,monitors:null,monitorString:null,versionString:null,initialTime:null,extensions:null,hints:null,defaultHints:{131073:0,131074:0,131075:1,131076:1,131077:1,131082:0,135169:8,135170:8,135171:8,135172:8,135173:24,135174:8,135175:0,135176:0,135177:0,135178:0,135179:0,135180:0,135181:0,135182:0,135183:0,139265:196609,139266:1,139267:0,139268:0,139269:0,139270:0,139271:0,139272:0,139276:0},DOMToGLFWKeyCode:function(keycode) {
         switch (keycode) {
           // these keycodes are only defined for GLFW3, assume they are the same for GLFW2
           case 0x20:return 32; // DOM_VK_SPACE -> GLFW_KEY_SPACE
@@ -27043,6 +27086,7 @@ var ASM_CONSTS = {
         if (win.keys[341]) mod |= 0x0002; // GLFW_MOD_CONTROL
         if (win.keys[342]) mod |= 0x0004; // GLFW_MOD_ALT
         if (win.keys[343]) mod |= 0x0008; // GLFW_MOD_SUPER
+        // add caps and num lock keys? only if lock_key_mod is set
         return mod;
       },onKeyPress:function(event) {
         if (!GLFW.active || !GLFW.active.charFunc) return;
@@ -27211,6 +27255,10 @@ var ASM_CONSTS = {
         if (!GLFW.active) return;
   
         if (!GLFW.active.framebufferSizeFunc) return;
+  
+      },onWindowContentScaleChanged:function(scale) {
+        GLFW.scale = scale;
+        if (!GLFW.active) return;
   
       },getTime:function() {
         return _emscripten_get_now() / 1000;
@@ -27434,6 +27482,14 @@ var ASM_CONSTS = {
             out("glfwSetInputMode called with GLFW_STICKY_MOUSE_BUTTONS mode not implemented.");
             break;
           }
+          case 0x00033004: { // GLFW_LOCK_KEY_MODS
+            out("glfwSetInputMode called with GLFW_LOCK_KEY_MODS mode not implemented.");
+            break;
+          }
+          case 0x000330005: { // GLFW_RAW_MOUSE_MOTION
+            out("glfwSetInputMode called with GLFW_RAW_MOUSE_MOTION mode not implemented.");
+            break;
+          }
           default: {
             out("glfwSetInputMode called with unknown mode parameter value: " + mode + ".");
             break;
@@ -27646,7 +27702,9 @@ var ASM_CONSTS = {
         this.windowRefreshFunc = null; // GLFWwindowrefreshfun
         this.windowFocusFunc = null; // GLFWwindowfocusfun
         this.windowIconifyFunc = null; // GLFWwindowiconifyfun
+        this.windowMaximizeFunc = null; // GLFWwindowmaximizefun
         this.framebufferSizeFunc = null; // GLFWframebuffersizefun
+        this.windowContentScaleFunc = null; // GLFWwindowcontentscalefun
         this.mouseButtonFunc = null; // GLFWmousebuttonfun
         this.cursorPosFunc = null; // GLFWcursorposfun
         this.cursorEnterFunc = null; // GLFWcursorenterfun
@@ -27658,6 +27716,7 @@ var ASM_CONSTS = {
       }
 
 
+  
   function _glfwInit() {
       if (GLFW.windows) return 1; // GL_TRUE
   
@@ -27665,6 +27724,7 @@ var ASM_CONSTS = {
       GLFW.hints = GLFW.defaultHints;
       GLFW.windows = new Array()
       GLFW.active = null;
+      GLFW.scale  = _emscripten_get_device_pixel_ratio();
   
       window.addEventListener("gamepadconnected", GLFW.onGamepadConnected, true);
       window.addEventListener("gamepaddisconnected", GLFW.onGamepadDisconnected, true);
@@ -27672,6 +27732,13 @@ var ASM_CONSTS = {
       window.addEventListener("keypress", GLFW.onKeyPress, true);
       window.addEventListener("keyup", GLFW.onKeyup, true);
       window.addEventListener("blur", GLFW.onBlur, true);
+      // from https://stackoverflow.com/a/70514686/7484780 . maybe add this to browser.js?
+      // no idea how to remove this listener.
+      (function updatePixelRatio(){
+        window.matchMedia("(resolution: " + window.devicePixelRatio + "dppx)")
+        .addEventListener('change', updatePixelRatio, {once: true});
+        GLFW.onWindowContentScaleChanged(_emscripten_get_device_pixel_ratio());
+        })();
       Module["canvas"].addEventListener("touchmove", GLFW.onMousemove, true);
       Module["canvas"].addEventListener("touchstart", GLFW.onMouseButtonDown, true);
       Module["canvas"].addEventListener("touchcancel", GLFW.onMouseButtonUp, true);
@@ -30826,16 +30893,6 @@ var _emscripten_stack_get_current = function() {
 };
 
 /** @type {function(...*):?} */
-var _tzset = Module["_tzset"] = createExportWrapper("tzset");
-/** @type {function(...*):?} */
-var _pthread_mutex_lock = Module["_pthread_mutex_lock"] = createExportWrapper("pthread_mutex_lock");
-/** @type {function(...*):?} */
-var _pthread_mutex_unlock = Module["_pthread_mutex_unlock"] = createExportWrapper("pthread_mutex_unlock");
-/** @type {function(...*):?} */
-var _timegm = Module["_timegm"] = createExportWrapper("timegm");
-/** @type {function(...*):?} */
-var _mktime = Module["_mktime"] = createExportWrapper("mktime");
-/** @type {function(...*):?} */
 var ___clock = Module["___clock"] = createExportWrapper("__clock");
 /** @type {function(...*):?} */
 var ___time = Module["___time"] = createExportWrapper("__time");
@@ -30845,8 +30902,6 @@ var ___clock_getres = Module["___clock_getres"] = createExportWrapper("__clock_g
 var ___gettimeofday = Module["___gettimeofday"] = createExportWrapper("__gettimeofday");
 /** @type {function(...*):?} */
 var _dysize = Module["_dysize"] = createExportWrapper("dysize");
-/** @type {function(...*):?} */
-var _gmtime_r = Module["_gmtime_r"] = createExportWrapper("gmtime_r");
 /** @type {function(...*):?} */
 var _time = Module["_time"] = createExportWrapper("time");
 /** @type {function(...*):?} */
@@ -31834,8 +31889,6 @@ var _pthread_attr_init = Module["_pthread_attr_init"] = createExportWrapper("pth
 /** @type {function(...*):?} */
 var _pthread_getattr_np = Module["_pthread_getattr_np"] = createExportWrapper("pthread_getattr_np");
 /** @type {function(...*):?} */
-var _pthread_attr_destroy = Module["_pthread_attr_destroy"] = createExportWrapper("pthread_attr_destroy");
-/** @type {function(...*):?} */
 var _pthread_setcanceltype = Module["_pthread_setcanceltype"] = createExportWrapper("pthread_setcanceltype");
 /** @type {function(...*):?} */
 var _pthread_rwlock_init = Module["_pthread_rwlock_init"] = createExportWrapper("pthread_rwlock_init");
@@ -31872,12 +31925,6 @@ var _pthread_spin_trylock = Module["_pthread_spin_trylock"] = createExportWrappe
 /** @type {function(...*):?} */
 var _pthread_spin_unlock = Module["_pthread_spin_unlock"] = createExportWrapper("pthread_spin_unlock");
 /** @type {function(...*):?} */
-var _pthread_attr_setdetachstate = Module["_pthread_attr_setdetachstate"] = createExportWrapper("pthread_attr_setdetachstate");
-/** @type {function(...*):?} */
-var _pthread_attr_setschedparam = Module["_pthread_attr_setschedparam"] = createExportWrapper("pthread_attr_setschedparam");
-/** @type {function(...*):?} */
-var _pthread_attr_setstacksize = Module["_pthread_attr_setstacksize"] = createExportWrapper("pthread_attr_setstacksize");
-/** @type {function(...*):?} */
 var _sem_init = Module["_sem_init"] = createExportWrapper("sem_init");
 /** @type {function(...*):?} */
 var _sem_post = Module["_sem_post"] = createExportWrapper("sem_post");
@@ -31887,6 +31934,10 @@ var _sem_wait = Module["_sem_wait"] = createExportWrapper("sem_wait");
 var _sem_trywait = Module["_sem_trywait"] = createExportWrapper("sem_trywait");
 /** @type {function(...*):?} */
 var _sem_destroy = Module["_sem_destroy"] = createExportWrapper("sem_destroy");
+/** @type {function(...*):?} */
+var _pthread_mutex_lock = Module["_pthread_mutex_lock"] = createExportWrapper("pthread_mutex_lock");
+/** @type {function(...*):?} */
+var _pthread_mutex_unlock = Module["_pthread_mutex_unlock"] = createExportWrapper("pthread_mutex_unlock");
 /** @type {function(...*):?} */
 var _pthread_mutex_trylock = Module["_pthread_mutex_trylock"] = createExportWrapper("pthread_mutex_trylock");
 /** @type {function(...*):?} */
@@ -32059,6 +32110,14 @@ var _mkstemps = Module["_mkstemps"] = createExportWrapper("mkstemps");
 var _mkstemps64 = Module["_mkstemps64"] = createExportWrapper("mkstemps64");
 /** @type {function(...*):?} */
 var _mktemp = Module["_mktemp"] = createExportWrapper("mktemp");
+/** @type {function(...*):?} */
+var _timegm = Module["_timegm"] = createExportWrapper("timegm");
+/** @type {function(...*):?} */
+var _tzset = Module["_tzset"] = createExportWrapper("tzset");
+/** @type {function(...*):?} */
+var _mktime = Module["_mktime"] = createExportWrapper("mktime");
+/** @type {function(...*):?} */
+var _gmtime_r = Module["_gmtime_r"] = createExportWrapper("gmtime_r");
 /** @type {function(...*):?} */
 var _mlock = Module["_mlock"] = createExportWrapper("mlock");
 /** @type {function(...*):?} */
@@ -32284,6 +32343,8 @@ var _emscripten_proxy_sync_with_ctx = Module["_emscripten_proxy_sync_with_ctx"] 
 /** @type {function(...*):?} */
 var _pselect = Module["_pselect"] = createExportWrapper("pselect");
 /** @type {function(...*):?} */
+var _pthread_attr_destroy = Module["_pthread_attr_destroy"] = createExportWrapper("pthread_attr_destroy");
+/** @type {function(...*):?} */
 var _pthread_attr_getdetachstate = Module["_pthread_attr_getdetachstate"] = createExportWrapper("pthread_attr_getdetachstate");
 /** @type {function(...*):?} */
 var _pthread_attr_getguardsize = Module["_pthread_attr_getguardsize"] = createExportWrapper("pthread_attr_getguardsize");
@@ -32316,15 +32377,44 @@ var _pthread_mutexattr_gettype = Module["_pthread_mutexattr_gettype"] = createEx
 /** @type {function(...*):?} */
 var _pthread_rwlockattr_getpshared = Module["_pthread_rwlockattr_getpshared"] = createExportWrapper("pthread_rwlockattr_getpshared");
 /** @type {function(...*):?} */
+var _pthread_attr_setdetachstate = Module["_pthread_attr_setdetachstate"] = createExportWrapper("pthread_attr_setdetachstate");
+/** @type {function(...*):?} */
+var _pthread_attr_setguardsize = Module["_pthread_attr_setguardsize"] = createExportWrapper("pthread_attr_setguardsize");
+/** @type {function(...*):?} */
+var _pthread_attr_setinheritsched = Module["_pthread_attr_setinheritsched"] = createExportWrapper("pthread_attr_setinheritsched");
+/** @type {function(...*):?} */
+var _pthread_attr_setschedparam = Module["_pthread_attr_setschedparam"] = createExportWrapper("pthread_attr_setschedparam");
+/** @type {function(...*):?} */
+var _pthread_attr_setschedpolicy = Module["_pthread_attr_setschedpolicy"] = createExportWrapper("pthread_attr_setschedpolicy");
+/** @type {function(...*):?} */
+var _pthread_attr_setscope = Module["_pthread_attr_setscope"] = createExportWrapper("pthread_attr_setscope");
+/** @type {function(...*):?} */
+var _pthread_attr_setstack = Module["_pthread_attr_setstack"] = createExportWrapper("pthread_attr_setstack");
+/** @type {function(...*):?} */
+var _pthread_attr_setstacksize = Module["_pthread_attr_setstacksize"] = createExportWrapper("pthread_attr_setstacksize");
+/** @type {function(...*):?} */
 var __pthread_cleanup_push = Module["__pthread_cleanup_push"] = createExportWrapper("_pthread_cleanup_push");
 /** @type {function(...*):?} */
 var __pthread_cleanup_pop = Module["__pthread_cleanup_pop"] = createExportWrapper("_pthread_cleanup_pop");
 /** @type {function(...*):?} */
-var _pthread_self = Module["_pthread_self"] = createExportWrapper("pthread_self");
+var _pthread_getconcurrency = Module["_pthread_getconcurrency"] = createExportWrapper("pthread_getconcurrency");
+/** @type {function(...*):?} */
+var _pthread_getcpuclockid = Module["_pthread_getcpuclockid"] = createExportWrapper("pthread_getcpuclockid");
+/** @type {function(...*):?} */
+var _pthread_getschedparam = Module["_pthread_getschedparam"] = createExportWrapper("pthread_getschedparam");
+/** @type {function(...*):?} */
+var _pthread_self = Module["_pthread_self"] = function() {
+  return (_pthread_self = Module["_pthread_self"] = Module["asm"]["pthread_self"]).apply(null, arguments);
+};
+
 /** @type {function(...*):?} */
 var _thrd_current = Module["_thrd_current"] = createExportWrapper("thrd_current");
 /** @type {function(...*):?} */
-var _emscripten_main_browser_thread_id = Module["_emscripten_main_browser_thread_id"] = createExportWrapper("emscripten_main_browser_thread_id");
+var _emscripten_main_runtime_thread_id = Module["_emscripten_main_runtime_thread_id"] = createExportWrapper("emscripten_main_runtime_thread_id");
+/** @type {function(...*):?} */
+var _pthread_setconcurrency = Module["_pthread_setconcurrency"] = createExportWrapper("pthread_setconcurrency");
+/** @type {function(...*):?} */
+var _pthread_setschedprio = Module["_pthread_setschedprio"] = createExportWrapper("pthread_setschedprio");
 /** @type {function(...*):?} */
 var ___sig_is_blocked = Module["___sig_is_blocked"] = createExportWrapper("__sig_is_blocked");
 /** @type {function(...*):?} */
@@ -43106,10 +43196,6 @@ var _orig$emscripten_atomic_or_u64 = Module["_orig$emscripten_atomic_or_u64"] = 
 /** @type {function(...*):?} */
 var _orig$emscripten_atomic_xor_u64 = Module["_orig$emscripten_atomic_xor_u64"] = createExportWrapper("orig$emscripten_atomic_xor_u64");
 /** @type {function(...*):?} */
-var _orig$timegm = Module["_orig$timegm"] = createExportWrapper("orig$timegm");
-/** @type {function(...*):?} */
-var _orig$mktime = Module["_orig$mktime"] = createExportWrapper("orig$mktime");
-/** @type {function(...*):?} */
 var _orig$__time = Module["_orig$__time"] = createExportWrapper("orig$__time");
 /** @type {function(...*):?} */
 var _orig$time = Module["_orig$time"] = createExportWrapper("orig$time");
@@ -43223,6 +43309,10 @@ var _orig$lroundl = Module["_orig$lroundl"] = createExportWrapper("orig$lroundl"
 var _orig$lseek = Module["_orig$lseek"] = createExportWrapper("orig$lseek");
 /** @type {function(...*):?} */
 var _orig$lseek64 = Module["_orig$lseek64"] = createExportWrapper("orig$lseek64");
+/** @type {function(...*):?} */
+var _orig$timegm = Module["_orig$timegm"] = createExportWrapper("orig$timegm");
+/** @type {function(...*):?} */
+var _orig$mktime = Module["_orig$mktime"] = createExportWrapper("orig$mktime");
 /** @type {function(...*):?} */
 var _orig$mmap = Module["_orig$mmap"] = createExportWrapper("orig$mmap");
 /** @type {function(...*):?} */
@@ -43797,31 +43887,31 @@ var ___environ = Module['___environ'] = 380160;
 var ____environ = Module['____environ'] = 380160;
 var __environ = Module['__environ'] = 380160;
 var _environ = Module['_environ'] = 380160;
-var _tzname = Module['_tzname'] = 380672;
-var _daylight = Module['_daylight'] = 380668;
-var _timezone = Module['_timezone'] = 380664;
-var ___progname = Module['___progname'] = 381920;
-var ___optreset = Module['___optreset'] = 380884;
+var _timezone = Module['_timezone'] = 380680;
+var _daylight = Module['_daylight'] = 380684;
+var _tzname = Module['_tzname'] = 380688;
+var ___progname = Module['___progname'] = 381904;
+var ___optreset = Module['___optreset'] = 380868;
 var _optind = Module['_optind'] = 362104;
-var ___optpos = Module['___optpos'] = 380888;
-var _optarg = Module['_optarg'] = 380892;
-var _optopt = Module['_optopt'] = 380896;
+var ___optpos = Module['___optpos'] = 380872;
+var _optarg = Module['_optarg'] = 380876;
+var _optopt = Module['_optopt'] = 380880;
 var _opterr = Module['_opterr'] = 362108;
-var _optreset = Module['_optreset'] = 380884;
-var _h_errno = Module['_h_errno'] = 381020;
+var _optreset = Module['_optreset'] = 380868;
+var _h_errno = Module['_h_errno'] = 381004;
 var ___signgam = Module['___signgam'] = 396300;
 var __ns_flagdata = Module['__ns_flagdata'] = 206928;
-var ___progname_full = Module['___progname_full'] = 381924;
-var _program_invocation_short_name = Module['_program_invocation_short_name'] = 381920;
-var _program_invocation_name = Module['_program_invocation_name'] = 381924;
-var ___sig_pending = Module['___sig_pending'] = 386280;
+var ___progname_full = Module['___progname_full'] = 381908;
+var _program_invocation_short_name = Module['_program_invocation_short_name'] = 381904;
+var _program_invocation_name = Module['_program_invocation_name'] = 381908;
+var ___sig_pending = Module['___sig_pending'] = 386276;
 var ___sig_actions = Module['___sig_actions'] = 387200;
 var _signgam = Module['_signgam'] = 396300;
 var _stderr = Module['_stderr'] = 362568;
 var _stdin = Module['_stdin'] = 362720;
 var _stdout = Module['_stdout'] = 362872;
-var ___THREW__ = Module['___THREW__'] = 403104;
-var ___threwValue = Module['___threwValue'] = 403108;
+var ___THREW__ = Module['___THREW__'] = 403136;
+var ___threwValue = Module['___threwValue'] = 403140;
 var __ZTVSt12bad_any_cast = Module['__ZTVSt12bad_any_cast'] = 363044;
 var __ZTISt12bad_any_cast = Module['__ZTISt12bad_any_cast'] = 363064;
 var __ZTSSt12bad_any_cast = Module['__ZTSSt12bad_any_cast'] = 226144;

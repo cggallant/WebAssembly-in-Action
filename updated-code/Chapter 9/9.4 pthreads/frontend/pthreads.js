@@ -76,23 +76,8 @@ var read_,
     readBinary,
     setWindowTitle;
 
-// Normally we don't log exceptions but instead let them bubble out the top
-// level where the embedding environment (e.g. the browser) can handle
-// them.
-// However under v8 and node we sometimes exit the process direcly in which case
-// its up to use us to log the exception before exiting.
-// If we fix https://github.com/emscripten-core/emscripten/issues/15080
-// this may no longer be needed under node.
-function logExceptionOnExit(e) {
-  if (e instanceof ExitStatus) return;
-  let toLog = e;
-  if (e && typeof e == 'object' && e.stack) {
-    toLog = [e, e.stack];
-  }
-  err('exiting due to exception: ' + toLog);
-}
-
 if (ENVIRONMENT_IS_NODE) {
+
   // `require()` is no-op in an ESM module, use `createRequire()` to construct
   // the require()` function.  This is only necessary for multi-environment
   // builds, `-sENVIRONMENT=node` emits a static import declaration instead.
@@ -146,7 +131,7 @@ readAsync = (filename, onload, onerror) => {
 
   process.on('uncaughtException', function(ex) {
     // suppress ExitStatus exceptions from showing an error
-    if (!(ex instanceof ExitStatus)) {
+    if (ex !== 'unwind' && !(ex instanceof ExitStatus) && !(ex.context instanceof ExitStatus)) {
       throw ex;
     }
   });
@@ -162,12 +147,8 @@ readAsync = (filename, onload, onerror) => {
   }
 
   quit_ = (status, toThrow) => {
-    if (keepRuntimeAlive()) {
-      process.exitCode = status;
-      throw toThrow;
-    }
-    logExceptionOnExit(toThrow);
-    process.exit(status);
+    process.exitCode = status;
+    throw toThrow;
   };
 
   Module['inspect'] = function () { return '[Emscripten Module object]'; };
@@ -622,8 +603,10 @@ var __ATPOSTRUN__ = []; // functions called after the main() is called
 
 var runtimeInitialized = false;
 
+var runtimeKeepaliveCounter = 0;
+
 function keepRuntimeAlive() {
-  return noExitRuntime;
+  return noExitRuntime || runtimeKeepaliveCounter > 0;
 }
 
 function preRun() {
@@ -1194,8 +1177,8 @@ var tempI64;
             return;
           }
   
-          if (cmd === 'processProxyingQueue') {
-            executeNotifiedProxyingQueue(d['queue']);
+          if (cmd === 'checkMailbox') {
+            checkMailbox();
           } else if (cmd === 'spawnThread') {
             spawnThread(d);
           } else if (cmd === 'cleanupThread') {
@@ -1340,11 +1323,7 @@ var tempI64;
   if (ENVIRONMENT_IS_PTHREAD)
     return _emscripten_proxy_to_main_thread_js(2, 0, returnCode);
   
-      try {
-        _exit(returnCode);
-      } catch (e) {
-        handleException(e);
-      }
+      _exit(returnCode);
     
   }
   
@@ -1382,6 +1361,7 @@ var tempI64;
       return func;
     }
   function invokeEntryPoint(ptr, arg) {
+  
       // pthread entry points are always of signature 'void *ThreadMain(void *arg)'
       // Native codebases sometimes spawn threads with other thread entry point
       // signatures, such as void ThreadMain(void *arg), void *ThreadMain(), or
@@ -1614,41 +1594,77 @@ var tempI64;
       return nowIsMonotonic;
     }
 
-  function executeNotifiedProxyingQueue(queue) {
-      // Set the notification state to processing.
-      Atomics.store(HEAP32, queue >> 2, 1);
-      // Only execute the queue if we have a live pthread runtime. We
-      // implement pthread_self to return 0 if there is no live runtime.
-      // TODO: Use `callUserCallback` to correctly handle unwinds, etc. once
-      //       `runtimeExited` is correctly unset on workers.
-      if (_pthread_self()) {
-        __emscripten_proxy_execute_task_queue(queue);
-      }
-      // Set the notification state to none as long as a new notification has not
-      // been sent while we were processing.
-      Atomics.compareExchange(HEAP32, queue >> 2,
-                              1,
-                              0);
-    }
-  Module["executeNotifiedProxyingQueue"] = executeNotifiedProxyingQueue;
   
-  function __emscripten_notify_task_queue(targetThreadId, currThreadId, mainThreadId, queue) {
+  
+  
+  function maybeExit() {
+      if (!keepRuntimeAlive()) {
+        try {
+          if (ENVIRONMENT_IS_PTHREAD) __emscripten_thread_exit(EXITSTATUS);
+          else
+          _exit(EXITSTATUS);
+        } catch (e) {
+          handleException(e);
+        }
+      }
+    }
+  function callUserCallback(func) {
+      if (ABORT) {
+        return;
+      }
+      try {
+        func();
+        maybeExit();
+      } catch (e) {
+        handleException(e);
+      }
+    }
+  
+  
+  function __emscripten_thread_mailbox_await(pthread_ptr) {
+      if (typeof Atomics.waitAsync === 'function') {
+        // TODO: How to make this work with wasm64?
+        var wait = Atomics.waitAsync(HEAP32, pthread_ptr >> 2, pthread_ptr);
+        wait.value.then(checkMailbox);
+        var waitingAsync = pthread_ptr + 128;
+        Atomics.store(HEAP32, waitingAsync >> 2, 1);
+      }
+    }
+  Module["__emscripten_thread_mailbox_await"] = __emscripten_thread_mailbox_await;
+  
+  function checkMailbox() {
+      // Only check the mailbox if we have a live pthread runtime. We implement
+      // pthread_self to return 0 if there is no live runtime.
+      var pthread_ptr = _pthread_self();
+      if (pthread_ptr) {
+        // If we are using Atomics.waitAsync as our notification mechanism, wait for
+        // a notification before processing the mailbox to avoid missing any work.
+        __emscripten_thread_mailbox_await(pthread_ptr);
+        callUserCallback(() => __emscripten_check_mailbox());
+      }
+    }
+  Module["checkMailbox"] = checkMailbox;
+  
+  function __emscripten_notify_mailbox_postmessage(targetThreadId,
+                                                     currThreadId,
+                                                     mainThreadId) {
       if (targetThreadId == currThreadId) {
-        setTimeout(() => executeNotifiedProxyingQueue(queue));
+        setTimeout(() => checkMailbox());
       } else if (ENVIRONMENT_IS_PTHREAD) {
-        postMessage({'targetThread' : targetThreadId, 'cmd' : 'processProxyingQueue', 'queue' : queue});
+        postMessage({'targetThread' : targetThreadId, 'cmd' : 'checkMailbox'});
       } else {
         var worker = PThread.pthreads[targetThreadId];
         if (!worker) {
-          return /*0*/;
+          return;
         }
-        worker.postMessage({'cmd' : 'processProxyingQueue', 'queue': queue});
+        worker.postMessage({'cmd' : 'checkMailbox'});
       }
     }
 
   function __emscripten_set_offscreencanvas_size(target, width, height) {
       return -1;
     }
+
 
   function _abort() {
       abort('');
@@ -1664,16 +1680,18 @@ var tempI64;
     }
   
   function _emscripten_check_blocking_allowed() {
-      if (ENVIRONMENT_IS_NODE) return;
-  
-      if (ENVIRONMENT_IS_WORKER) return; // Blocking in a worker/pthread is fine.
-  
-      warnOnce('Blocking on the main thread is very dangerous, see https://emscripten.org/docs/porting/pthreads.html#blocking-on-the-main-browser-thread');
-  
     }
 
   function _emscripten_date_now() {
       return Date.now();
+    }
+
+  function runtimeKeepalivePush() {
+      runtimeKeepaliveCounter += 1;
+    }
+  function _emscripten_exit_with_live_runtime() {
+      runtimeKeepalivePush();
+      throw 'unwind';
     }
 
   var _emscripten_get_now;if (ENVIRONMENT_IS_NODE) {
@@ -1749,10 +1767,6 @@ var tempI64;
       var oldSize = HEAPU8.length;
       requestedSize = requestedSize >>> 0;
       abortOnCannotGrowMemory(requestedSize);
-    }
-
-  function _emscripten_unwind_to_js_event_loop() {
-      throw 'unwind';
     }
 
 
@@ -1838,16 +1852,17 @@ var wasmImports = {
   "__pthread_create_js": ___pthread_create_js,
   "_emscripten_default_pthread_stack_size": __emscripten_default_pthread_stack_size,
   "_emscripten_get_now_is_monotonic": __emscripten_get_now_is_monotonic,
-  "_emscripten_notify_task_queue": __emscripten_notify_task_queue,
+  "_emscripten_notify_mailbox_postmessage": __emscripten_notify_mailbox_postmessage,
   "_emscripten_set_offscreencanvas_size": __emscripten_set_offscreencanvas_size,
+  "_emscripten_thread_mailbox_await": __emscripten_thread_mailbox_await,
   "abort": _abort,
   "emscripten_check_blocking_allowed": _emscripten_check_blocking_allowed,
   "emscripten_date_now": _emscripten_date_now,
+  "emscripten_exit_with_live_runtime": _emscripten_exit_with_live_runtime,
   "emscripten_get_now": _emscripten_get_now,
   "emscripten_memcpy_big": _emscripten_memcpy_big,
   "emscripten_receive_on_main_thread_js": _emscripten_receive_on_main_thread_js,
   "emscripten_resize_heap": _emscripten_resize_heap,
-  "emscripten_unwind_to_js_event_loop": _emscripten_unwind_to_js_event_loop,
   "exit": _exit,
   "fd_close": _fd_close,
   "fd_seek": _fd_seek,
@@ -1891,8 +1906,8 @@ var __emscripten_thread_crashed = Module["__emscripten_thread_crashed"] = functi
 };
 
 /** @type {function(...*):?} */
-var _emscripten_main_browser_thread_id = function() {
-  return (_emscripten_main_browser_thread_id = Module["asm"]["emscripten_main_browser_thread_id"]).apply(null, arguments);
+var _emscripten_main_runtime_thread_id = function() {
+  return (_emscripten_main_runtime_thread_id = Module["asm"]["emscripten_main_runtime_thread_id"]).apply(null, arguments);
 };
 
 /** @type {function(...*):?} */
@@ -1911,11 +1926,6 @@ var _emscripten_dispatch_to_thread_ = function() {
 };
 
 /** @type {function(...*):?} */
-var __emscripten_proxy_execute_task_queue = Module["__emscripten_proxy_execute_task_queue"] = function() {
-  return (__emscripten_proxy_execute_task_queue = Module["__emscripten_proxy_execute_task_queue"] = Module["asm"]["_emscripten_proxy_execute_task_queue"]).apply(null, arguments);
-};
-
-/** @type {function(...*):?} */
 var __emscripten_thread_free_data = function() {
   return (__emscripten_thread_free_data = Module["asm"]["_emscripten_thread_free_data"]).apply(null, arguments);
 };
@@ -1923,6 +1933,11 @@ var __emscripten_thread_free_data = function() {
 /** @type {function(...*):?} */
 var __emscripten_thread_exit = Module["__emscripten_thread_exit"] = function() {
   return (__emscripten_thread_exit = Module["__emscripten_thread_exit"] = Module["asm"]["_emscripten_thread_exit"]).apply(null, arguments);
+};
+
+/** @type {function(...*):?} */
+var __emscripten_check_mailbox = Module["__emscripten_check_mailbox"] = function() {
+  return (__emscripten_check_mailbox = Module["__emscripten_check_mailbox"] = Module["asm"]["_emscripten_check_mailbox"]).apply(null, arguments);
 };
 
 /** @type {function(...*):?} */
