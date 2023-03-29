@@ -92,6 +92,24 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
   <img src="https://1.bp.blogspot.com/-GHXr6BPRJFs/YKGzn1mwKgI/AAAAAAAALoY/XGM-2qnArIUdk54EkIw795ImZOMKQSEWgCLcBGAsYHQ/s320/1.%2BOverall%2Bbut%2Bno%2Bannotations.png" width="350" align="center" />
 
 
+- "[WebAssembly Fixed-Width SIMD from C#](https://cggallant.blogspot.com/2023/03/safari-164-and-webassembly-fixed-width.html)"
+
+  On Monday, March 27th, 2023, Safari 16.4 was released and with it came support for WebAssembly's fixed-width SIMD feature! With this update, all modern browsers now support this feature.
+
+  I wrote an article that walks you through creating an Uno Platform application and how to work with vectors to leverage SIMD in C#. The article also explains how to compile your application ahead-of-time (AOT) with SIMD support.
+
+  <p align="center">
+    <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEiChYPQATCnlD6cV4hcdpRPGTcL_bsTojJUHQAgflXpp0R35NKKWD1adyFjKfLbml0fl9bXJ1bNPA4JvS7XuoQ8W0k-s5jOjliuuC2d5SeaS0pRw0pPxgqU7_EA8mFMkMi8L-UoqhMP5IBfPBn98GkpLc1EtXsErGdKRsMPa0leoUCEjLfPTFUi6Kpv/s1600/1.%20SISD%20vs%20SIMD.png"/>
+    A visual representation comparing data being processed
+    one element at a time with normal arithmetic (Single
+    Instruction, Single Data) versus four at a time, in
+    this case, with SIMD
+  </p>
+
+  I also wrote a short blog post to go with it that has a link to the Uno Platform article. The blog post includes information on how to do the same thing in Blazor WebAssembly and includes a link to a GitHub repo of the Blazor code.
+
+  
+
 <p>&nbsp;</p>
 <p>&nbsp;</p>
 
