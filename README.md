@@ -98,8 +98,8 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
 
   I wrote an article that walks you through creating an Uno Platform application and how to work with vectors to leverage SIMD in C#. The article also explains how to compile your application ahead-of-time (AOT) with SIMD support.
 
+  <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEiChYPQATCnlD6cV4hcdpRPGTcL_bsTojJUHQAgflXpp0R35NKKWD1adyFjKfLbml0fl9bXJ1bNPA4JvS7XuoQ8W0k-s5jOjliuuC2d5SeaS0pRw0pPxgqU7_EA8mFMkMi8L-UoqhMP5IBfPBn98GkpLc1EtXsErGdKRsMPa0leoUCEjLfPTFUi6Kpv/s1600/1.%20SISD%20vs%20SIMD.png" align="center"/>
   <p align="center">
-    <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEiChYPQATCnlD6cV4hcdpRPGTcL_bsTojJUHQAgflXpp0R35NKKWD1adyFjKfLbml0fl9bXJ1bNPA4JvS7XuoQ8W0k-s5jOjliuuC2d5SeaS0pRw0pPxgqU7_EA8mFMkMi8L-UoqhMP5IBfPBn98GkpLc1EtXsErGdKRsMPa0leoUCEjLfPTFUi6Kpv/s1600/1.%20SISD%20vs%20SIMD.png"/>
     A visual representation comparing data being processed
     one element at a time with normal arithmetic (Single
     Instruction, Single Data) versus four at a time, in
