@@ -129,7 +129,7 @@ Many people buy books based on referrals or recommendations of those they trust.
 Don't yet have your own copy of the book? You can buy it from many book sellers including:
 - Directly from Manning Publications _(recommended)_: [https://www.manning.com/books/webassembly-in-action](https://www.manning.com/books/webassembly-in-action)
 - Amazon: [https://www.amazon.com/WebAssembly-Action-Gerard-Gallant/dp/1617295744/](https://www.amazon.com/WebAssembly-Action-Gerard-Gallant/dp/1617295744/)
-- Abebooks: [https://www.abebooks.com/servlet/BookDetailsPL?bi=30618231105&searchurl=kn%3Dwebassembly%2Bin%2Baction](https://www.abebooks.com/servlet/BookDetailsPL?bi=30618231105&searchurl=kn%3Dwebassembly%2Bin%2Baction)
+- Abebooks: [https://www.abebooks.com/servlet/BookDetailsPL?bi=31002021824](https://www.abebooks.com/servlet/BookDetailsPL?bi=31002021824)
 - Barns & Noble: [https://www.barnesandnoble.com/w/webassembly-in-action-gerard-gallant/1131337158](https://www.barnesandnoble.com/w/webassembly-in-action-gerard-gallant/1131337158)
 
 
