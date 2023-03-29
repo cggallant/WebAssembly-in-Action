@@ -102,10 +102,10 @@ If you're interested, I’ve written several articles exploring WebAssembly use 
   <div align="center">
     <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEiChYPQATCnlD6cV4hcdpRPGTcL_bsTojJUHQAgflXpp0R35NKKWD1adyFjKfLbml0fl9bXJ1bNPA4JvS7XuoQ8W0k-s5jOjliuuC2d5SeaS0pRw0pPxgqU7_EA8mFMkMi8L-UoqhMP5IBfPBn98GkpLc1EtXsErGdKRsMPa0leoUCEjLfPTFUi6Kpv/s372/1.%20SISD%20vs%20SIMD.png" width="375" />
 
-    A visual representation comparing data being processed
-    one element at a time with normal arithmetic (Single
-    Instruction, Single Data) versus four at a time, in
-    this case, with SIMD
+    <div>A visual representation comparing data being processed</div>
+    <div>one element at a time with normal arithmetic (Single</div>
+    <div>Instruction, Single Data) versus four at a time, in</div>
+    <div>this case, with SIMD</div>
   </div>
   
   
