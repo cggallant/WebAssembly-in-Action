@@ -29,7 +29,7 @@ extern "C" { // So that the C++ compiler does not rename our function names
 #endif
   void free_buffer(const char* pointer)
   {
-    delete pointer;
+    delete[] pointer;
   }
 
   int ValidateValueProvided(const char* value)
